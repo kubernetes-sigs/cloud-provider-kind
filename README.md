@@ -1,16 +1,9 @@
 # Kubernetes Template Project
 
-The Kubernetes Template Project is a template for starting new projects in the GitHub organizations owned by Kubernetes. All Kubernetes projects, at minimum, must have the following files:
+KIND has demonstrated to be a very versatile, efficient, cheap and very useful tool for Kubernetes testing.
+However, KIND doesn't offer capabilities for testing all the features that depend on cloud-providers, causing a gap on testing.
 
-- a `README.md` outlining the project goals, sponsoring sig, and community contact information
-- an `OWNERS` with the project leads listed as approvers ([docs on `OWNERS` files][owners])
-- a `CONTRIBUTING.md` outlining how to contribute to the project
-- an unmodified copy of `code-of-conduct.md` from this repo, which outlines community behavior and the consequences of breaking the code
-- a `LICENSE` which must be Apache 2.0 for code projects, or [Creative Commons 4.0] for documentation repositories, without any custom content
-- a `SECURITY_CONTACTS` with the contact points for the Product Security Team 
-  to reach out to for triaging and handling of incoming issues. They must agree to abide by the
-  [Embargo Policy](https://git.k8s.io/security/private-distributors-list.md#embargo-policy)
-  and will be removed and replaced if they violate that agreement.
+cloud-provider-kind aim to fill this gap and provide an agnostic and cheap solution for all the Kubernetes features that depend on a cloud-provider using KIND
 
 ## Community, discussion, contribution, and support
 
@@ -18,8 +11,8 @@ Learn how to engage with the Kubernetes community on the [community page](http:/
 
 You can reach the maintainers of this project at:
 
-- [Slack](https://slack.k8s.io/)
-- [Mailing List](https://groups.google.com/a/kubernetes.io/g/dev)
+- [Slack channel](https://kubernetes.slack.com/messages/kind)
+- [Mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-testing)
 
 ### Code of conduct
 
