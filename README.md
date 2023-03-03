@@ -1,4 +1,4 @@
-# Kubernetes Template Project
+# Kubernetes Cloud Provider for KIND
 
 KIND has demonstrated to be a very versatile, efficient, cheap and very useful tool for Kubernetes testing.
 However, KIND doesn't offer capabilities for testing all the features that depend on cloud-providers, causing a gap on testing.
