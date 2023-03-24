@@ -1,0 +1,15 @@
+run:
+  timeout: 30m
+  tests: false # TODO lint tests too
+
+linters:
+  disable-all: true
+  enable:
+    - gocritic
+    - gosimple
+    - govet
+    - errcheck
+    - ineffassign
+    - staticcheck
+    - stylecheck
+    - typecheck
