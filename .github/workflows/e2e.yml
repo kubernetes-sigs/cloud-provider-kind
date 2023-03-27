@@ -1,0 +1,149 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.20.1"
+  K8S_VERSION: "v1.26.0"
+  KIND_VERSION: "v0.17.0"
+  KIND_CLUSTER_NAME: "kind-cloud"
+
+jobs:
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        ipFamily: ["ipv4", "ipv6", "dual"]
+    env:
+      JOB_NAME: "cloud-provider-kind-e2e-${{ matrix.ipFamily }}"
+      IP_FAMILY: ${{ matrix.ipFamily }}
+    steps:
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ env.GO_VERSION }}
+      id: go
+
+    - name: Check out code
+      uses: actions/checkout@v2
+
+    - name: Enable ipv4 and ipv6 forwarding
+      run: |
+        sudo sysctl -w net.ipv6.conf.all.forwarding=1
+        sudo sysctl -w net.ipv4.ip_forward=1
+
+    - name: Set up environment (download dependencies)
+      run: |
+        TMP_DIR=$(mktemp -d)
+        # Test binaries
+        curl -L https://dl.k8s.io/${{ env.K8S_VERSION }}/kubernetes-test-linux-amd64.tar.gz -o ${TMP_DIR}/kubernetes-test-linux-amd64.tar.gz
+        tar xvzf ${TMP_DIR}/kubernetes-test-linux-amd64.tar.gz \
+          --directory ${TMP_DIR} \
+          --strip-components=3 kubernetes/test/bin/ginkgo kubernetes/test/bin/e2e.test
+        # kubectl
+        curl -L https://dl.k8s.io/${{ env.K8S_VERSION }}/bin/linux/amd64/kubectl -o ${TMP_DIR}/kubectl
+        # kind
+        curl -Lo ${TMP_DIR}/kind https://kind.sigs.k8s.io/dl/${{ env.KIND_VERSION }}/kind-linux-amd64
+        # Install
+        sudo cp ${TMP_DIR}/ginkgo /usr/local/bin/ginkgo
+        sudo cp ${TMP_DIR}/e2e.test /usr/local/bin/e2e.test
+        sudo cp ${TMP_DIR}/kubectl /usr/local/bin/kubectl
+        sudo cp ${TMP_DIR}/kind /usr/local/bin/kind
+        sudo chmod +x /usr/local/bin/*
+        # Create folder to store artifacts
+        mkdir -p _artifacts
+
+    - name: Create multi node cluster
+      run: |
+        /usr/local/bin/kind create cluster --name ${{ env.KIND_CLUSTER_NAME}} --config kind.yaml
+        /usr/local/bin/kind get kubeconfig --name ${{ env.KIND_CLUSTER_NAME}} > _artifacts/kubeconfig.conf
+
+    - name: Workaround CoreDNS for IPv6 airgapped
+      if: ${{ matrix.ipFamily == 'ipv6' }}
+      run: |
+        # Patch CoreDNS to work in Github CI
+        # 1. Github CI doesn´t offer IPv6 connectivity, so CoreDNS should be configured
+        # to work in an offline environment:
+        # https://github.com/coredns/coredns/issues/2494#issuecomment-457215452
+        # 2. Github CI adds following domains to resolv.conf search field:
+        # .net.
+        # CoreDNS should handle those domains and answer with NXDOMAIN instead of SERVFAIL
+        # otherwise pods stops trying to resolve the domain.
+        # Get the current config
+        original_coredns=$(/usr/local/bin/kubectl get -oyaml -n=kube-system configmap/coredns)
+        echo "Original CoreDNS config:"
+        echo "${original_coredns}"
+        # Patch it
+        fixed_coredns=$(
+          printf '%s' "${original_coredns}" | sed \
+            -e 's/^.*kubernetes cluster\.local/& net/' \
+            -e '/^.*upstream$/d' \
+            -e '/^.*fallthrough.*$/d' \
+            -e '/^.*forward . \/etc\/resolv.conf$/d' \
+            -e '/^.*loop$/d' \
+        )
+        echo "Patched CoreDNS config:"
+        echo "${fixed_coredns}"
+        printf '%s' "${fixed_coredns}" | /usr/local/bin/kubectl apply -f -
+
+    - name: Run cloud-provider-kind
+      run: |
+        make
+        nohup bin/cloud-provider-kind --cloud-provider kind --kubeconfig $PWD/_artifacts/kubeconfig.conf --cluster-name ${KIND_CLUSTER_NAME} --controllers "*" --v 5 --leader-elect=false > ./_artifacts/ccm-kind.log 2>&1 &
+
+    - name: Get Cluster status
+      run: |
+        # wait network is ready
+        /usr/local/bin/kubectl wait --for=condition=ready pods --namespace=kube-system -l k8s-app=kube-dns --timeout=3m
+        /usr/local/bin/kubectl get nodes -o wide
+        /usr/local/bin/kubectl get pods -A
+
+    - name: Run tests
+      run: |
+        export KUBERNETES_CONFORMANCE_TEST='y'
+        export E2E_REPORT_DIR=${PWD}/_artifacts
+
+        # Run tests
+        /usr/local/bin/ginkgo --nodes=25                \
+          --focus="\[Conformance\]|\[sig-network\]"     \
+          --skip="Feature|Federation|PerformanceDNS|DualStack|Disruptive|Serial|KubeProxy|LoadBalancer|GCE|Netpol|NetworkPolicy|256.search.list.characters"   \
+          /usr/local/bin/e2e.test                       \
+          --                                            \
+          --kubeconfig=${PWD}/_artifacts/kubeconfig.conf     \
+          --provider=local                              \
+          --dump-logs-on-failure=false                  \
+          --report-dir=${E2E_REPORT_DIR}                \
+          --disable-log-dump=true
+
+    - name: Upload Junit Reports
+      if: always()
+      uses: actions/upload-artifact@v2
+      with:
+        name: kind-junit-${{ env.JOB_NAME }}-${{ github.run_id }}
+        path: './_artifacts/*.xml'
+
+    - name: Export logs
+      if: always()
+      run: |
+        /usr/local/bin/kind export logs --name ${KIND_CLUSTER_NAME} --loglevel=debug ./_artifacts/logs
+        cp ./_artifacts/ccm-kind.log ./_artifacts/logs
+
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v2
+      with:
+        name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
+        path: ./_artifacts/logs
+
+    - name: Publish Test Report
+      uses: mikepenz/action-junit-report@v2
+      if: always()
+      with:
+        report_paths: './_artifacts/*.xml'
