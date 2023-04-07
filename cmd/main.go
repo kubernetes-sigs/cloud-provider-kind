@@ -52,6 +52,7 @@ func main() {
 			log.Printf("Exiting: received signal")
 			cancel()
 		case <-ctx.Done():
+			// cleanup
 		}
 	}()
 

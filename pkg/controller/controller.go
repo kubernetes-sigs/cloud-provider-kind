@@ -15,6 +15,8 @@ import (
 	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
+	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	"sigs.k8s.io/cloud-provider-kind/pkg/provider"
 	"sigs.k8s.io/kind/pkg/cluster"
 	"sigs.k8s.io/kind/pkg/log"
@@ -45,6 +47,15 @@ func (c *Controller) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// cleanup
+			containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
+			if err != nil {
+				klog.Errorf("can't list containers: %w", err)
+				return
+			}
+			for _, id := range containers {
+				container.Delete(id)
+			}
 			return
 		default:
 		}
@@ -56,7 +67,7 @@ func (c *Controller) Run(ctx context.Context) {
 
 		// add new ones
 		for _, cluster := range clusters {
-			klog.V(2).Infof("processing cluster %s", cluster)
+			klog.V(3).Infof("processing cluster %s", cluster)
 			_, ok := c.clusters[cluster]
 			if ok {
 				klog.V(3).Infof("cluster %s already exist", cluster)

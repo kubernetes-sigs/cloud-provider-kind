@@ -12,6 +12,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
+
+	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
 // proxyImage defines the loadbalancer image:tag
@@ -124,13 +126,13 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 
 	klog.V(2).Infof("updating loadbalancer with config %s", loadbalancerConfig)
 	var stdout, stderr bytes.Buffer
-	err = execContainer(name, []string{"cp", "/dev/stdin", proxyConfigPath}, strings.NewReader(loadbalancerConfig), &stdout, &stderr)
+	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPath}, strings.NewReader(loadbalancerConfig), &stdout, &stderr)
 	if err != nil {
 		return err
 	}
 
 	klog.V(2).Infof("restarting loadbalancer")
-	err = containerSignal(name, "HUP")
+	err = container.Signal(name, "HUP")
 	if err != nil {
 		return err
 	}

@@ -1,15 +1,12 @@
 package provider
 
 import (
+	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 
 	cloudprovider "k8s.io/cloud-provider"
 
 	"sigs.k8s.io/kind/pkg/cluster"
-)
-
-const (
-	ProviderName = "kind"
 )
 
 func New(clusterName string, kindClient *cluster.Provider) cloudprovider.Interface {
@@ -41,7 +38,7 @@ func (c *cloud) Clusters() (cloudprovider.Clusters, bool) {
 
 // ProviderName returns the cloud provider ID.
 func (c *cloud) ProviderName() string {
-	return ProviderName
+	return constants.ProviderName
 }
 
 func (c *cloud) LoadBalancer() (cloudprovider.LoadBalancer, bool) {

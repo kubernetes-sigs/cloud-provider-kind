@@ -9,25 +9,23 @@ import (
 	v1 "k8s.io/api/core/v1"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/kind/pkg/cluster/constants"
+	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
+	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
 type Server struct {
-	cache map[string]bool
 }
 
 var _ cloudprovider.LoadBalancer = &Server{}
 
 func NewServer() cloudprovider.LoadBalancer {
-	return &Server{
-		cache: map[string]bool{},
-	}
+	return &Server{}
 }
 
 func (s *Server) GetLoadBalancer(ctx context.Context, clusterName string, service *v1.Service) (*v1.LoadBalancerStatus, bool, error) {
 	// report status
 	name := loadBalancerName(clusterName, service)
-	ipv4, ipv6, err := containerIPs(name)
+	ipv4, ipv6, err := container.IPs(name)
 	if err != nil {
 		if strings.Contains(err.Error(), "failed to get container details") {
 			return nil, false, nil
@@ -46,7 +44,6 @@ func (s *Server) GetLoadBalancer(ctx context.Context, clusterName string, servic
 	}
 
 	// process IPs
-
 	svcIPv4 := false
 	svcIPv6 := false
 	for _, family := range service.Spec.IPFamilies {
@@ -73,15 +70,15 @@ func (s *Server) GetLoadBalancerName(ctx context.Context, clusterName string, se
 
 func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
 	name := loadBalancerName(clusterName, service)
-	if !containerIsRunning(name) {
-		if containerExist(name) {
-			err := deleteContainer(name)
+	if !container.IsRunning(name) {
+		if container.Exist(name) {
+			err := container.Delete(name)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	if !containerExist(name) {
+	if !container.Exist(name) {
 		klog.V(2).Infof("creating container for loadbalancer")
 		err := createLoadBalancer(clusterName, service, proxyImage)
 		if err != nil {
@@ -113,19 +110,19 @@ func (s *Server) UpdateLoadBalancer(ctx context.Context, clusterName string, ser
 }
 
 func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName string, service *v1.Service) error {
-	return deleteContainer(loadBalancerName(clusterName, service))
+	return container.Delete(loadBalancerName(clusterName, service))
 }
 
 // loadbalancer name = cluster-name + service.namespace + service.name
 func loadBalancerName(clusterName string, service *v1.Service) string {
-	return "kindlb-" + clusterName + "-" + service.Namespace + "-" + service.Name
+	return constants.ContainerPrefix + "-" + clusterName + "-" + service.Namespace + "-" + service.Name
 }
 
 // createLoadBalancer create a docker container with a loadbalancer
 func createLoadBalancer(clusterName string, service *v1.Service, image string) error {
 	name := loadBalancerName(clusterName, service)
 
-	networkName := fixedNetworkName
+	networkName := constants.FixedNetworkName
 	if n := os.Getenv("KIND_EXPERIMENTAL_DOCKER_NETWORK"); n != "" {
 		networkName = n
 	}
@@ -134,8 +131,7 @@ func createLoadBalancer(clusterName string, service *v1.Service, image string) e
 		"--detach", // run the container detached
 		"--tty",    // allocate a tty for entrypoint logs
 		// label the node with the cluster ID
-		"--label", fmt.Sprintf("%s=%s", clusterLabelKey, clusterName),
-		"--label", fmt.Sprintf("%s=%s", nodeRoleLabelKey, constants.ExternalLoadBalancerNodeRoleValue),
+		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, name),
 		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",
@@ -155,7 +151,7 @@ func createLoadBalancer(clusterName string, service *v1.Service, image string) e
 		image,
 	}
 
-	err := createContainer(name, args)
+	err := container.Create(name, args)
 	if err != nil {
 		return fmt.Errorf("failed to create continers %s %v: %w", name, args, err)
 	}
