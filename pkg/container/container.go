@@ -9,22 +9,54 @@ import (
 	kindexec "sigs.k8s.io/kind/pkg/exec"
 )
 
+// TODO we can do it as in KIND
+var containerRuntime = "docker"
+
+// dockerIsAvailable checks if docker is available in the system
+func dockerIsAvailable() bool {
+	cmd := kindexec.Command("docker", "-v")
+	lines, err := kindexec.OutputLines(cmd)
+	if err != nil || len(lines) != 1 {
+		return false
+	}
+	return strings.HasPrefix(lines[0], "Docker version")
+}
+
+func podmanIsAvailable() bool {
+	cmd := kindexec.Command("podman", "-v")
+	lines, err := kindexec.OutputLines(cmd)
+	if err != nil || len(lines) != 1 {
+		return false
+	}
+	return strings.HasPrefix(lines[0], "podman version")
+
+}
+
+func init() {
+	if dockerIsAvailable() {
+		return
+	}
+	if podmanIsAvailable() {
+		containerRuntime = "podman"
+	}
+}
+
 func Create(name string, args []string) error {
-	if err := exec.Command("docker", append([]string{"run", "--name", name}, args...)...).Run(); err != nil {
+	if err := exec.Command(containerRuntime, append([]string{"run", "--name", name}, args...)...).Run(); err != nil {
 		return err
 	}
 	return nil
 }
 
 func Delete(name string) error {
-	if err := exec.Command("docker", []string{"rm", "-f", name}...).Run(); err != nil {
+	if err := exec.Command(containerRuntime, []string{"rm", "-f", name}...).Run(); err != nil {
 		return err
 	}
 	return nil
 }
 
 func IsRunning(name string) bool {
-	cmd := exec.Command("docker", []string{"ps", "-q", "-f", "name=" + name}...)
+	cmd := exec.Command(containerRuntime, []string{"ps", "-q", "-f", "name=" + name}...)
 	output, err := cmd.Output()
 	if err != nil || len(output) == 0 {
 		return false
@@ -33,12 +65,12 @@ func IsRunning(name string) bool {
 }
 
 func Exist(name string) bool {
-	err := exec.Command("docker", []string{"inspect", name}...).Run()
+	err := exec.Command(containerRuntime, []string{"inspect", name}...).Run()
 	return err == nil
 }
 
 func Signal(name string, signal string) error {
-	err := exec.Command("docker", []string{"kill", "-s", signal, name}...).Run()
+	err := exec.Command(containerRuntime, []string{"kill", "-s", signal, name}...).Run()
 	return err
 }
 
@@ -49,7 +81,7 @@ func Exec(name string, command []string, stdin io.Reader, stdout io.Writer, stde
 	}
 	args = append(args, name)
 	args = append(args, command...)
-	cmd := exec.Command("docker", args...)
+	cmd := exec.Command(containerRuntime, args...)
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
@@ -64,7 +96,7 @@ func Exec(name string, command []string, stdin io.Reader, stdout io.Writer, stde
 
 func IPs(name string) (ipv4 string, ipv6 string, err error) {
 	// retrieve the IP address of the node using docker inspect
-	cmd := kindexec.Command("docker", "inspect",
+	cmd := kindexec.Command(containerRuntime, "inspect",
 		"-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}},{{.GlobalIPv6Address}}{{end}}",
 		name, // ... against the "node" container
 	)
@@ -83,7 +115,7 @@ func IPs(name string) (ipv4 string, ipv6 string, err error) {
 }
 
 func ListByLabel(label string) ([]string, error) {
-	cmd := kindexec.Command("docker",
+	cmd := kindexec.Command(containerRuntime,
 		"ps",
 		"-a", // show stopped nodes
 		// filter for nodes with the cluster label
