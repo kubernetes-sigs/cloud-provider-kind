@@ -15,7 +15,7 @@ import (
 )
 
 // proxyImage defines the loadbalancer image:tag
-const proxyImage = "kindest/haproxy:v20221220-7705dd1a"
+const proxyImage = "kindest/haproxy:v20230330-2f738c2"
 
 // proxyConfigPath defines the path to the config file in the image
 const proxyConfigPath = "/usr/local/etc/haproxy/haproxy.cfg"
