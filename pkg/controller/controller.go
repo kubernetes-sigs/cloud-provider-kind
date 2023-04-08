@@ -50,11 +50,13 @@ func (c *Controller) Run(ctx context.Context) {
 			// cleanup
 			containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
 			if err != nil {
-				klog.Errorf("can't list containers: %w", err)
+				klog.Errorf("can't list containers: %v", err)
 				return
 			}
 			for _, id := range containers {
-				container.Delete(id)
+				if err := container.Delete(id); err != nil {
+					klog.Errorf("can't delete container %s: %v", id, err)
+				}
 			}
 			return
 		default:

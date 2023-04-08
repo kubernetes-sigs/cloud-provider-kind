@@ -65,6 +65,9 @@ func main() {
 		v.SetVerbosity(flagV)
 	}
 
-	logs.GlogSetter(strconv.Itoa(flagV))
+	_, err := logs.GlogSetter(strconv.Itoa(flagV))
+	if err != nil {
+		logger.Errorf("error setting klog verbosity to %d : %v", flagV, err)
+	}
 	controller.New(logger).Run(ctx)
 }
