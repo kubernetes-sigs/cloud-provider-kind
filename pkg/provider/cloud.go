@@ -1,42 +1,20 @@
 package provider
 
 import (
-	"io"
-
-	"sigs.k8s.io/cloud-provider-kind/cmd/app"
+	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 
 	cloudprovider "k8s.io/cloud-provider"
 
 	"sigs.k8s.io/kind/pkg/cluster"
-	kindcmd "sigs.k8s.io/kind/pkg/cmd"
-	"sigs.k8s.io/kind/pkg/log"
 )
 
-const (
-	ProviderName = "kind"
-)
-
-func init() {
-	cloudprovider.RegisterCloudProvider(ProviderName, func(config io.Reader) (cloudprovider.Interface, error) {
-		// TODO get this from the flags
-		logger := kindcmd.NewLogger()
-		type verboser interface {
-			SetVerbosity(log.Level)
-		}
-		v, ok := logger.(verboser)
-		if ok {
-			v.SetVerbosity(5)
-		}
-
-		provider := cluster.NewProvider(
-			cluster.ProviderWithLogger(logger),
-		)
-		return &cloud{
-			kindClient:  provider,
-			clusterName: app.ClusterName,
-		}, nil
-	})
+func New(clusterName string, kindClient *cluster.Provider) cloudprovider.Interface {
+	return &cloud{
+		clusterName:  clusterName,
+		kindClient:   kindClient,
+		lbController: loadbalancer.NewServer(),
+	}
 }
 
 var _ cloudprovider.Interface = (*cloud)(nil)
@@ -50,8 +28,7 @@ type cloud struct {
 
 // Initialize passes a Kubernetes clientBuilder interface to the cloud provider
 func (c *cloud) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, stopCh <-chan struct{}) {
-	c.clusterName = app.ClusterName
-	c.lbController = loadbalancer.NewServer()
+	// noop
 }
 
 // Clusters returns the list of clusters.
@@ -61,7 +38,7 @@ func (c *cloud) Clusters() (cloudprovider.Clusters, bool) {
 
 // ProviderName returns the cloud provider ID.
 func (c *cloud) ProviderName() string {
-	return ProviderName
+	return constants.ProviderName
 }
 
 func (c *cloud) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
