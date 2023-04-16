@@ -8,8 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"syscall"
 
-	"golang.org/x/sys/unix"
 	"k8s.io/component-base/logs"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
@@ -45,7 +45,7 @@ func main() {
 		cancel()
 	}()
 
-	signal.Notify(signalCh, os.Interrupt, unix.SIGINT)
+	signal.Notify(signalCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		select {
 		case <-signalCh:
