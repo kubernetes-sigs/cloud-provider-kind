@@ -131,7 +131,7 @@ func createLoadBalancer(clusterName string, service *v1.Service, image string) e
 		"--detach", // run the container detached
 		"--tty",    // allocate a tty for entrypoint logs
 		// label the node with the cluster ID
-		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, name),
+		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
 		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",

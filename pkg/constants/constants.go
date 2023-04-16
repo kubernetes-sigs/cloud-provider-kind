@@ -7,5 +7,5 @@ const (
 	// KIND constants
 	FixedNetworkName = "kind"
 	// NodeCCMLabelKey
-	NodeCCMLabelKey = "io.x-k8s.cloud-provider-kind.role"
+	NodeCCMLabelKey = "io.x-k8s.cloud-provider-kind.cluster"
 )
