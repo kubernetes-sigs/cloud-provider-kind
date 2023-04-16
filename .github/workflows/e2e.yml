@@ -32,8 +32,10 @@ jobs:
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
         sudo sysctl -w net.ipv4.ip_forward=1
 
-    - name: Install test dependencies
-      run: sudo apt-get -y install bats ncat
+    - name: Setup BATS
+      uses: mig4/setup-bats@v1
+      with:
+        bats-version: 1.2.1
 
     - name: Run tests
       run: |
