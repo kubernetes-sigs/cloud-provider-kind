@@ -119,6 +119,8 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
+// TODO: implement leader election to not have 2 providers creating load balancers
+// ref: https://github.com/kubernetes/kubernetes/blob/d97ea0f705847f90740cac3bc3dd8f6a4026d0b5/cmd/kube-scheduler/app/server.go#L211
 func startServiceController(ctx context.Context, clusterName string, kubeClient kubernetes.Interface, cloud cloudprovider.Interface) (*ccm, error) {
 	client := kubeClient.Discovery().RESTClient()
 	// wait for health
