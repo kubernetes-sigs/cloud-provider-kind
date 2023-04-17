@@ -7,6 +7,34 @@ KIND has demonstrated to be a very versatile, efficient, cheap and very useful t
 - [Slack channel](https://kubernetes.slack.com/messages/kind)
 - [Mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-testing)
 
+## Install
+
+You can install `cloud-provider-kind` by downloading the binary from the release page.
+On linux:
+
+```sh
+curl -Lo ./cloud-provider-kind https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.0.1/cloud-provider-kind-linux-amd64
+chmod +x ./cloud-provider-kind
+sudo mv ./cloud-provider-kind  /usr/local/bin/cloud-provider-kind
+
+```
+
+You can also build it locally:
+
+```sh
+git clone https://github.com/kubernetes-sigs/cloud-provider-kind.git
+Cloning into 'cloud-provider-kind'...
+remote: Enumerating objects: 6779, done.
+remote: Counting objects: 100% (6779/6779), done.
+remote: Compressing objects: 100% (4225/4225), done.q
+remote: Total 6779 (delta 2150), reused 6755 (delta 2135), pack-reused 0
+Receiving objects: 100% (6779/6779), 9.05 MiB | 1.83 MiB/s, done.
+Resolving deltas: 100% (2150/2150), done.
+
+cd cloud-provider-kind && make
+sudo mv .bin//cloud-provider-kind  /usr/local/bin/cloud-provider-kind
+```
+
 ## How to use it
 
 Run a KIND cluster:
