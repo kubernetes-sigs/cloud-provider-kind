@@ -16,7 +16,6 @@ On linux:
 curl -Lo ./cloud-provider-kind https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.0.1/cloud-provider-kind-linux-amd64
 chmod +x ./cloud-provider-kind
 sudo mv ./cloud-provider-kind  /usr/local/bin/cloud-provider-kind
-
 ```
 
 You can also build it locally:
@@ -32,7 +31,7 @@ Receiving objects: 100% (6779/6779), 9.05 MiB | 1.83 MiB/s, done.
 Resolving deltas: 100% (2150/2150), done.
 
 cd cloud-provider-kind && make
-sudo mv .bin//cloud-provider-kind  /usr/local/bin/cloud-provider-kind
+sudo mv .bin/cloud-provider-kind  /usr/local/bin/cloud-provider-kind
 ```
 
 ## How to use it
@@ -40,7 +39,7 @@ sudo mv .bin//cloud-provider-kind  /usr/local/bin/cloud-provider-kind
 Run a KIND cluster:
 
 ```sh
-$ kind create cluster
+$ kind create cluster --config=kind.yaml
 Creating cluster "kind" ...
  ✓ Ensuring node image (kindest/node:v1.26.0) 🖼
  ✓ Preparing nodes 📦
@@ -54,7 +53,6 @@ You can now use your cluster with:
 kubectl cluster-info --context kind-kind
 
 Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
-
 ```
 
 **Note**
