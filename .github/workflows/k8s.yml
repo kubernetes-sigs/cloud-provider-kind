@@ -59,9 +59,48 @@ jobs:
         # Create folder to store artifacts
         mkdir -p _artifacts
 
+    - name: Run cloud-provider-kind
+      run: |
+        make
+        nohup bin/cloud-provider-kind > ./_artifacts/ccm-kind.log 2>&1 &
+
     - name: Create multi node cluster
       run: |
-        /usr/local/bin/kind create cluster --name ${{ env.KIND_CLUSTER_NAME}} --config kind.yaml
+        # create cluster
+        cat <<EOF | /usr/local/bin/kind create cluster \
+          --name ${{ env.KIND_CLUSTER_NAME}}           \
+          --image kindest/node:${{ env.K8S_VERSION }}  \
+          -v7 --wait 1m --retain --config=-
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        networking:
+          ipFamily: ${IP_FAMILY}
+        nodes:
+        - role: control-plane
+        - role: worker
+        - role: worker
+        kubeadmConfigPatches:
+          - |
+            kind: ClusterConfiguration
+            apiServer:
+              extraArgs:
+                cloud-provider: "external"
+                v: "5"
+            controllerManager:
+              extraArgs:
+                cloud-provider: "external"
+                v: "5"
+            ---
+            kind: InitConfiguration
+            nodeRegistration:
+              kubeletExtraArgs:
+                cloud-provider: "external"
+            ---
+            kind: JoinConfiguration
+            nodeRegistration:
+              kubeletExtraArgs:
+                cloud-provider: "external"
+        EOF
         /usr/local/bin/kind get kubeconfig --name ${{ env.KIND_CLUSTER_NAME}} > _artifacts/kubeconfig.conf
 
     - name: Workaround CoreDNS for IPv6 airgapped
@@ -91,11 +130,6 @@ jobs:
         echo "Patched CoreDNS config:"
         echo "${fixed_coredns}"
         printf '%s' "${fixed_coredns}" | /usr/local/bin/kubectl apply -f -
-
-    - name: Run cloud-provider-kind
-      run: |
-        make
-        nohup bin/cloud-provider-kind > ./_artifacts/ccm-kind.log 2>&1 &
 
     - name: Get Cluster status
       run: |
@@ -131,7 +165,7 @@ jobs:
     - name: Export logs
       if: always()
       run: |
-        /usr/local/bin/kind export logs --name ${KIND_CLUSTER_NAME} --loglevel=debug ./_artifacts/logs
+        /usr/local/bin/kind export logs --name ${{ env.KIND_CLUSTER_NAME}}  --loglevel=debug ./_artifacts/logs
         cp ./_artifacts/ccm-kind.log ./_artifacts/logs
 
     - name: Upload logs
