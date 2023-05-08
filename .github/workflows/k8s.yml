@@ -147,14 +147,14 @@ jobs:
         export KUBERNETES_CONFORMANCE_TEST='y'
         export E2E_REPORT_DIR=${PWD}/_artifacts
 
-        # Run tests and fake the provider to not skip the loadbalancer tests
+        # Run tests and use aws (creates a null e2e provider) to not skip the loadbalancer tests
         /usr/local/bin/ginkgo --nodes=25                \
           --focus="sig-network"     \
           --skip="Feature|Federation|PerformanceDNS|DualStack|Disruptive|Serial|KubeProxy|GCE|Netpol|NetworkPolicy|256.search.list.characters"   \
           /usr/local/bin/e2e.test                       \
           --                                            \
           --kubeconfig=${PWD}/_artifacts/kubeconfig.conf     \
-          --provider=gce                               \
+          --provider=aws                                \
           --dump-logs-on-failure=false                  \
           --report-dir=${E2E_REPORT_DIR}                \
           --disable-log-dump=true
