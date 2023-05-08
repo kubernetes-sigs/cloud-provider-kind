@@ -95,11 +95,13 @@ jobs:
             nodeRegistration:
               kubeletExtraArgs:
                 cloud-provider: "external"
+                v: "5"
             ---
             kind: JoinConfiguration
             nodeRegistration:
               kubeletExtraArgs:
                 cloud-provider: "external"
+                v: "5"
         EOF
         /usr/local/bin/kind get kubeconfig --name ${{ env.KIND_CLUSTER_NAME}} > _artifacts/kubeconfig.conf
 
@@ -133,6 +135,8 @@ jobs:
 
     - name: Get Cluster status
       run: |
+        /usr/local/bin/kubectl get nodes -o yaml
+        /usr/local/bin/kubectl get pods -A -o wide
         # wait network is ready
         /usr/local/bin/kubectl wait --for=condition=ready pods --namespace=kube-system -l k8s-app=kube-dns --timeout=3m
         /usr/local/bin/kubectl get nodes -o wide
