@@ -3,14 +3,10 @@ name: e2e
 on:
   push:
   pull_request:
-    branches: [ master ]
   workflow_dispatch:
 
 env:
-  GO_VERSION: "1.20.1"
-  K8S_VERSION: "v1.26.0"
-  KIND_VERSION: "v0.17.0"
-  KIND_CLUSTER_NAME: "kind-cloud"
+  GO_VERSION: "1.20.4"
 
 jobs:
   e2e:
