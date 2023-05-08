@@ -19,7 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ipFamily: ["ipv4", "ipv6", "dual"]
+        # TODO add "dual", waiting on KEP https://github.com/kubernetes/enhancements/tree/master/keps/sig-network/3705-cloud-node-ips
+        ipFamily: ["ipv4", "ipv6"]
     env:
       JOB_NAME: "cloud-provider-kind-e2e-${{ matrix.ipFamily }}"
       IP_FAMILY: ${{ matrix.ipFamily }}
