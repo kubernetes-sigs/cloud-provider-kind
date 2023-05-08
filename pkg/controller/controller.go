@@ -141,7 +141,6 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 	}
 
 	sharedInformers := informers.NewSharedInformerFactory(kubeClient, 60*time.Second)
-	ctx, cancel := context.WithCancel(ctx)
 
 	ccmMetrics := controllersmetrics.NewControllerManagerMetrics(clusterName)
 	// Start the service controller
@@ -159,6 +158,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
 	go serviceController.Run(ctx, 5, ccmMetrics)
 
 	// Start the node controller
@@ -171,6 +171,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
 		klog.Errorf("Failed to start node controller: %v", err)
+		cancel()
 		return nil, err
 	}
 	go nodeController.Run(ctx.Done(), ccmMetrics)
