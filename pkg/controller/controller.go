@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	cloudprovider "k8s.io/cloud-provider"
+	nodecontroller "k8s.io/cloud-provider/controllers/node"
 	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	"k8s.io/klog/v2"
@@ -30,6 +31,7 @@ type Controller struct {
 type ccm struct {
 	factory           informers.SharedInformerFactory
 	serviceController *servicecontroller.Controller
+	nodeController    *nodecontroller.CloudNodeController
 	cancelFn          context.CancelFunc
 }
 
@@ -97,12 +99,12 @@ func (c *Controller) Run(ctx context.Context) {
 
 			klog.V(2).Infof("Creating new cloud provider for cluster %s", cluster)
 			cloud := provider.New(cluster, c.kind)
-			ccm, err := startServiceController(ctx, cluster, kubeClient, cloud)
+			ccm, err := startCloudControllerManager(ctx, cluster, kubeClient, cloud)
 			if err != nil {
-				klog.Errorf("Failed to start service controller for cluster %s: %v", cluster, err)
+				klog.Errorf("Failed to start cloud controller for cluster %s: %v", cluster, err)
 				continue
 			}
-			klog.Infof("Starting service controller for cluster %s", cluster)
+			klog.Infof("Starting cloud controller for cluster %s", cluster)
 			c.clusters[cluster] = ccm
 		}
 		// remove expired ones
@@ -119,9 +121,9 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
-// TODO: implement leader election to not have 2 providers creating load balancers
+// TODO: implement leader election to not have problems with  multiple providers
 // ref: https://github.com/kubernetes/kubernetes/blob/d97ea0f705847f90740cac3bc3dd8f6a4026d0b5/cmd/kube-scheduler/app/server.go#L211
-func startServiceController(ctx context.Context, clusterName string, kubeClient kubernetes.Interface, cloud cloudprovider.Interface) (*ccm, error) {
+func startCloudControllerManager(ctx context.Context, clusterName string, kubeClient kubernetes.Interface, cloud cloudprovider.Interface) (*ccm, error) {
 	client := kubeClient.Discovery().RESTClient()
 	// wait for health
 	err := wait.PollImmediateWithContext(ctx, 1*time.Second, 30*time.Second, func(ctx context.Context) (bool, error) {
@@ -139,6 +141,9 @@ func startServiceController(ctx context.Context, clusterName string, kubeClient 
 	}
 
 	sharedInformers := informers.NewSharedInformerFactory(kubeClient, 60*time.Second)
+	ctx, cancel := context.WithCancel(ctx)
+
+	ccmMetrics := controllersmetrics.NewControllerManagerMetrics(clusterName)
 	// Start the service controller
 	serviceController, err := servicecontroller.New(
 		cloud,
@@ -154,11 +159,27 @@ func startServiceController(ctx context.Context, clusterName string, kubeClient 
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	go serviceController.Run(ctx, 5, ccmMetrics)
+
+	// Start the node controller
+	nodeController, err := nodecontroller.NewCloudNodeController(
+		sharedInformers.Core().V1().Nodes(),
+		kubeClient,
+		cloud,
+		30*time.Second,
+	)
+	if err != nil {
+		// This error shouldn't fail. It lives like this as a legacy.
+		klog.Errorf("Failed to start node controller: %v", err)
+		return nil, err
+	}
+	go nodeController.Run(ctx.Done(), ccmMetrics)
+
 	sharedInformers.Start(ctx.Done())
-	go serviceController.Run(ctx, 5, controllersmetrics.NewControllerManagerMetrics(clusterName))
+
 	return &ccm{
 		factory:           sharedInformers,
 		serviceController: serviceController,
+		nodeController:    nodeController,
 		cancelFn:          cancel}, nil
 }
