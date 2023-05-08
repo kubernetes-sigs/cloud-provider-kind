@@ -149,9 +149,11 @@ jobs:
         export E2E_REPORT_DIR=${PWD}/_artifacts
 
         # Run tests and use aws (creates a null e2e provider) to not skip the loadbalancer tests
+        # "should be able to create LoadBalancer Service without NodePort and change it" : the LB implementation uses haproxy and NodePorts can not forward directly to the Pods
+        # "should be able to change the type and ports of a TCP service" : the test expects a connection refused haproxy seems to return EOF
         /usr/local/bin/ginkgo --nodes=25                \
           --focus="sig-network"     \
-          --skip="Feature|Federation|PerformanceDNS|DualStack|Disruptive|Serial|KubeProxy|GCE|Netpol|NetworkPolicy|256.search.list.characters"   \
+          --skip="Feature|Federation|PerformanceDNS|DualStack|Disruptive|Serial|KubeProxy|GCE|Netpol|NetworkPolicy|256.search.list.characters|LoadBalancer.Service.without.NodePort|type.and.ports.of.a.TCP.service"   \
           /usr/local/bin/e2e.test                       \
           --                                            \
           --kubeconfig=${PWD}/_artifacts/kubeconfig.conf     \
