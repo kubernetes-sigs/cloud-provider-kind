@@ -16,7 +16,6 @@ On linux:
 curl -Lo ./cloud-provider-kind https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.0.1/cloud-provider-kind-linux-amd64
 chmod +x ./cloud-provider-kind
 sudo mv ./cloud-provider-kind  /usr/local/bin/cloud-provider-kind
-
 ```
 
 You can also build it locally:
