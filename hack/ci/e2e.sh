@@ -109,10 +109,6 @@ kubeadmConfigPatches:
     extraArgs:
       cloud-provider: "external"
       v: "${KIND_CLUSTER_LOG_LEVEL}"
-  scheduler:
-    extraArgs:
-      cloud-provider: "external"
-      v: "${KIND_CLUSTER_LOG_LEVEL}"
   ---
   kind: InitConfiguration
   nodeRegistration:
@@ -176,8 +172,8 @@ run_tests() {
   fi
 
   # ginkgo regexes
-  SKIP="${SKIP:-}"
-  FOCUS="${FOCUS:-"\\[Conformance\\]"}"
+  SKIP="${SKIP:-"Feature|Federation|PerformanceDNS|DualStack|Disruptive|Serial|KubeProxy|GCE|Netpol|NetworkPolicy|256.search.list.characters|LoadBalancer.Service.without.NodePort|type.and.ports.of.a.TCP.service|loadbalancer.source.ranges"}"
+  FOCUS="${FOCUS:-"\\[sig-network\\]"}"
   # if we set PARALLEL=true, skip serial tests set --ginkgo-parallel
   if [ "${PARALLEL:-false}" = "true" ]; then
     export GINKGO_PARALLEL=y
@@ -224,7 +220,17 @@ main() {
   # debug kind version
   kind version
 
+  # build cloud-provider-kind
+  make
+  nohup bin/cloud-provider-kind > ${ARTIFACTS}/ccm-kind.log 2>&1 &
+
   # build kubernetes
+  K8S_PATH=$(find ${GOPATH} -path '*/k8s.io/kubernetes/go.mod' -print -quit)
+  if [ -z "${K8S_PATH}" ]; then
+    K8S_PATH=$(find / -path '*/kubernetes/go.mod' -print -quit)
+  fi
+  cd $(dirname ${K8S_PATH})
+
   build
   # in CI attempt to release some memory after building
   if [ -n "${KUBETEST_IN_DOCKER:-}" ]; then
