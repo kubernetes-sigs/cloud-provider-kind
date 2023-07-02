@@ -32,7 +32,7 @@ Receiving objects: 100% (6779/6779), 9.05 MiB | 1.83 MiB/s, done.
 Resolving deltas: 100% (2150/2150), done.
 
 cd cloud-provider-kind && make
-sudo mv .bin//cloud-provider-kind  /usr/local/bin/cloud-provider-kind
+sudo mv ./bin/cloud-provider-kind  /usr/local/bin/cloud-provider-kind
 ```
 
 ## How to use it
