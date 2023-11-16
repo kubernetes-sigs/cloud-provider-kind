@@ -1,8 +1,8 @@
 # Kubernetes Cloud Provider for KIND
 
-KIND has demonstrated to be a very versatile, efficient, cheap and very useful tool for Kubernetes testing. However, KIND doesn't offer capabilities for testing all the features that depend on cloud-providers, specially the Load Balancers, causing a gap on testing and a bad user experience, since is not easy to connect to the applications running on the cluster.
+KIND has demonstrated to be a very versatile, efficient, cheap and very useful tool for Kubernetes testing. However, KIND doesn't offer capabilities for testing all the features that depend on cloud-providers, specifically the Load Balancers, causing a gap on testing and a bad user experience, since is not easy to connect to the applications running on the cluster.
 
-`cloud-provider-kind` aim to fill this gap and provide an agnostic and cheap solution for all the Kubernetes features that depend on a cloud-provider using KIND.
+`cloud-provider-kind` aims to fill this gap and provide an agnostic and cheap solution for all the Kubernetes features that depend on a cloud-provider using KIND.
 
 - [Slack channel](https://kubernetes.slack.com/messages/kind)
 - [Mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-testing)
@@ -66,7 +66,7 @@ $ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external
 node/kind-control-plane unlabeled
 ```
 
-Once the cluster is running, we need to run the `cloud-provider-kind` in a terminal and keep it running. The `cloud-provider-kind` will monitor all your KIND clusters and `Services` with Type `LoadBalancer` and create the correponding LoadBalancer containers that will expose those Services.
+Once the cluster is running, we need to run the `cloud-provider-kind` in a terminal and keep it running. The `cloud-provider-kind` will monitor all your KIND clusters and `Services` with Type `LoadBalancer` and create the corresponding LoadBalancer containers that will expose those Services.
 
 ```sh
 bin/cloud-provider-kind
