@@ -40,7 +40,10 @@ the docker socket inside the container:
 
 ```sh
 docker build . -t aojea/cloud-provider-kind:v0.1
+# using the host network
 docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock aojea/cloud-provider-kind:v0.1
+# or the kind network
+docker run --rm --network kind  -v /var/run/docker.sock:/var/run/docker.sock aojea/cloud-provider-kind:v0.1
 ```
 
 ## How to use it

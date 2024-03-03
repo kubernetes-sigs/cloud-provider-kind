@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -46,20 +49,10 @@ func New(logger log.Logger) *Controller {
 }
 
 func (c *Controller) Run(ctx context.Context) {
+	defer cleanup()
 	for {
 		select {
 		case <-ctx.Done():
-			// cleanup
-			containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
-			if err != nil {
-				klog.Errorf("can't list containers: %v", err)
-				return
-			}
-			for _, id := range containers {
-				if err := container.Delete(id); err != nil {
-					klog.Errorf("can't delete container %s: %v", id, err)
-				}
-			}
 			return
 		default:
 		}
@@ -71,6 +64,12 @@ func (c *Controller) Run(ctx context.Context) {
 
 		// add new ones
 		for _, cluster := range clusters {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			klog.V(3).Infof("processing cluster %s", cluster)
 			_, ok := c.clusters[cluster]
 			if ok {
@@ -78,20 +77,7 @@ func (c *Controller) Run(ctx context.Context) {
 				continue
 			}
 
-			// get kubeconfig
-			kconfig, err := c.kind.KubeConfig(cluster, false)
-			if err != nil {
-				klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
-				continue
-			}
-
-			config, err := clientcmd.RESTConfigFromKubeConfig([]byte(kconfig))
-			if err != nil {
-				klog.Errorf("Failed to convert kubeconfig for cluster %s: %v", cluster, err)
-				continue
-			}
-
-			kubeClient, err := kubernetes.NewForConfig(config)
+			kubeClient, err := c.getKubeClient(ctx, cluster)
 			if err != nil {
 				klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
 				continue
@@ -119,6 +105,76 @@ func (c *Controller) Run(ctx context.Context) {
 		}
 		time.Sleep(30 * time.Second)
 	}
+}
+
+// getKubeClient returns the corresponding kubeclient
+// this is needed because the controller can run inside the docker network,
+// hence it will need the internal kubeconfig, or can run outside on the host,
+// hence it will need the external kubeconfig
+func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	// try internal first
+	for _, internal := range []bool{true, false} {
+		kconfig, err := c.kind.KubeConfig(cluster, internal)
+		if err != nil {
+			klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
+			continue
+		}
+
+		config, err := clientcmd.RESTConfigFromKubeConfig([]byte(kconfig))
+		if err != nil {
+			klog.Errorf("Failed to convert kubeconfig for cluster %s: %v", cluster, err)
+			continue
+		}
+
+		// check that the apiserver is reachable before continue
+		// to fail fast and avoid waiting until the client operations timeout
+		var ok bool
+		for i := 0; i < 5; i++ {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			if probeHTTP(httpClient, config.Host) {
+				ok = true
+				break
+			}
+			time.Sleep(time.Second * time.Duration(i))
+		}
+		if !ok {
+			klog.Errorf("Failed to connect to apiserver %s: %v", cluster, err)
+			continue
+		}
+
+		kubeClient, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
+			continue
+		}
+		return kubeClient, err
+	}
+	return nil, fmt.Errorf("can not find a working kubernetes clientset")
+}
+
+func probeHTTP(client *http.Client, address string) bool {
+	klog.Infof("probe HTTP address %s", address)
+	resp, err := client.Get(address)
+	if err != nil {
+		klog.Infof("Failed to connect to HTTP address %s: %v", address, err)
+		return false
+	}
+	defer resp.Body.Close()
+	// drain the body
+	io.ReadAll(resp.Body) // nolint:errcheck
+	// we only want to verify connectivity so don't need to check the http status code
+	// as the apiserver may not be ready
+	return true
 }
 
 // TODO: implement leader election to not have problems with  multiple providers
@@ -183,4 +239,17 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		serviceController: serviceController,
 		nodeController:    nodeController,
 		cancelFn:          cancel}, nil
+}
+
+func cleanup() {
+	containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
+	if err != nil {
+		klog.Errorf("can't list containers: %v", err)
+		return
+	}
+	for _, id := range containers {
+		if err := container.Delete(id); err != nil {
+			klog.Errorf("can't delete container %s: %v", id, err)
+		}
+	}
 }
