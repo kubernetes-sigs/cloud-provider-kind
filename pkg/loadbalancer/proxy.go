@@ -17,7 +17,7 @@ import (
 )
 
 // proxyImage defines the loadbalancer image:tag
-const proxyImage = "kindest/haproxy:v20230330-2f738c2"
+const proxyImage = "docker.io/kindest/haproxy:v20230606-42a2262b"
 
 // proxyConfigPath defines the path to the config file in the image
 const proxyConfigPath = "/usr/local/etc/haproxy/haproxy.cfg"
