@@ -125,9 +125,17 @@ func (c *Controller) Run(ctx context.Context) {
 // TODO: implement leader election to not have problems with  multiple providers
 // ref: https://github.com/kubernetes/kubernetes/blob/d97ea0f705847f90740cac3bc3dd8f6a4026d0b5/cmd/kube-scheduler/app/server.go#L211
 func startCloudControllerManager(ctx context.Context, clusterName string, kubeClient kubernetes.Interface, cloud cloudprovider.Interface) (*ccm, error) {
+	// TODO: we need to set up the ccm specific feature gates
+	// but try to avoid to expose this to users
+	featureGates := utilfeature.DefaultMutableFeatureGate
+	err := ccmfeatures.SetupCurrentKubernetesSpecificFeatureGates(featureGates)
+	if err != nil {
+		return nil, err
+	}
+
 	client := kubeClient.Discovery().RESTClient()
 	// wait for health
-	err := wait.PollImmediateWithContext(ctx, 1*time.Second, 30*time.Second, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		healthStatus := 0
 		client.Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
 		if healthStatus != http.StatusOK {
@@ -151,7 +159,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		sharedInformers.Core().V1().Services(),
 		sharedInformers.Core().V1().Nodes(),
 		clusterName,
-		ccmfeatures.SetupCurrentKubernetesSpecificFeatureGates(utilfeature.DefaultMutableFeatureGate),
+		featureGates,
 	)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
