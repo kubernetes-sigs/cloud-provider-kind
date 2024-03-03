@@ -167,6 +167,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		kubeClient,
 		cloud,
 		30*time.Second,
+		5, // workers
 	)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
