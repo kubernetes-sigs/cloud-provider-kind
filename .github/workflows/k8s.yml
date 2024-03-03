@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: "1.20.4"
-  K8S_VERSION: "v1.27.1"
-  KIND_VERSION: "v0.18.0"
+  GO_VERSION: "1.21.7"
+  K8S_VERSION: "v1.29.2"
+  KIND_VERSION: "v0.22.0"
   KIND_CLUSTER_NAME: "kind-cloud"
 
 jobs:
