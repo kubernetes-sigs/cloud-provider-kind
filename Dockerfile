@@ -8,6 +8,6 @@ COPY . .
 RUN make build
 
 # build real cloud-provider-kind image
-FROM gcr.io/distroless/static-debian12
+FROM docker:25.0-dind
 COPY --from=0 --chown=root:root ./go/src/bin/cloud-provider-kind /bin/cloud-provider-kind
 ENTRYPOINT ["/bin/cloud-provider-kind"]
