@@ -15,6 +15,7 @@ import (
 	nodecontroller "k8s.io/cloud-provider/controllers/node"
 	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
+	ccmfeatures "k8s.io/controller-manager/pkg/features"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
@@ -150,7 +151,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		sharedInformers.Core().V1().Services(),
 		sharedInformers.Core().V1().Nodes(),
 		clusterName,
-		utilfeature.DefaultFeatureGate,
+		ccmfeatures.SetupCurrentKubernetesSpecificFeatureGates(utilfeature.DefaultMutableFeatureGate),
 	)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
