@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The logr Authors.
+Copyright 2023 The logr Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,9 +16,18 @@ limitations under the License.
 
 package logr
 
-// Discard returns a Logger that discards all messages logged to it.  It can be
-// used whenever the caller is not interested in the logs.  Logger instances
-// produced by this function always compare as equal.
-func Discard() Logger {
-	return New(nil)
+// contextKey is how we find Loggers in a context.Context. With Go < 1.21,
+// the value is always a Logger value. With Go >= 1.21, the value can be a
+// Logger value or a slog.Logger pointer.
+type contextKey struct{}
+
+// notFoundError exists to carry an IsNotFound method.
+type notFoundError struct{}
+
+func (notFoundError) Error() string {
+	return "no logr.Logger was present"
+}
+
+func (notFoundError) IsNotFound() bool {
+	return true
 }

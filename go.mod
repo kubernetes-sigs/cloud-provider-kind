@@ -10,7 +10,7 @@ require (
 	k8s.io/client-go v0.26.1
 	k8s.io/cloud-provider v0.26.1
 	k8s.io/component-base v0.26.1
-	k8s.io/klog/v2 v2.90.0
+	k8s.io/klog/v2 v2.120.1
 	k8s.io/utils v0.0.0-20221107191617-1a15be271d1d
 	sigs.k8s.io/kind v0.17.0
 )
@@ -24,7 +24,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.9.0 // indirect
 	github.com/evanphx/json-patch/v5 v5.6.0 // indirect
-	github.com/go-logr/logr v1.2.3 // indirect
+	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
 	github.com/go-openapi/jsonreference v0.20.0 // indirect
 	github.com/go-openapi/swag v0.19.14 // indirect

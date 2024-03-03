@@ -1,5 +1,8 @@
+//go:build go1.21
+// +build go1.21
+
 /*
-Copyright 2020 The logr Authors.
+Copyright 2021 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,11 +17,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package logr
+package klog
 
-// Discard returns a Logger that discards all messages logged to it.  It can be
-// used whenever the caller is not interested in the logs.  Logger instances
-// produced by this function always compare as equal.
-func Discard() Logger {
-	return New(nil)
+import (
+	"log/slog"
+
+	"github.com/go-logr/logr"
+)
+
+// SetSlogLogger reconfigures klog to log through the slog logger. The logger must not be nil.
+func SetSlogLogger(logger *slog.Logger) {
+	SetLoggerWithOptions(logr.FromSlogHandler(logger.Handler()), ContextualLogger(true))
 }
