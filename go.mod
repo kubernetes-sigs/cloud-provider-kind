@@ -12,7 +12,7 @@ require (
 	k8s.io/component-base v0.26.1
 	k8s.io/klog/v2 v2.90.0
 	k8s.io/utils v0.0.0-20221107191617-1a15be271d1d
-	sigs.k8s.io/kind v0.17.0
+	sigs.k8s.io/kind v0.22.0
 )
 
 require (
