@@ -136,6 +136,8 @@ func commonArgs(cfg *config.Cluster, networkName string, nodeNames []string) ([]
 		"--label", fmt.Sprintf("%s=%s", clusterLabelKey, cfg.Name),
 		// specify container implementation to systemd
 		"-e", "container=podman",
+		// this is the default in cgroupsv2 but not in v1
+		"--cgroupns=private",
 	}
 
 	// enable IPv6 if necessary
@@ -162,6 +164,10 @@ func commonArgs(cfg *config.Cluster, networkName string, nodeNames []string) ([]
 	// https://github.com/kubernetes-sigs/kind/issues/2275
 	if mountFuse() {
 		args = append(args, "--device", "/dev/fuse")
+	}
+
+	if cfg.Networking.DNSSearch != nil {
+		args = append(args, "-e", "KIND_DNS_SEARCH="+strings.Join(*cfg.Networking.DNSSearch, " "))
 	}
 
 	return args, nil
@@ -393,9 +399,12 @@ func generatePortMappings(clusterIPFamily config.ClusterIPFamily, portMappings .
 		}
 
 		// get a random port if necessary (port = 0)
-		hostPort, err := common.PortOrGetFreePort(pm.HostPort, pm.ListenAddress)
+		hostPort, releaseHostPortFn, err := common.PortOrGetFreePort(pm.HostPort, pm.ListenAddress)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to get random host port for port mapping")
+		}
+		if releaseHostPortFn != nil {
+			defer releaseHostPortFn()
 		}
 
 		// generate the actual mapping arg
