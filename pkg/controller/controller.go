@@ -107,10 +107,9 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
-// getKubeClient returns the corresponding kubeclient
-// this is needed because the controller can run inside the docker network,
-// hence it will need the internal kubeconfig, or can run outside on the host,
-// hence it will need the external kubeconfig
+// getKubeClient returns a kubeclient depending if the ccm runs inside a container
+// inside the same docker network that the kind cluster or run externally in the host
+// It tries first to connect to the external endpoint
 func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
 	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
@@ -119,7 +118,7 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 		},
 	}
 	// try internal first
-	for _, internal := range []bool{true, false} {
+	for _, internal := range []bool{false, true} {
 		kconfig, err := c.kind.KubeConfig(cluster, internal)
 		if err != nil {
 			klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
