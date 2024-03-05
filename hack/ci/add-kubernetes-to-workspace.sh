@@ -18,19 +18,17 @@ set -e
 set -x
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
+KUBERNETES_ROOT=${KUBERNETES_ROOT:-$GOPATH/src/k8s.io/kubernetes}
 cd ${REPO_ROOT}
-cd ..
-WORKSPACE=$(pwd)
 
 # Set up go workspace to build with this version
-cd "${REPO_ROOT}"
-
 go work init
+
 go work use .
 
 # Add kubernetes to workspace
-go work use ${WORKSPACE}/kubernetes
-for d in ${WORKSPACE}/kubernetes/staging/src/k8s.io/*; do
+go work use ${KUBERNETES_ROOT}
+for d in ${KUBERNETES_ROOT}/staging/src/k8s.io/*; do
   go work use $d
 done
 
