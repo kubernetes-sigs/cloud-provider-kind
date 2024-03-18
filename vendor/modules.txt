@@ -45,8 +45,8 @@ github.com/gogo/protobuf/sortkeys
 # github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da
 ## explicit
 github.com/golang/groupcache/lru
-# github.com/golang/protobuf v1.5.3
-## explicit; go 1.9
+# github.com/golang/protobuf v1.5.4
+## explicit; go 1.17
 github.com/golang/protobuf/proto
 github.com/golang/protobuf/ptypes
 github.com/golang/protobuf/ptypes/any
@@ -221,7 +221,7 @@ gopkg.in/yaml.v2
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
-# k8s.io/api v0.29.2
+# k8s.io/api v0.29.3
 ## explicit; go 1.21
 k8s.io/api/admissionregistration/v1
 k8s.io/api/admissionregistration/v1alpha1
@@ -275,7 +275,7 @@ k8s.io/api/scheduling/v1beta1
 k8s.io/api/storage/v1
 k8s.io/api/storage/v1alpha1
 k8s.io/api/storage/v1beta1
-# k8s.io/apimachinery v0.29.2
+# k8s.io/apimachinery v0.29.3
 ## explicit; go 1.21
 k8s.io/apimachinery/pkg/api/equality
 k8s.io/apimachinery/pkg/api/errors
@@ -325,10 +325,10 @@ k8s.io/apimachinery/pkg/version
 k8s.io/apimachinery/pkg/watch
 k8s.io/apimachinery/third_party/forked/golang/json
 k8s.io/apimachinery/third_party/forked/golang/reflect
-# k8s.io/apiserver v0.29.2
+# k8s.io/apiserver v0.29.3
 ## explicit; go 1.21
 k8s.io/apiserver/pkg/util/feature
-# k8s.io/client-go v0.29.2
+# k8s.io/client-go v0.29.3
 ## explicit; go 1.21
 k8s.io/client-go/applyconfigurations/admissionregistration/v1
 k8s.io/client-go/applyconfigurations/admissionregistration/v1alpha1
@@ -583,7 +583,7 @@ k8s.io/cloud-provider/controllers/node
 k8s.io/cloud-provider/controllers/service
 k8s.io/cloud-provider/node/helpers
 k8s.io/cloud-provider/service/helpers
-# k8s.io/component-base v0.29.2
+# k8s.io/component-base v0.29.3
 ## explicit; go 1.21
 k8s.io/component-base/cli/flag
 k8s.io/component-base/featuregate
