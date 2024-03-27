@@ -115,7 +115,17 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 
 // loadbalancer name = cluster-name + service.namespace + service.name
 func loadBalancerName(clusterName string, service *v1.Service) string {
-	return constants.ContainerPrefix + "-" + clusterName + "-" + service.Namespace + "-" + service.Name
+	const nameMaxLen = 63
+	name := constants.ContainerPrefix + "-" + clusterName + "-" + service.Namespace + "-" + service.Name
+
+	// Cap name at 63 chars.
+	if len(name) <= nameMaxLen {
+		return name
+	}
+	truncated := name[:nameMaxLen]
+	// name should not end with '-', "_", or '.'
+	truncated = strings.TrimRight(truncated, "-._")
+	return truncated
 }
 
 // createLoadBalancer create a docker container with a loadbalancer
