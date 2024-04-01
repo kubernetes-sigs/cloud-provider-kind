@@ -2,6 +2,8 @@ package loadbalancer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"fmt"
 	"os"
 	"strings"
@@ -113,9 +115,17 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 	return container.Delete(loadBalancerName(clusterName, service))
 }
 
-// loadbalancer name = cluster-name + service.namespace + service.name
+// loadbalancer name is a unique name for the loadbalancer container
 func loadBalancerName(clusterName string, service *v1.Service) string {
-	return constants.ContainerPrefix + "-" + clusterName + "-" + service.Namespace + "-" + service.Name
+	hash := sha256.Sum256([]byte(loadBalancerSimpleName(clusterName, service)))
+	encoded := base32.StdEncoding.EncodeToString(hash[:])
+	name := constants.ContainerPrefix + "-" + encoded[:40]
+
+	return name
+}
+
+func loadBalancerSimpleName(clusterName string, service *v1.Service) string {
+	return clusterName + "-" + service.Namespace + "-" + service.Name
 }
 
 // createLoadBalancer create a docker container with a loadbalancer
@@ -132,6 +142,8 @@ func createLoadBalancer(clusterName string, service *v1.Service, image string) e
 		"--tty",    // allocate a tty for entrypoint logs
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
+		// label the node with the load balancer name
+		"--label", fmt.Sprintf("%s=%s", constants.NodeNameLabelKey, loadBalancerSimpleName(clusterName, service)),
 		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",
