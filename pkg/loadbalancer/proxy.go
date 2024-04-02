@@ -61,6 +61,8 @@ defaults
 frontend {{$index}}-frontend
   bind {{ $data.BindAddress }}
   default_backend {{$index}}-backend
+  # reject connections if all backends are down
+  tcp-request connection reject if { nbsrv({{$index}}-backend) lt 1 }
 
 backend {{$index}}-backend
   option httpchk GET /healthz
