@@ -3,6 +3,7 @@ module sigs.k8s.io/cloud-provider-kind
 go 1.21
 
 require (
+	github.com/google/go-cmp v0.6.0
 	github.com/pkg/errors v0.9.1
 	k8s.io/api v0.29.3
 	k8s.io/apimachinery v0.29.3
@@ -33,7 +34,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/gnostic-models v0.6.8 // indirect
-	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/google/safetext v0.0.0-20240104143208-7a7d9b3d812f // indirect
 	github.com/google/uuid v1.6.0 // indirect

@@ -250,6 +250,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		cancelFn:          cancel}, nil
 }
 
+// TODO cleanup alias ip on mac
 func cleanup() {
 	containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
 	if err != nil {

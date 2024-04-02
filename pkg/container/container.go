@@ -1,11 +1,13 @@
 package container
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 
+	"k8s.io/klog/v2"
 	kindexec "sigs.k8s.io/kind/pkg/exec"
 )
 
@@ -112,6 +114,56 @@ func IPs(name string) (ipv4 string, ipv6 string, err error) {
 		return "", "", fmt.Errorf("container addresses should have 2 values, got %d values", len(ips))
 	}
 	return ips[0], ips[1], nil
+}
+
+// return a list with the map of the internal port to the external port
+func PortMaps(name string) (map[string]string, error) {
+	// retrieve the IP address of the node using docker inspect
+	cmd := kindexec.Command(containerRuntime, "inspect",
+		"-f", "{{ json .NetworkSettings.Ports }}",
+		name, // ... against the "node" container
+	)
+
+	lines, err := kindexec.OutputLines(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container details: %w", err)
+	}
+	if len(lines) != 1 {
+		return nil, fmt.Errorf("file should only be one line, got %d lines: %w", len(lines), err)
+	}
+
+	type portMapping struct {
+		HostPort string `json:"HostPort"`
+		HostIP   string `json:"HostIp"`
+	}
+
+	portMappings := make(map[string][]portMapping)
+	err = json.Unmarshal([]byte(lines[0]), &portMappings)
+	if err != nil {
+		return nil, err
+	}
+
+	result := map[string]string{}
+	for k, v := range portMappings {
+		protocol := "tcp"
+		parts := strings.Split(k, "/")
+		if len(parts) == 2 {
+			protocol = strings.ToLower(parts[1])
+		}
+		if protocol != "tcp" {
+			klog.Infof("skipping protocol %s not supported, only TCP", protocol)
+			continue
+		}
+
+		// TODO we just can get the first entry or look for ip families
+		for _, pm := range v {
+			if pm.HostPort != "" {
+				result[parts[0]] = pm.HostPort
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 func ListByLabel(label string) ([]string, error) {
