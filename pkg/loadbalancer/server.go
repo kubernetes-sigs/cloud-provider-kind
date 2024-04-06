@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
@@ -150,6 +151,16 @@ func loadBalancerSimpleName(clusterName string, service *v1.Service) string {
 	return clusterName + "/" + service.Namespace + "/" + service.Name
 }
 
+func ServiceFromLoadBalancerSimpleName(s string) (clusterName string, service *v1.Service) {
+	slices := strings.Split(s, "/")
+	if len(slices) != 3 {
+		return
+	}
+	clusterName = slices[0]
+	service = &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: slices[1], Name: slices[2]}}
+	return
+}
+
 // createLoadBalancer create a docker container with a loadbalancer
 func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, image string) error {
 	name := loadBalancerName(clusterName, service)
@@ -165,7 +176,7 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
 		// label the node with the load balancer name
-		"--label", fmt.Sprintf("%s=%s", constants.NodeNameLabelKey, loadBalancerSimpleName(clusterName, service)),
+		"--label", fmt.Sprintf("%s=%s", constants.LoadBalancerNameLabelKey, loadBalancerSimpleName(clusterName, service)),
 		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",

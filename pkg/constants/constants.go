@@ -8,6 +8,6 @@ const (
 	FixedNetworkName = "kind"
 	// NodeCCMLabelKey
 	NodeCCMLabelKey = "io.x-k8s.cloud-provider-kind.cluster"
-	// NodeNameLabelKey
-	NodeNameLabelKey = "io.x-k8s.cloud-provider-kind.node.name"
+	// LoadBalancerNameLabelKey clustername/serviceNamespace/serviceName
+	LoadBalancerNameLabelKey = "io.x-k8s.cloud-provider-kind.loadbalancer.name"
 )
