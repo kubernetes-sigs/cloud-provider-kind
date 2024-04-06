@@ -119,11 +119,14 @@ func (t *tunnel) Start() error {
 		return err
 	}
 
+	t.listener = ln
+
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				klog.Infof("unexpected error listening: %v", err)
+				return
 			} else {
 				go func() {
 					err := t.handleConnection(conn)
