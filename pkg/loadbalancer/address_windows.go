@@ -4,10 +4,10 @@ package loadbalancer
 
 import "fmt"
 
-func addIP(ifaceName string, ip string) error {
+func AddIPToInterface(ifaceName string, ip string) error {
 	return fmt.Errorf(("not implemented"))
 }
 
-func removeIP(ifaceName string, ip string) error {
+func RemoveIPToInterface(ifaceName string, ip string) error {
 	return fmt.Errorf(("not implemented"))
 }
