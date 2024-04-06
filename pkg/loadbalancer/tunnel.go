@@ -59,6 +59,10 @@ func (t *tunnelManager) setupTunnels(containerName string) error {
 		if err != nil {
 			return err
 		}
+		_, ok := t.tunnels[containerName]
+		if !ok {
+			t.tunnels[containerName] = map[string]*tunnel{}
+		}
 		t.tunnels[containerName][containerPort] = tun
 	}
 	return nil
