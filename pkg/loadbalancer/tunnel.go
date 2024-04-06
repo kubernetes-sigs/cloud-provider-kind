@@ -138,7 +138,10 @@ func (t *tunnel) Start() error {
 }
 
 func (t *tunnel) Stop() error {
-	return t.listener.Close()
+	if t.listener != nil {
+		return t.listener.Close()
+	}
+	return nil
 }
 
 func (t *tunnel) handleConnection(local net.Conn) error {
