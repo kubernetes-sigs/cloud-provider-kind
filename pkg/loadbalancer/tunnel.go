@@ -155,11 +155,11 @@ func (t *tunnel) handleConnection(local net.Conn) error {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(local, remote)
+		io.Copy(local, remote) // nolint: errcheck
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(remote, local)
+		io.Copy(remote, local) // nolint: errcheck
 	}()
 	wg.Wait()
 	return nil
