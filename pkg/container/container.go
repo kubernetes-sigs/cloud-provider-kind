@@ -178,3 +178,21 @@ func ListByLabel(label string) ([]string, error) {
 	lines, err := kindexec.OutputLines(cmd)
 	return lines, err
 }
+
+// GetLabelValue return the value of the associated label
+// It returns an error if the label value does not exist
+func GetLabelValue(name string, label string) (string, error) {
+	cmd := kindexec.Command(containerRuntime,
+		"inspect",
+		"--format", fmt.Sprintf(`{{ index .Config.Labels "%s"}}`, label),
+		name,
+	)
+	lines, err := kindexec.OutputLines(cmd)
+	if err != nil {
+		return "", err
+	}
+	if len(lines) != 1 {
+		return "", fmt.Errorf("expected 1 line, got %d", len(lines))
+	}
+	return lines[0], nil
+}
