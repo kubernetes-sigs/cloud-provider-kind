@@ -156,6 +156,20 @@ NAME                            READY   STATUS    RESTARTS   AGE
 policy-local-59854877c9-xwtfk   1/1     Running   0          2m38s
 ```
 
+### Mac and Windows support
+
+Mac and Windows run the containers inside a VM and, on the contrary to Linux, the KIND nodes are not reachable from the host,
+so the LoadBalancer assigned IP is not working for users.
+
+To solve this problem, cloud-provider-kind, leverges the existing docker portmap capabilities to expose the Loadbalancer IP and Ports
+on the host,
+
+Limitations:
+
+- Mutation of Services, adding or removing ports to an existing Services, is not supported.
+- cloud-provider-kind binary needs permissions to add IP address to interfaces and to listen on privileged ports.
+- Overlapping IP between the containers and the host can break connectivity.
+
 
 **Note**
 
