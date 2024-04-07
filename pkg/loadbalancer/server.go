@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
@@ -16,12 +19,17 @@ import (
 )
 
 type Server struct {
+	tunnelManager *tunnelManager
 }
 
 var _ cloudprovider.LoadBalancer = &Server{}
 
 func NewServer() cloudprovider.LoadBalancer {
-	return &Server{}
+	s := &Server{}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		s.tunnelManager = NewTunnelManager()
+	}
+	return s
 }
 
 func (s *Server) GetLoadBalancer(ctx context.Context, clusterName string, service *v1.Service) (*v1.LoadBalancerStatus, bool, error) {
@@ -82,7 +90,7 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 	}
 	if !container.Exist(name) {
 		klog.V(2).Infof("creating container for loadbalancer")
-		err := createLoadBalancer(clusterName, service, proxyImage)
+		err := s.createLoadBalancer(clusterName, service, proxyImage)
 		if err != nil {
 			return nil, err
 		}
@@ -93,6 +101,15 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 	err := s.UpdateLoadBalancer(ctx, clusterName, service, nodes)
 	if err != nil {
 		return nil, err
+	}
+
+	// on some platforms that run containers in VMs forward from userspace
+	if s.tunnelManager != nil {
+		klog.V(2).Infof("updating loadbalancer tunnels on userspace")
+		err = s.tunnelManager.setupTunnels(loadBalancerName(clusterName, service))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// get loadbalancer Status
@@ -112,7 +129,13 @@ func (s *Server) UpdateLoadBalancer(ctx context.Context, clusterName string, ser
 }
 
 func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName string, service *v1.Service) error {
-	return container.Delete(loadBalancerName(clusterName, service))
+	containerName := loadBalancerName(clusterName, service)
+	var err1, err2 error
+	if s.tunnelManager != nil {
+		err1 = s.tunnelManager.removeTunnels(containerName)
+	}
+	err2 = container.Delete(containerName)
+	return errors.Join(err1, err2)
 }
 
 // loadbalancer name is a unique name for the loadbalancer container
@@ -125,11 +148,21 @@ func loadBalancerName(clusterName string, service *v1.Service) string {
 }
 
 func loadBalancerSimpleName(clusterName string, service *v1.Service) string {
-	return clusterName + "-" + service.Namespace + "-" + service.Name
+	return clusterName + "/" + service.Namespace + "/" + service.Name
+}
+
+func ServiceFromLoadBalancerSimpleName(s string) (clusterName string, service *v1.Service) {
+	slices := strings.Split(s, "/")
+	if len(slices) != 3 {
+		return
+	}
+	clusterName = slices[0]
+	service = &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: slices[1], Name: slices[2]}}
+	return
 }
 
 // createLoadBalancer create a docker container with a loadbalancer
-func createLoadBalancer(clusterName string, service *v1.Service, image string) error {
+func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, image string) error {
 	name := loadBalancerName(clusterName, service)
 
 	networkName := constants.FixedNetworkName
@@ -143,7 +176,7 @@ func createLoadBalancer(clusterName string, service *v1.Service, image string) e
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
 		// label the node with the load balancer name
-		"--label", fmt.Sprintf("%s=%s", constants.NodeNameLabelKey, loadBalancerSimpleName(clusterName, service)),
+		"--label", fmt.Sprintf("%s=%s", constants.LoadBalancerNameLabelKey, loadBalancerSimpleName(clusterName, service)),
 		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",
@@ -160,9 +193,21 @@ func createLoadBalancer(clusterName string, service *v1.Service, image string) e
 		"--sysctl=net.ipv6.conf.all.disable_ipv6=0", // enable IPv6
 		"--sysctl=net.ipv6.conf.all.forwarding=1",   // allow ipv6 forwarding
 		"--sysctl=net.ipv4.conf.all.rp_filter=0",    // disable rp filter
-		image,
 	}
 
+	if s.tunnelManager != nil {
+		// Forward the Service Ports to the host so they are accessible on Mac and Windows
+		for _, port := range service.Spec.Ports {
+			if port.Protocol != v1.ProtocolTCP {
+				continue
+			}
+			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, "TCP"))
+		}
+		// Publish all ports in the host in random ports
+		args = append(args, "--publish-all")
+	}
+
+	args = append(args, image)
 	err := container.Create(name, args)
 	if err != nil {
 		return fmt.Errorf("failed to create continers %s %v: %w", name, args, err)

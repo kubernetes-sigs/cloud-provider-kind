@@ -20,7 +20,7 @@ func TestLoadBalancerName(t *testing.T) {
 			name:        "simple",
 			cluster:     "test-cluster",
 			service:     &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "test-namespace", Name: "test-service"}},
-			expected:    constants.ContainerPrefix + "-AWEHRL6IVEFOWQI2DXZDWR4QZPCNHGSVJCV5UBM6",
+			expected:    constants.ContainerPrefix + "-CGVXJAVBASN2Z3RXOABMYVHNP7WNHR3ATSDVOTEN",
 			expectedLen: 48,
 		},
 	}

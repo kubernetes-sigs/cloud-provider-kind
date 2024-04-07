@@ -22,6 +22,7 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
+	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 	"sigs.k8s.io/cloud-provider-kind/pkg/provider"
 	"sigs.k8s.io/kind/pkg/cluster"
 	"sigs.k8s.io/kind/pkg/log"
@@ -50,7 +51,7 @@ func New(logger log.Logger) *Controller {
 }
 
 func (c *Controller) Run(ctx context.Context) {
-	defer cleanup()
+	defer c.cleanup()
 	for {
 		select {
 		case <-ctx.Done():
@@ -99,7 +100,7 @@ func (c *Controller) Run(ctx context.Context) {
 		for cluster, ccm := range c.clusters {
 			_, ok := clusterSet[cluster]
 			if !ok {
-				klog.Infof("Stopping service controller for cluster %s", cluster)
+				klog.Infof("Deleting resources for cluster %s", cluster)
 				ccm.cancelFn()
 				delete(c.clusters, cluster)
 			}
@@ -243,22 +244,58 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 
 	sharedInformers.Start(ctx.Done())
 
+	// This has to cleanup all the resources allocated by the cloud provider in this cluster
+	// - containers as loadbalancers
+	// - in windows and darwin ip addresses on the loopback interface
+	// Find all the containers associated to the cluster and then use the cloud provider methods to delete
+	// the loadbalancer, we can extract the service name from the container labels.
+	cancelFn := func() {
+		cancel()
+
+		containers, err := container.ListByLabel(fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName))
+		if err != nil {
+			klog.Errorf("can't list containers: %v", err)
+			return
+		}
+
+		lbController, ok := cloud.LoadBalancer()
+		// this can not happen
+		if !ok {
+			return
+		}
+
+		for _, name := range containers {
+			// create fake service to pass to the cloud provider method
+			v, err := container.GetLabelValue(name, constants.LoadBalancerNameLabelKey)
+			if err != nil {
+				klog.Infof("could not get the label for the loadbalancer on container %s on cluster %s : %v", name, clusterName, err)
+				continue
+			}
+			clusterName, service := loadbalancer.ServiceFromLoadBalancerSimpleName(v)
+			if service == nil {
+				klog.Infof("invalid format for loadbalancer on cluster %s: %s", clusterName, v)
+				continue
+			}
+			err = lbController.EnsureLoadBalancerDeleted(context.Background(), clusterName, service)
+			if err != nil {
+				klog.Infof("error deleting loadbalancer %s/%s on cluster %s : %v", service.Namespace, service.Name, clusterName, err)
+				continue
+			}
+		}
+	}
+
 	return &ccm{
 		factory:           sharedInformers,
 		serviceController: serviceController,
 		nodeController:    nodeController,
-		cancelFn:          cancel}, nil
+		cancelFn:          cancelFn}, nil
 }
 
-func cleanup() {
-	containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
-	if err != nil {
-		klog.Errorf("can't list containers: %v", err)
-		return
-	}
-	for _, id := range containers {
-		if err := container.Delete(id); err != nil {
-			klog.Errorf("can't delete container %s: %v", id, err)
-		}
+// TODO cleanup alias ip on mac
+func (c *Controller) cleanup() {
+	for cluster, ccm := range c.clusters {
+		klog.Infof("Cleaning resources for cluster %s", cluster)
+		ccm.cancelFn()
+		delete(c.clusters, cluster)
 	}
 }
