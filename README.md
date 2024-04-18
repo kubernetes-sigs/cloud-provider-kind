@@ -7,6 +7,13 @@ KIND has demonstrated to be a very versatile, efficient, cheap and very useful t
 - [Slack channel](https://kubernetes.slack.com/messages/kind)
 - [Mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-testing)
 
+## Talks 
+
+Kubecon EU 2024 - [Keep Calm and Load Balance on KIND - Antonio Ojea & Benjamin Elder, Google](https://sched.co/1YhhY)
+
+[![Keep Calm and Load Balance on KIND](https://img.youtube.com/vi/U6_-y24rJnI/0.jpg)](https://www.youtube.com/watch?v=U6_-y24rJnI)
+
+
 ## Install
 
 You can install `cloud-provider-kind` using `go install`:
