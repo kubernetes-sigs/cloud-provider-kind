@@ -9,14 +9,17 @@ KIND has demonstrated to be a very versatile, efficient, cheap and very useful t
 
 ## Install
 
-You can install `cloud-provider-kind` by downloading the binary from the release page.
-On linux:
+You can install `cloud-provider-kind` using `go install`:
 
 ```sh
-curl -Lo ./cloud-provider-kind https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.0.1/cloud-provider-kind-linux-amd64
-chmod +x ./cloud-provider-kind
-sudo mv ./cloud-provider-kind  /usr/local/bin/cloud-provider-kind
+go install sigs.k8s.io/cloud-provider-kind@latest
+```
 
+This will install the binary in `$GOBIN` (typically `~/go/bin`); you
+can make it available elsewhere if appropriate:
+
+```sh
+sudo install ~/go/bin/cloud-provider-kind /usr/local/bin
 ```
 
 You can also build it locally:
