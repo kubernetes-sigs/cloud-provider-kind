@@ -176,11 +176,16 @@ on the host.
 
 Limitations:
 
-- Windows not supported yet.
 - Mutation of Services, adding or removing ports to an existing Services, is not supported.
 - cloud-provider-kind binary needs permissions to add IP address to interfaces and to listen on privileged ports.
 - Overlapping IP between the containers and the host can break connectivity.
 
+Mainly tested with `docker` and `Linux`, though `Windows` and `Mac` are also basically supported:
+- On macOS you must run cloud-provider-kind using `sudo`
+- On Windows you must run cloud-provider-kind from a shell that uses `Run as administrator`
+
+Further feedback is welcome on other platforms.\
+The project is still in very alpha state, bugs are expected, please report them back opening a Github issue.
 
 **Note**
 
