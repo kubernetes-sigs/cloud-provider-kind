@@ -18,14 +18,21 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
+type Config struct {
+	ConsistentServicePortMapping bool
+}
+
 type Server struct {
+	Config
 	tunnelManager *tunnelManager
 }
 
 var _ cloudprovider.LoadBalancer = &Server{}
 
-func NewServer() cloudprovider.LoadBalancer {
-	s := &Server{}
+func NewServer(cfg Config) cloudprovider.LoadBalancer {
+	s := &Server{
+		Config: cfg,
+	}
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		s.tunnelManager = NewTunnelManager()
 	}
@@ -197,14 +204,23 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 
 	if s.tunnelManager != nil {
 		// Forward the Service Ports to the host so they are accessible on Mac and Windows
-		for _, port := range service.Spec.Ports {
-			if port.Protocol != v1.ProtocolTCP {
-				continue
+		if s.ConsistentServicePortMapping {
+			for _, port := range service.Spec.Ports {
+				if port.Protocol != v1.ProtocolTCP {
+					continue
+				}
+				args = append(args, fmt.Sprintf("--publish=%d:%d/%s", port.Port, port.Port, "TCP"))
 			}
-			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, "TCP"))
+		} else {
+			for _, port := range service.Spec.Ports {
+				if port.Protocol != v1.ProtocolTCP {
+					continue
+				}
+				args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, "TCP"))
+			}
+			// Publish all ports in the host in random ports
+			args = append(args, "--publish-all")
 		}
-		// Publish all ports in the host in random ports
-		args = append(args, "--publish-all")
 	}
 
 	args = append(args, image)

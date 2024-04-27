@@ -28,7 +28,13 @@ import (
 	"sigs.k8s.io/kind/pkg/log"
 )
 
+type Config struct {
+	Logger       log.Logger
+	ServerConfig loadbalancer.Config
+}
+
 type Controller struct {
+	Config
 	kind     *cluster.Provider
 	clusters map[string]*ccm
 }
@@ -40,11 +46,12 @@ type ccm struct {
 	cancelFn          context.CancelFunc
 }
 
-func New(logger log.Logger) *Controller {
+func New(cfg Config) *Controller {
 	controllersmetrics.Register()
 	return &Controller{
+		Config: cfg,
 		kind: cluster.NewProvider(
-			cluster.ProviderWithLogger(logger),
+			cluster.ProviderWithLogger(cfg.Logger),
 		),
 		clusters: make(map[string]*ccm),
 	}
@@ -86,7 +93,11 @@ func (c *Controller) Run(ctx context.Context) {
 			}
 
 			klog.V(2).Infof("Creating new cloud provider for cluster %s", cluster)
-			cloud := provider.New(cluster, c.kind)
+			cloud := provider.New(provider.Config{
+				ClusterName:  cluster,
+				KindClient:   c.kind,
+				ServerConfig: c.ServerConfig,
+			})
 			ccm, err := startCloudControllerManager(ctx, cluster, kubeClient, cloud)
 			if err != nil {
 				klog.Errorf("Failed to start cloud controller for cluster %s: %v", cluster, err)

@@ -51,7 +51,7 @@ func (c *cloud) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprov
 	}
 	m := &cloudprovider.InstanceMetadata{
 		// TODO: podman support
-		ProviderID:   fmt.Sprintf("kind://%s/kind/%s", c.clusterName, n.String()), // providerID: kind://<cluster-name>/kind/<node-name>
+		ProviderID:   fmt.Sprintf("kind://%s/kind/%s", c.ClusterName, n.String()), // providerID: kind://<cluster-name>/kind/<node-name>
 		InstanceType: "kind-node",
 		NodeAddresses: []v1.NodeAddress{
 			{
@@ -77,7 +77,7 @@ func (c *cloud) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprov
 }
 
 func (c *cloud) findNodeByName(name string) (nodes.Node, error) {
-	nodes, err := c.kindClient.ListNodes(c.clusterName)
+	nodes, err := c.KindClient.ListNodes(c.ClusterName)
 	if err != nil {
 		return nil, fmt.Errorf("no nodes founds")
 	}
@@ -86,5 +86,5 @@ func (c *cloud) findNodeByName(name string) (nodes.Node, error) {
 			return n, nil
 		}
 	}
-	return nil, fmt.Errorf("node with name %s does not exist on cluster %s", name, c.clusterName)
+	return nil, fmt.Errorf("node with name %s does not exist on cluster %s", name, c.ClusterName)
 }

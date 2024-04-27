@@ -13,16 +13,19 @@ import (
 	"k8s.io/component-base/logs"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
+	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
 
 var (
 	flagV int
+	flagC bool
 )
 
 func init() {
 	flag.IntVar(&flagV, "v", 2, "Verbosity level")
+	flag.BoolVar(&flagC, "c", false, "Consistently map service ports to the same localhost ports")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
@@ -69,5 +72,10 @@ func main() {
 	if err != nil {
 		logger.Errorf("error setting klog verbosity to %d : %v", flagV, err)
 	}
-	controller.New(logger).Run(ctx)
+	controller.New(controller.Config{
+		Logger: logger,
+		ServerConfig: loadbalancer.Config{
+			ConsistentServicePortMapping: flagC,
+		},
+	}).Run(ctx)
 }

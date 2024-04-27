@@ -9,11 +9,16 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster"
 )
 
-func New(clusterName string, kindClient *cluster.Provider) cloudprovider.Interface {
+type Config struct {
+	ClusterName  string
+	KindClient   *cluster.Provider
+	ServerConfig loadbalancer.Config
+}
+
+func New(cfg Config) cloudprovider.Interface {
 	return &cloud{
-		clusterName:  clusterName,
-		kindClient:   kindClient,
-		lbController: loadbalancer.NewServer(),
+		Config:       cfg,
+		lbController: loadbalancer.NewServer(cfg.ServerConfig),
 	}
 }
 
@@ -21,8 +26,7 @@ var _ cloudprovider.Interface = (*cloud)(nil)
 
 // controller is the KIND implementation of the cloud provider interface
 type cloud struct {
-	clusterName  string // name of the kind cluster
-	kindClient   *cluster.Provider
+	Config
 	lbController cloudprovider.LoadBalancer
 }
 
@@ -58,7 +62,7 @@ func (c *cloud) Routes() (cloudprovider.Routes, bool) {
 }
 
 func (c *cloud) HasClusterID() bool {
-	return len(c.clusterName) > 0
+	return len(c.ClusterName) > 0
 }
 
 func (c *cloud) InstancesV2() (cloudprovider.InstancesV2, bool) {
