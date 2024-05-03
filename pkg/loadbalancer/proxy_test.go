@@ -76,7 +76,10 @@ func Test_generateConfig(t *testing.T) {
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]data{
-					"IPv4_80": data{BindAddress: "*:80", Backends: map[string]string{"a": "10.0.0.1:30000", "b": "10.0.0.2:30000"}},
+					"IPv4_80": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80},
+						Cluster:  []endpoint{{"10.0.0.1", 30000}, {"10.0.0.2", 30000}},
+					},
 				},
 			},
 		},
@@ -114,8 +117,14 @@ func Test_generateConfig(t *testing.T) {
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]data{
-					"IPv4_80":  data{BindAddress: "*:80", Backends: map[string]string{"a": "10.0.0.1:30000", "b": "10.0.0.2:30000"}},
-					"IPv4_443": data{BindAddress: "*:443", Backends: map[string]string{"a": "10.0.0.1:31000", "b": "10.0.0.2:31000"}},
+					"IPv4_80": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80},
+						Cluster:  []endpoint{{"10.0.0.1", 30000}, {"10.0.0.2", 30000}},
+					},
+					"IPv4_443": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 443},
+						Cluster:  []endpoint{{"10.0.0.1", 31000}, {"10.0.0.2", 31000}},
+					},
 				},
 			},
 		},
@@ -153,8 +162,14 @@ func Test_generateConfig(t *testing.T) {
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]data{
-					"IPv6_80":  data{BindAddress: `:::80`, Backends: map[string]string{"a": "[2001:db2::3]:30000", "b": "[2001:db2::4]:30000"}},
-					"IPv6_443": data{BindAddress: `:::443`, Backends: map[string]string{"a": "[2001:db2::3]:31000", "b": "[2001:db2::4]:31000"}},
+					"IPv6_80": data{
+						Listener: endpoint{Address: "::", Port: 80},
+						Cluster:  []endpoint{{"2001:db2::3", 30000}, {"2001:db2::4", 30000}},
+					},
+					"IPv6_443": data{
+						Listener: endpoint{Address: "::", Port: 443},
+						Cluster:  []endpoint{{"2001:db2::3", 31000}, {"2001:db2::4", 31000}},
+					},
 				},
 			},
 		},
@@ -162,6 +177,7 @@ func Test_generateConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := generateConfig(tt.service, tt.nodes); !reflect.DeepEqual(got, tt.want) {
+				t.Logf("diff %+v", cmp.Diff(got, tt.want))
 				t.Errorf("generateConfig() = %+v,\n want %+v", got, tt.want)
 			}
 		})
@@ -181,53 +197,17 @@ func Test_proxyConfig(t *testing.T) {
 			data: &proxyConfigData{
 				HealthCheckPort: 32764,
 				ServicePorts: map[string]data{
-					"IPv4_80": data{BindAddress: "*:80", Backends: map[string]string{
-						"kind-worker":  "192.168.8.2:30497",
-						"kind-worker2": "192.168.8.3:30497",
-					}},
-					"IPv4_443": data{BindAddress: "*:443", Backends: map[string]string{
-						"kind-worker":  "192.168.8.2:31497",
-						"kind-worker2": "192.168.8.3:31497",
-					}},
+					"IPv4_80": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80},
+						Cluster:  []endpoint{{"192.168.8.2", 30497}, {"192.168.8.3", 30497}},
+					},
+					"IPv4_443": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 443},
+						Cluster:  []endpoint{{"192.168.8.2", 31497}, {"192.168.8.3", 31497}},
+					},
 				},
 			},
 			wantConfig: `
-global
-log /dev/log local0
-log /dev/log local1 notice
-daemon
-
-resolvers docker
-nameserver dns 127.0.0.11:53
-
-defaults
-log global
-mode tcp
-option dontlognull
-# TODO: tune these
-timeout connect 5000
-timeout client 50000
-timeout server 50000
-# allow to boot despite dns don't resolve backends
-default-server init-addr none
-
-frontend IPv4_443-frontend
-	bind *:443
-	default_backend IPv4_443-backend
-
-backend IPv4_443-backend
-	option httpchk GET /healthz
-	server kind-worker 192.168.8.2:31497 check port 32764 inter 5s fall 3 rise 1
-	server kind-worker2 192.168.8.3:31497 check port 32764 inter 5s fall 3 rise 1
-
-frontend IPv4_80-frontend
-	bind *:80
-	default_backend IPv4_80-backend
-
-backend IPv4_80-backend
-	option httpchk GET /healthz
-	server kind-worker 192.168.8.2:30497 check port 32764 inter 5s fall 3 rise 1
-	server kind-worker2 192.168.8.3:30497 check port 32764 inter 5s fall 3 rise 1
 `,
 		},
 	}

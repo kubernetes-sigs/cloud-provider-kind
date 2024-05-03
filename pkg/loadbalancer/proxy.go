@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -18,10 +16,10 @@ import (
 )
 
 // proxyImage defines the loadbalancer image:tag
-const proxyImage = "docker.io/kindest/haproxy:v20230606-42a2262b"
+const proxyImage = "envoyproxy/envoy:v1.30.1"
 
 // proxyConfigPath defines the path to the config file in the image
-const proxyConfigPath = "/usr/local/etc/haproxy/haproxy.cfg"
+const proxyConfigPath = "/etc/envoy/envoy.yaml"
 
 // proxyConfigData is supplied to the loadbalancer config template
 type proxyConfigData struct {
@@ -31,45 +29,57 @@ type proxyConfigData struct {
 
 type data struct {
 	// frontend
-	BindAddress string // *:Port for IPv4 :::Port for IPv6
+	Listener endpoint
 	// backend
-	Backends map[string]string // key: node name  value: IP:Port
+	Cluster []endpoint // key: node name  value: IP:Port
+}
+
+type endpoint struct {
+	Address string
+	Port    int
 }
 
 // proxyDefaultConfigTemplate is the loadbalancer config template
 const proxyDefaultConfigTemplate = `
-global
-  log /dev/log local0
-  log /dev/log local1 notice
-  daemon
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
 
-resolvers docker
-  nameserver dns 127.0.0.11:53
+static_resources:
+  listeners:
+  {{- range $index, $data := .ServicePorts }}
+  - name: listener_{{$index}}
+    address:
+      socket_address: { address: {{ $data.Listener.Address }}, port_value: {{ $data.Listener.Port }} }
+    filter_chains:
+      - filters:
+        - name: envoy.filters.network.tcp_proxy
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+            stat_prefix: destination
+            cluster: cluster_{{$index}}
+  {{- end }}
 
-defaults
-  log global
-  mode tcp
-  option dontlognull
-  # TODO: tune these
-  timeout connect 5000
-  timeout client 50000
-  timeout server 50000
-  # allow to boot despite dns don't resolve backends
-  default-server init-addr none
-
-{{ range $index, $data := .ServicePorts }}
-frontend {{$index}}-frontend
-  bind {{ $data.BindAddress }}
-  default_backend {{$index}}-backend
-  # reject connections if all backends are down
-  tcp-request connection reject if { nbsrv({{$index}}-backend) lt 1 }
-
-backend {{$index}}-backend
-  option httpchk GET /healthz
-  {{- range $server, $address := $data.Backends }}
-  server {{ $server }} {{ $address }} check port {{ $.HealthCheckPort  }} inter 5s fall 3 rise 1
-  {{- end}}
-{{ end }}
+  clusters:
+  {{- range $index, $data := .ServicePorts }}
+  - name: cluster_{{$index}}
+    connect_timeout: 0.25s
+    type: STATIC
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: cluster_{{$index}}
+      endpoints:
+	  {{- range $address := $data.Cluster }}
+        - lb_endpoints:
+          - endpoint:
+              health_check_config:
+                port_value: {{ $.HealthCheckPort  }}
+              address:
+                socket_address:
+                  address: {{ $address.Address }}
+                  port_value: {{ $address.Port }}
+      {{- end}}
+  {{- end }}
 `
 
 // proxyConfig returns a kubeadm config generated from config data, in particular
@@ -110,15 +120,12 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 				continue
 			}
 			key := fmt.Sprintf("%s_%d", string(ipFamily), port.Port)
-			bind := `*`
+			bind := `0.0.0.0`
 			if ipFamily == v1.IPv6Protocol {
 				bind = `::`
 			}
-			servicePortConfig[key] = data{
-				BindAddress: fmt.Sprintf("%s:%d", bind, port.Port),
-				Backends:    map[string]string{},
-			}
 
+			backends := []endpoint{}
 			for _, n := range nodes {
 				for _, addr := range n.Status.Addresses {
 					// only internal IPs supported
@@ -131,8 +138,13 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 						(netutils.IsIPv6String(addr.Address) && ipFamily != v1.IPv6Protocol) {
 						continue
 					}
-					servicePortConfig[key].Backends[n.Name] = net.JoinHostPort(addr.Address, strconv.Itoa(int(port.NodePort)))
+					backends = append(backends, endpoint{addr.Address, int(port.NodePort)})
 				}
+			}
+
+			servicePortConfig[key] = data{
+				Listener: endpoint{bind, int(port.Port)},
+				Cluster:  backends,
 			}
 		}
 	}
