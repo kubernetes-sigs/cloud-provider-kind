@@ -35,8 +35,9 @@ type data struct {
 }
 
 type endpoint struct {
-	Address string
-	Port    int
+	Address  string
+	Port     int
+	Protocol string
 }
 
 // proxyDefaultConfigTemplate is the loadbalancer config template
@@ -50,7 +51,29 @@ static_resources:
   {{- range $index, $data := .ServicePorts }}
   - name: listener_{{$index}}
     address:
-      socket_address: { address: {{ $data.Listener.Address }}, port_value: {{ $data.Listener.Port }} }
+      socket_address:
+        address: {{ $data.Listener.Address }}
+        port_value: {{ $data.Listener.Port }}
+        protocol: {{ $data.Listener.Protocol }}
+    {{- if eq $data.Listener.Protocol "UDP"}}
+    udp_listener_config:
+      downstream_socket_config:
+        max_rx_datagram_size: 9000
+    listener_filters:
+    - name: envoy.filters.udp_listener.udp_proxy
+      typed_config:
+        '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.UdpProxyConfig
+        stat_prefix: cluster_{{$index}}
+        matcher:
+          on_no_match:
+            action:
+              name: route
+              typed_config:
+                '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
+                cluster: cluster_{{$index}}
+        upstream_socket_config:
+          max_rx_datagram_size: 9000
+    {{- else }}
     filter_chains:
       - filters:
         - name: envoy.filters.network.tcp_proxy
@@ -58,6 +81,7 @@ static_resources:
             "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
             stat_prefix: destination
             cluster: cluster_{{$index}}
+    {{- end}}
   {{- end }}
 
   clusters:
@@ -115,11 +139,11 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	for _, ipFamily := range service.Spec.IPFamilies {
 		// TODO: support UDP
 		for _, port := range service.Spec.Ports {
-			if port.Protocol != v1.ProtocolTCP {
+			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
 				klog.Infof("service port protocol %s not supported", port.Protocol)
 				continue
 			}
-			key := fmt.Sprintf("%s_%d", string(ipFamily), port.Port)
+			key := fmt.Sprintf("%s_%d_%s", string(ipFamily), port.Port, port.Protocol)
 			bind := `0.0.0.0`
 			if ipFamily == v1.IPv6Protocol {
 				bind = `::`
@@ -138,12 +162,12 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 						(netutils.IsIPv6String(addr.Address) && ipFamily != v1.IPv6Protocol) {
 						continue
 					}
-					backends = append(backends, endpoint{addr.Address, int(port.NodePort)})
+					backends = append(backends, endpoint{Address: addr.Address, Port: int(port.NodePort), Protocol: string(port.Protocol)})
 				}
 			}
 
 			servicePortConfig[key] = data{
-				Listener: endpoint{bind, int(port.Port)},
+				Listener: endpoint{Address: bind, Port: int(port.Port), Protocol: string(port.Protocol)},
 				Cluster:  backends,
 			}
 		}

@@ -76,9 +76,9 @@ func Test_generateConfig(t *testing.T) {
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]data{
-					"IPv4_80": data{
-						Listener: endpoint{Address: "0.0.0.0", Port: 80},
-						Cluster:  []endpoint{{"10.0.0.1", 30000}, {"10.0.0.2", 30000}},
+					"IPv4_80_TCP": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
 					},
 				},
 			},
@@ -117,13 +117,58 @@ func Test_generateConfig(t *testing.T) {
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]data{
-					"IPv4_80": data{
-						Listener: endpoint{Address: "0.0.0.0", Port: 80},
-						Cluster:  []endpoint{{"10.0.0.1", 30000}, {"10.0.0.2", 30000}},
+					"IPv4_80_TCP": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
 					},
-					"IPv4_443": data{
-						Listener: endpoint{Address: "0.0.0.0", Port: 443},
-						Cluster:  []endpoint{{"10.0.0.1", 31000}, {"10.0.0.2", 31000}},
+					"IPv4_443_TCP": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 443, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 31000, string(v1.ProtocolTCP)}, {"10.0.0.2", 31000, string(v1.ProtocolTCP)}},
+					},
+				},
+			},
+		},
+		{
+			name: "multiport different protocol service",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: v1.ServiceSpec{
+					Type:                  v1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
+					IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
+					Ports: []v1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+							NodePort:   30000,
+							Protocol:   v1.ProtocolTCP,
+						},
+						{
+							Port:       80,
+							TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+							NodePort:   31000,
+							Protocol:   v1.ProtocolUDP,
+						},
+					},
+					HealthCheckNodePort: 32000,
+				},
+			},
+			nodes: []*v1.Node{
+				makeNode("a", "10.0.0.1"),
+				makeNode("b", "10.0.0.2"),
+			},
+			want: &proxyConfigData{
+				HealthCheckPort: 32000,
+				ServicePorts: map[string]data{
+					"IPv4_80_TCP": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
+					},
+					"IPv4_80_UDP": data{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolUDP)},
+						Cluster:  []endpoint{{"10.0.0.1", 31000, string(v1.ProtocolUDP)}, {"10.0.0.2", 31000, string(v1.ProtocolUDP)}},
 					},
 				},
 			},
@@ -162,13 +207,13 @@ func Test_generateConfig(t *testing.T) {
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]data{
-					"IPv6_80": data{
-						Listener: endpoint{Address: "::", Port: 80},
-						Cluster:  []endpoint{{"2001:db2::3", 30000}, {"2001:db2::4", 30000}},
+					"IPv6_80_TCP": data{
+						Listener: endpoint{Address: "::", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"2001:db2::3", 30000, string(v1.ProtocolTCP)}, {"2001:db2::4", 30000, string(v1.ProtocolTCP)}},
 					},
-					"IPv6_443": data{
-						Listener: endpoint{Address: "::", Port: 443},
-						Cluster:  []endpoint{{"2001:db2::3", 31000}, {"2001:db2::4", 31000}},
+					"IPv6_443_TCP": data{
+						Listener: endpoint{Address: "::", Port: 443, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"2001:db2::3", 31000, string(v1.ProtocolTCP)}, {"2001:db2::4", 31000, string(v1.ProtocolTCP)}},
 					},
 				},
 			},
@@ -199,11 +244,11 @@ func Test_proxyConfig(t *testing.T) {
 				ServicePorts: map[string]data{
 					"IPv4_80": data{
 						Listener: endpoint{Address: "0.0.0.0", Port: 80},
-						Cluster:  []endpoint{{"192.168.8.2", 30497}, {"192.168.8.3", 30497}},
+						Cluster:  []endpoint{{"192.168.8.2", 30497, string(v1.ProtocolTCP)}, {"192.168.8.3", 30497, string(v1.ProtocolTCP)}},
 					},
 					"IPv4_443": data{
 						Listener: endpoint{Address: "0.0.0.0", Port: 443},
-						Cluster:  []endpoint{{"192.168.8.2", 31497}, {"192.168.8.3", 31497}},
+						Cluster:  []endpoint{{"192.168.8.2", 31497, string(v1.ProtocolTCP)}, {"192.168.8.3", 31497, string(v1.ProtocolTCP)}},
 					},
 				},
 			},
