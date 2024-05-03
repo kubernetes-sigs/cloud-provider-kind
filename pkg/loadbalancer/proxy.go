@@ -90,6 +90,13 @@ static_resources:
     connect_timeout: 0.25s
     type: STATIC
     lb_policy: ROUND_ROBIN
+    health_checks:
+      - timeout: 1s
+        interval: 2s
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+        http_health_check:
+          path: /healthz
     load_assignment:
       cluster_name: cluster_{{$index}}
       endpoints:
