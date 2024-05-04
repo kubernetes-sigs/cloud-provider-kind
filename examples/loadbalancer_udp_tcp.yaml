@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multiprotocol
+spec:
+  selector:
+    matchLabels:
+      app: multiprotocol
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: multiprotocol
+    spec:
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - multiprotocol
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: multiprotocol
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args:
+          - netexec
+          - --http-port=80
+          - --udp-port=80
+        ports:
+          - name: tcp
+            containerPort: 80
+            protocol: TCP
+          - name: udp
+            containerPort: 80
+            protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multiprotocol
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: multiprotocol
+  ports:
+    - name: tcp
+      port: 80
+      targetPort: 80
+      protocol: TCP
+    - name: udp
+      port: 80
+      targetPort: 80
+      protocol: UDP

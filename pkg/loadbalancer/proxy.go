@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
@@ -18,58 +18,117 @@ import (
 )
 
 // proxyImage defines the loadbalancer image:tag
-const proxyImage = "docker.io/kindest/haproxy:v20230606-42a2262b"
+const proxyImage = "envoyproxy/envoy:v1.30.1"
 
 // proxyConfigPath defines the path to the config file in the image
-const proxyConfigPath = "/usr/local/etc/haproxy/haproxy.cfg"
+const proxyConfigPath = "/etc/envoy/envoy.yaml"
 
 // proxyConfigData is supplied to the loadbalancer config template
 type proxyConfigData struct {
-	HealthCheckPort int             // is the same for all ServicePorts
-	ServicePorts    map[string]data // key is the IP family and Port to support MultiPort services
+	HealthCheckPort int                    // is the same for all ServicePorts
+	ServicePorts    map[string]servicePort // key is the IP family and Port and Protocol to support MultiPort services
+	SessionAffinity string
 }
 
-type data struct {
+type servicePort struct {
 	// frontend
-	BindAddress string // *:Port for IPv4 :::Port for IPv6
+	Listener endpoint
 	// backend
-	Backends map[string]string // key: node name  value: IP:Port
+	Cluster []endpoint
+}
+
+type endpoint struct {
+	Address  string
+	Port     int
+	Protocol string
 }
 
 // proxyDefaultConfigTemplate is the loadbalancer config template
 const proxyDefaultConfigTemplate = `
-global
-  log /dev/log local0
-  log /dev/log local1 notice
-  daemon
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
 
-resolvers docker
-  nameserver dns 127.0.0.11:53
+static_resources:
+  listeners:
+  {{- range $index, $servicePort := .ServicePorts }}
+  - name: listener_{{$index}}
+    address:
+      socket_address:
+        address: {{ $servicePort.Listener.Address }}
+        port_value: {{ $servicePort.Listener.Port }}
+        protocol: {{ $servicePort.Listener.Protocol }}
+    {{- if eq $servicePort.Listener.Protocol "UDP"}}
+    udp_listener_config:
+      downstream_socket_config:
+        max_rx_datagram_size: 9000
+    listener_filters:
+    - name: envoy.filters.udp_listener.udp_proxy
+      typed_config:
+        '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.UdpProxyConfig
+        stat_prefix: cluster_{{$index}}
+        matcher:
+          on_no_match:
+            action:
+              name: route
+              typed_config:
+                '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
+                cluster: cluster_{{$index}}
+        {{- if eq $.SessionAffinity "ClientIP"}}
+        hash_policies:
+          source_ip: true
+        {{- end}}
+        upstream_socket_config:
+          max_rx_datagram_size: 9000
+    {{- else }}
+    filter_chains:
+      - filters:
+        - name: envoy.filters.network.tcp_proxy
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+            stat_prefix: destination
+            cluster: cluster_{{$index}}
+            {{- if eq $.SessionAffinity "ClientIP"}}
+            hash_policy:
+              source_ip: {}
+            {{- end}}
+    {{- end}}
+  {{- end }}
 
-defaults
-  log global
-  mode tcp
-  option dontlognull
-  # TODO: tune these
-  timeout connect 5000
-  timeout client 50000
-  timeout server 50000
-  # allow to boot despite dns don't resolve backends
-  default-server init-addr none
-
-{{ range $index, $data := .ServicePorts }}
-frontend {{$index}}-frontend
-  bind {{ $data.BindAddress }}
-  default_backend {{$index}}-backend
-  # reject connections if all backends are down
-  tcp-request connection reject if { nbsrv({{$index}}-backend) lt 1 }
-
-backend {{$index}}-backend
-  option httpchk GET /healthz
-  {{- range $server, $address := $data.Backends }}
-  server {{ $server }} {{ $address }} check port {{ $.HealthCheckPort  }} inter 5s fall 3 rise 1
-  {{- end}}
-{{ end }}
+  clusters:
+  {{- range $index, $servicePort := .ServicePorts }}
+  - name: cluster_{{$index}}
+    connect_timeout: 5s
+    type: STATIC
+    {{- if eq $.SessionAffinity "ClientIP"}}
+    lb_policy: RING_HASH
+    {{- else}}
+    lb_policy: RANDOM
+    {{- end}}
+    health_checks:
+      - timeout: 5s
+        interval: 3s
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+        always_log_health_check_failures: true
+        always_log_health_check_success: true
+        http_health_check:
+          path: /healthz
+    load_assignment:
+      cluster_name: cluster_{{$index}}
+      endpoints:
+      {{- range $address := $servicePort.Cluster }}
+        - lb_endpoints:
+          - endpoint:
+              health_check_config:
+                port_value: {{ $.HealthCheckPort  }}
+              address:
+                socket_address:
+                  address: {{ $address.Address }}
+                  port_value: {{ $address.Port }}
+                  protocol: {{ $address.Protocol }}
+      {{- end}}
+  {{- end }}
 `
 
 // proxyConfig returns a kubeadm config generated from config data, in particular
@@ -99,26 +158,23 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 
 	lbConfig := &proxyConfigData{
 		HealthCheckPort: hcPort,
+		SessionAffinity: string(service.Spec.SessionAffinity),
 	}
 
-	servicePortConfig := map[string]data{}
+	servicePortConfig := map[string]servicePort{}
 	for _, ipFamily := range service.Spec.IPFamilies {
-		// TODO: support UDP
 		for _, port := range service.Spec.Ports {
-			if port.Protocol != v1.ProtocolTCP {
+			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
 				klog.Infof("service port protocol %s not supported", port.Protocol)
 				continue
 			}
-			key := fmt.Sprintf("%s_%d", string(ipFamily), port.Port)
-			bind := `*`
+			key := fmt.Sprintf("%s_%d_%s", ipFamily, port.Port, port.Protocol)
+			bind := `0.0.0.0`
 			if ipFamily == v1.IPv6Protocol {
-				bind = `::`
-			}
-			servicePortConfig[key] = data{
-				BindAddress: fmt.Sprintf("%s:%d", bind, port.Port),
-				Backends:    map[string]string{},
+				bind = `"::"`
 			}
 
+			backends := []endpoint{}
 			for _, n := range nodes {
 				for _, addr := range n.Status.Addresses {
 					// only internal IPs supported
@@ -131,8 +187,13 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 						(netutils.IsIPv6String(addr.Address) && ipFamily != v1.IPv6Protocol) {
 						continue
 					}
-					servicePortConfig[key].Backends[n.Name] = net.JoinHostPort(addr.Address, strconv.Itoa(int(port.NodePort)))
+					backends = append(backends, endpoint{Address: addr.Address, Port: int(port.NodePort), Protocol: string(port.Protocol)})
 				}
+			}
+
+			servicePortConfig[key] = servicePort{
+				Listener: endpoint{Address: bind, Port: int(port.Port), Protocol: string(port.Protocol)},
+				Cluster:  backends,
 			}
 		}
 	}
@@ -161,10 +222,31 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 
 	klog.V(2).Infof("restarting loadbalancer")
-	err = container.Signal(name, "HUP")
+	err = container.Restart(name)
 	if err != nil {
 		return err
 	}
+	klog.V(2).Infof("loadbalancer restarted")
+	// Wait until is running and stable, it can happen that the configuration is wrong
+	// and the container dies or restarts, giving the impression the loadbalancer is working
+	// when is not even running.
+	checks := 0
+	err = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (done bool, err error) {
+		if !container.IsRunning(name) {
+			// if is flapping
+			if checks > 0 {
+				return false, fmt.Errorf("loadbalancer %s is not stable", name)
+			}
+			return false, nil
+		}
+		// let's check again to be sure is not constantly restarting
+		if checks == 0 {
+			checks++
+			return false, nil
+		}
+		klog.V(2).Infof("loadbalancer ready and running")
+		return true, nil
+	})
 
-	return nil
+	return err
 }
