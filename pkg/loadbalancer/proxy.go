@@ -235,7 +235,7 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 		if !container.IsRunning(name) {
 			// if is flapping
 			if checks > 0 {
-				return false, fmt.Errorf("container %s is not stable")
+				return false, fmt.Errorf("loadbalancer %s is not stable", name)
 			}
 			return false, nil
 		}
