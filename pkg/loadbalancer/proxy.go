@@ -116,6 +116,7 @@ static_resources:
                 socket_address:
                   address: {{ $address.Address }}
                   port_value: {{ $address.Port }}
+                  protocol: {{ $address.Protocol }}
       {{- end}}
   {{- end }}
 `
