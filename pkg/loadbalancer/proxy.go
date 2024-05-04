@@ -153,13 +153,12 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 
 	servicePortConfig := map[string]servicePort{}
 	for _, ipFamily := range service.Spec.IPFamilies {
-		// TODO: support UDP
 		for _, port := range service.Spec.Ports {
 			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
 				klog.Infof("service port protocol %s not supported", port.Protocol)
 				continue
 			}
-			key := fmt.Sprintf("%s_%d_%s", string(ipFamily), port.Port, port.Protocol)
+			key := fmt.Sprintf("%s_%d_%s", ipFamily, port.Port, port.Protocol)
 			bind := `0.0.0.0`
 			if ipFamily == v1.IPv6Protocol {
 				bind = `::`
