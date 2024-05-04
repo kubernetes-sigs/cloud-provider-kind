@@ -88,7 +88,7 @@ static_resources:
   clusters:
   {{- range $index, $servicePort := .ServicePorts }}
   - name: cluster_{{$index}}
-    connect_timeout: 0.25s
+    connect_timeout: 5s
     type: STATIC
     {{- if eq $.SessionAffinity "ClientIP"}}
     lb_policy: RING_HASH
@@ -96,8 +96,8 @@ static_resources:
     lb_policy: RANDOM
     {{- end}}
     health_checks:
-      - timeout: 1s
-        interval: 2s
+      - timeout: 5s
+        interval: 3s
         unhealthy_threshold: 3
         healthy_threshold: 1
         always_log_health_check_failures: true
