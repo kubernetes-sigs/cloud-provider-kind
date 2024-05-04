@@ -25,6 +25,7 @@ const proxyConfigPath = "/etc/envoy/envoy.yaml"
 type proxyConfigData struct {
 	HealthCheckPort int                    // is the same for all ServicePorts
 	ServicePorts    map[string]servicePort // key is the IP family and Port and Protocol to support MultiPort services
+	SessionAffinity string
 }
 
 type servicePort struct {
@@ -89,7 +90,11 @@ static_resources:
   - name: cluster_{{$index}}
     connect_timeout: 0.25s
     type: STATIC
+    {{- if eq $.SessionAffinity "ClientIP"}}
+    lb_policy: RING_HASH
+    {{- else}}
     lb_policy: RANDOM
+    {{- end}}
     health_checks:
       - timeout: 1s
         interval: 2s
@@ -142,6 +147,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 
 	lbConfig := &proxyConfigData{
 		HealthCheckPort: hcPort,
+		SessionAffinity: string(service.Spec.SessionAffinity),
 	}
 
 	servicePortConfig := map[string]servicePort{}
