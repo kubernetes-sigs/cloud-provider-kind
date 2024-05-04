@@ -31,7 +31,7 @@ type servicePort struct {
 	// frontend
 	Listener endpoint
 	// backend
-	Cluster []endpoint // key: node name  value: IP:Port
+	Cluster []endpoint
 }
 
 type endpoint struct {
