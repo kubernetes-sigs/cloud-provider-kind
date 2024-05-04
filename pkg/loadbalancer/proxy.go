@@ -72,6 +72,10 @@ static_resources:
               typed_config:
                 '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
                 cluster: cluster_{{$index}}
+        {{- if eq $.SessionAffinity "ClientIP"}}
+        hash_policies:
+          source_ip: true
+        {{- end}}
         upstream_socket_config:
           max_rx_datagram_size: 9000
     {{- else }}
