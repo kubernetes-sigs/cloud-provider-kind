@@ -75,8 +75,8 @@ func Test_generateConfig(t *testing.T) {
 			},
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
-				ServicePorts: map[string]data{
-					"IPv4_80_TCP": data{
+				ServicePorts: map[string]servicePort{
+					"IPv4_80_TCP": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
 					},
@@ -116,12 +116,12 @@ func Test_generateConfig(t *testing.T) {
 			},
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
-				ServicePorts: map[string]data{
-					"IPv4_80_TCP": data{
+				ServicePorts: map[string]servicePort{
+					"IPv4_80_TCP": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
 					},
-					"IPv4_443_TCP": data{
+					"IPv4_443_TCP": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 443, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"10.0.0.1", 31000, string(v1.ProtocolTCP)}, {"10.0.0.2", 31000, string(v1.ProtocolTCP)}},
 					},
@@ -161,12 +161,12 @@ func Test_generateConfig(t *testing.T) {
 			},
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
-				ServicePorts: map[string]data{
-					"IPv4_80_TCP": data{
+				ServicePorts: map[string]servicePort{
+					"IPv4_80_TCP": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
 					},
-					"IPv4_80_UDP": data{
+					"IPv4_80_UDP": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolUDP)},
 						Cluster:  []endpoint{{"10.0.0.1", 31000, string(v1.ProtocolUDP)}, {"10.0.0.2", 31000, string(v1.ProtocolUDP)}},
 					},
@@ -206,12 +206,12 @@ func Test_generateConfig(t *testing.T) {
 			},
 			want: &proxyConfigData{
 				HealthCheckPort: 32000,
-				ServicePorts: map[string]data{
-					"IPv6_80_TCP": data{
+				ServicePorts: map[string]servicePort{
+					"IPv6_80_TCP": servicePort{
 						Listener: endpoint{Address: "::", Port: 80, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"2001:db2::3", 30000, string(v1.ProtocolTCP)}, {"2001:db2::4", 30000, string(v1.ProtocolTCP)}},
 					},
-					"IPv6_443_TCP": data{
+					"IPv6_443_TCP": servicePort{
 						Listener: endpoint{Address: "::", Port: 443, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"2001:db2::3", 31000, string(v1.ProtocolTCP)}, {"2001:db2::4", 31000, string(v1.ProtocolTCP)}},
 					},
@@ -241,12 +241,12 @@ func Test_proxyConfig(t *testing.T) {
 			name: "ipv4",
 			data: &proxyConfigData{
 				HealthCheckPort: 32764,
-				ServicePorts: map[string]data{
-					"IPv4_80": data{
+				ServicePorts: map[string]servicePort{
+					"IPv4_80": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 80},
 						Cluster:  []endpoint{{"192.168.8.2", 30497, string(v1.ProtocolTCP)}, {"192.168.8.3", 30497, string(v1.ProtocolTCP)}},
 					},
-					"IPv4_443": data{
+					"IPv4_443": servicePort{
 						Listener: endpoint{Address: "0.0.0.0", Port: 443},
 						Cluster:  []endpoint{{"192.168.8.2", 31497, string(v1.ProtocolTCP)}, {"192.168.8.3", 31497, string(v1.ProtocolTCP)}},
 					},
