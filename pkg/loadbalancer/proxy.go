@@ -23,11 +23,11 @@ const proxyConfigPath = "/etc/envoy/envoy.yaml"
 
 // proxyConfigData is supplied to the loadbalancer config template
 type proxyConfigData struct {
-	HealthCheckPort int             // is the same for all ServicePorts
-	ServicePorts    map[string]data // key is the IP family and Port to support MultiPort services
+	HealthCheckPort int                    // is the same for all ServicePorts
+	ServicePorts    map[string]servicePort // key is the IP family and Port and Protocol to support MultiPort services
 }
 
-type data struct {
+type servicePort struct {
 	// frontend
 	Listener endpoint
 	// backend
@@ -48,14 +48,14 @@ admin:
 
 static_resources:
   listeners:
-  {{- range $index, $data := .ServicePorts }}
+  {{- range $index, $servicePort := .ServicePorts }}
   - name: listener_{{$index}}
     address:
       socket_address:
-        address: {{ $data.Listener.Address }}
-        port_value: {{ $data.Listener.Port }}
-        protocol: {{ $data.Listener.Protocol }}
-    {{- if eq $data.Listener.Protocol "UDP"}}
+        address: {{ $servicePort.Listener.Address }}
+        port_value: {{ $servicePort.Listener.Port }}
+        protocol: {{ $servicePort.Listener.Protocol }}
+    {{- if eq $servicePort.Listener.Protocol "UDP"}}
     udp_listener_config:
       downstream_socket_config:
         max_rx_datagram_size: 9000
@@ -85,7 +85,7 @@ static_resources:
   {{- end }}
 
   clusters:
-  {{- range $index, $data := .ServicePorts }}
+  {{- range $index, $servicePort := .ServicePorts }}
   - name: cluster_{{$index}}
     connect_timeout: 0.25s
     type: STATIC
@@ -102,7 +102,7 @@ static_resources:
     load_assignment:
       cluster_name: cluster_{{$index}}
       endpoints:
-	  {{- range $address := $data.Cluster }}
+	  {{- range $address := $servicePort.Cluster }}
         - lb_endpoints:
           - endpoint:
               health_check_config:
@@ -144,7 +144,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 		HealthCheckPort: hcPort,
 	}
 
-	servicePortConfig := map[string]data{}
+	servicePortConfig := map[string]servicePort{}
 	for _, ipFamily := range service.Spec.IPFamilies {
 		// TODO: support UDP
 		for _, port := range service.Spec.Ports {
@@ -175,7 +175,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 				}
 			}
 
-			servicePortConfig[key] = data{
+			servicePortConfig[key] = servicePort{
 				Listener: endpoint{Address: bind, Port: int(port.Port), Protocol: string(port.Protocol)},
 				Cluster:  backends,
 			}
