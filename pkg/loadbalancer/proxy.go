@@ -161,7 +161,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 			key := fmt.Sprintf("%s_%d_%s", ipFamily, port.Port, port.Protocol)
 			bind := `0.0.0.0`
 			if ipFamily == v1.IPv6Protocol {
-				bind = `::`
+				bind = `"::"`
 			}
 
 			backends := []endpoint{}

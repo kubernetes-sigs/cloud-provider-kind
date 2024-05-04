@@ -208,11 +208,11 @@ func Test_generateConfig(t *testing.T) {
 				HealthCheckPort: 32000,
 				ServicePorts: map[string]servicePort{
 					"IPv6_80_TCP": servicePort{
-						Listener: endpoint{Address: "::", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Listener: endpoint{Address: `"::"`, Port: 80, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"2001:db2::3", 30000, string(v1.ProtocolTCP)}, {"2001:db2::4", 30000, string(v1.ProtocolTCP)}},
 					},
 					"IPv6_443_TCP": servicePort{
-						Listener: endpoint{Address: "::", Port: 443, Protocol: string(v1.ProtocolTCP)},
+						Listener: endpoint{Address: `"::"`, Port: 443, Protocol: string(v1.ProtocolTCP)},
 						Cluster:  []endpoint{{"2001:db2::3", 31000, string(v1.ProtocolTCP)}, {"2001:db2::4", 31000, string(v1.ProtocolTCP)}},
 					},
 				},
