@@ -82,6 +82,10 @@ static_resources:
             "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
             stat_prefix: destination
             cluster: cluster_{{$index}}
+            {{- if eq $.SessionAffinity "ClientIP"}}
+            hash_policy:
+              source_ip: {}
+            {{- end}}
     {{- end}}
   {{- end }}
 
@@ -107,7 +111,7 @@ static_resources:
     load_assignment:
       cluster_name: cluster_{{$index}}
       endpoints:
-	  {{- range $address := $servicePort.Cluster }}
+      {{- range $address := $servicePort.Cluster }}
         - lb_endpoints:
           - endpoint:
               health_check_config:
