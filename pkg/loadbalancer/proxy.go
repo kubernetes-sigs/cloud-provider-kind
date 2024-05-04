@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
@@ -224,6 +226,27 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	if err != nil {
 		return err
 	}
+	klog.V(2).Infof("loadbalancer restarted")
+	// Wait until is running and stable, it can happen that the configuration is wrong
+	// and the container dies or restarts, giving the impression the loadbalancer is working
+	// when is not even running.
+	checks := 0
+	err = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (done bool, err error) {
+		if !container.IsRunning(name) {
+			// if is flapping
+			if checks > 0 {
+				return false, fmt.Errorf("container %s is not stable")
+			}
+			return false, nil
+		}
+		// let's check again to be sure is not constantly restarting
+		if checks == 0 {
+			checks++
+			return false, nil
+		}
+		klog.V(2).Infof("loadbalancer ready and running")
+		return true, nil
+	})
 
-	return nil
+	return err
 }
