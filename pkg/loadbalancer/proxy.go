@@ -212,7 +212,7 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 
 	klog.V(2).Infof("restarting loadbalancer")
-	err = container.Signal(name, "HUP")
+	err = container.Restart(name)
 	if err != nil {
 		return err
 	}

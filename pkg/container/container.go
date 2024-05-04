@@ -50,6 +50,13 @@ func Create(name string, args []string) error {
 	return nil
 }
 
+func Restart(name string) error {
+	if err := exec.Command(containerRuntime, []string{"restart", name}...).Run(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func Delete(name string) error {
 	if err := exec.Command(containerRuntime, []string{"rm", "-f", name}...).Run(); err != nil {
 		return err
