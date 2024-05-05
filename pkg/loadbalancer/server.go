@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
@@ -65,10 +66,18 @@ func (s *Server) GetLoadBalancer(ctx context.Context, clusterName string, servic
 		}
 	}
 	if ipv4 != "" && svcIPv4 {
-		status.Ingress = append(status.Ingress, v1.LoadBalancerIngress{IP: ipv4, Ports: portStatus})
+		status.Ingress = append(status.Ingress, v1.LoadBalancerIngress{
+			IP:     ipv4,
+			IPMode: ptr.To(v1.LoadBalancerIPModeProxy),
+			Ports:  portStatus,
+		})
 	}
 	if ipv6 != "" && svcIPv6 {
-		status.Ingress = append(status.Ingress, v1.LoadBalancerIngress{IP: ipv6, Ports: portStatus})
+		status.Ingress = append(status.Ingress, v1.LoadBalancerIngress{
+			IP:     ipv6,
+			IPMode: ptr.To(v1.LoadBalancerIPModeProxy),
+			Ports:  portStatus,
+		})
 	}
 
 	return status, true, nil
