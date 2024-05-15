@@ -252,7 +252,7 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 
 	klog.V(2).Infof("updating loadbalancer with config %s", ldsConfig)
-	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathLDS}, strings.NewReader(ldsConfig), &stdout, &stderr)
+	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathLDS + ".tmp"}, strings.NewReader(ldsConfig), &stdout, &stderr)
 	if err != nil {
 		return err
 	}
@@ -263,13 +263,18 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 
 	klog.V(2).Infof("updating loadbalancer with config %s", cdsConfig)
-	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathCDS}, strings.NewReader(cdsConfig), &stdout, &stderr)
+	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathCDS + ".tmp"}, strings.NewReader(cdsConfig), &stdout, &stderr)
 	if err != nil {
 		return err
 	}
 	// envoy has an initialization process until starts to forward traffic
 	// https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/init#arch-overview-initialization
 	// also wait for the healthchecks and "no_traffic_interval"
+	cmd := fmt.Sprintf(`chmod a+r /home/envoy/* && mv %s %s && mv %s %s`, proxyConfigPathCDS+".tmp", proxyConfigPathCDS, proxyConfigPathLDS+".tmp", proxyConfigPathLDS)
+	err = container.Exec(name, []string{"bash", "-c", cmd}, nil, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("error updating configuration Stdout: %s Stderr: %s : %w", stdout.String(), stderr.String(), err)
+	}
 	time.Sleep(10 * time.Second)
 	return nil
 }
