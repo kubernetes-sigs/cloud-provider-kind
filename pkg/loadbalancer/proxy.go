@@ -10,7 +10,6 @@ import (
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
@@ -20,8 +19,34 @@ import (
 // proxyImage defines the loadbalancer image:tag
 const proxyImage = "envoyproxy/envoy:v1.30.1"
 
-// proxyConfigPath defines the path to the config file in the image
-const proxyConfigPath = "/etc/envoy/envoy.yaml"
+// proxyConfigPath defines the path to the config files in the image
+const (
+	proxyConfigPath    = "/home/envoy/envoy.yaml"
+	proxyConfigPathCDS = "/home/envoy/cds.yaml"
+	proxyConfigPathLDS = "/home/envoy/lds.yaml"
+)
+
+// start Envoy with dynamic configuration by using files that implement the xDS protocol.
+// https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/configuration-dynamic-filesystem
+const dynamicFilesystemConfig = `node:
+  cluster: cloud-provider-kind
+  id: cloud-provider-kind-id
+
+dynamic_resources:
+  cds_config:
+    resource_api_version: V3
+    path: /home/envoy/cds.yaml
+  lds_config:
+    resource_api_version: V3
+    path: /home/envoy/lds.yaml
+
+admin:
+  access_log_path: /dev/stdout
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+`
 
 // proxyConfigData is supplied to the loadbalancer config template
 type proxyConfigData struct {
@@ -43,98 +68,109 @@ type endpoint struct {
 	Protocol string
 }
 
-// proxyDefaultConfigTemplate is the loadbalancer config template
-const proxyDefaultConfigTemplate = `
-admin:
+// proxyLDSConfigTemplate is the loadbalancer config template for listeners
+const proxyLDSConfigTemplate = `
+resources:
+{{- range $index, $servicePort := .ServicePorts }}
+- "@type": type.googleapis.com/envoy.config.listener.v3.Listener
+  name: listener_{{$index}}
   address:
-    socket_address: { address: 127.0.0.1, port_value: 9901 }
-
-static_resources:
-  listeners:
-  {{- range $index, $servicePort := .ServicePorts }}
-  - name: listener_{{$index}}
-    address:
-      socket_address:
-        address: {{ $servicePort.Listener.Address }}
-        port_value: {{ $servicePort.Listener.Port }}
-        protocol: {{ $servicePort.Listener.Protocol }}
-    {{- if eq $servicePort.Listener.Protocol "UDP"}}
-    udp_listener_config:
-      downstream_socket_config:
-        max_rx_datagram_size: 9000
-    listener_filters:
-    - name: envoy.filters.udp_listener.udp_proxy
-      typed_config:
-        '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.UdpProxyConfig
-        stat_prefix: cluster_{{$index}}
-        matcher:
-          on_no_match:
-            action:
-              name: route
-              typed_config:
-                '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
-                cluster: cluster_{{$index}}
-        {{- if eq $.SessionAffinity "ClientIP"}}
-        hash_policies:
-          source_ip: true
-        {{- end}}
-        upstream_socket_config:
-          max_rx_datagram_size: 9000
-    {{- else }}
-    filter_chains:
-      - filters:
-        - name: envoy.filters.network.tcp_proxy
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
-            stat_prefix: destination
-            cluster: cluster_{{$index}}
-            {{- if eq $.SessionAffinity "ClientIP"}}
-            hash_policy:
-              source_ip: {}
-            {{- end}}
-    {{- end}}
-  {{- end }}
-
-  clusters:
-  {{- range $index, $servicePort := .ServicePorts }}
-  - name: cluster_{{$index}}
-    connect_timeout: 5s
-    type: STATIC
-    {{- if eq $.SessionAffinity "ClientIP"}}
-    lb_policy: RING_HASH
-    {{- else}}
-    lb_policy: RANDOM
-    {{- end}}
-    health_checks:
-      - timeout: 5s
-        interval: 3s
-        unhealthy_threshold: 3
-        healthy_threshold: 1
-        always_log_health_check_failures: true
-        always_log_health_check_success: true
-        http_health_check:
-          path: /healthz
-    load_assignment:
-      cluster_name: cluster_{{$index}}
-      endpoints:
-      {{- range $address := $servicePort.Cluster }}
-        - lb_endpoints:
-          - endpoint:
-              health_check_config:
-                port_value: {{ $.HealthCheckPort  }}
-              address:
-                socket_address:
-                  address: {{ $address.Address }}
-                  port_value: {{ $address.Port }}
-                  protocol: {{ $address.Protocol }}
+    socket_address:
+      address: {{ $servicePort.Listener.Address }}
+      port_value: {{ $servicePort.Listener.Port }}
+      protocol: {{ $servicePort.Listener.Protocol }}
+  {{- if eq $servicePort.Listener.Protocol "UDP"}}
+  udp_listener_config:
+    downstream_socket_config:
+      max_rx_datagram_size: 9000
+  listener_filters:
+  - name: envoy.filters.udp_listener.udp_proxy
+    typed_config:
+      '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.UdpProxyConfig
+      access_log:
+      - name: envoy.file_access_log
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+      stat_prefix: udp_proxy
+      matcher:
+        on_no_match:
+          action:
+            name: route
+            typed_config:
+              '@type': type.googleapis.com/envoy.extensions.filters.udp.udp_proxy.v3.Route
+              cluster: cluster_{{$index}}
+      {{- if eq $.SessionAffinity "ClientIP"}}
+      hash_policies:
+        source_ip: true
       {{- end}}
-  {{- end }}
+      upstream_socket_config:
+        max_rx_datagram_size: 9000
+  {{- else }}
+  filter_chains:
+  - filters:
+    - name: envoy.filters.network.tcp_proxy
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+        access_log:
+        - name: envoy.file_access_log
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+        stat_prefix: tcp_proxy
+        cluster: cluster_{{$index}}
+        {{- if eq $.SessionAffinity "ClientIP"}}
+        hash_policy:
+          source_ip: {}
+        {{- end}}
+  {{- end}}
+{{- end }}
+`
+
+// proxyCDSConfigTemplate is the loadbalancer config template for clusters
+// https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/core/v3/health_check.proto#envoy-v3-api-msg-config-core-v3-healthcheck-httphealthcheck
+const proxyCDSConfigTemplate = `
+resources:
+{{- range $index, $servicePort := .ServicePorts }}
+- "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+  name: cluster_{{$index}}
+  connect_timeout: 5s
+  type: STATIC
+  {{- if eq $.SessionAffinity "ClientIP"}}
+  lb_policy: RING_HASH
+  {{- else}}
+  lb_policy: RANDOM
+  {{- end}}
+  health_checks:
+  - timeout: 5s
+    interval: 3s
+    unhealthy_threshold: 2
+    healthy_threshold: 1
+    no_traffic_interval: 5s
+    always_log_health_check_failures: true
+    always_log_health_check_success: true
+    event_log_path: /dev/stdout
+    http_health_check:
+      path: /healthz
+  load_assignment:
+    cluster_name: cluster_{{$index}}
+    endpoints:
+    {{- range $address := $servicePort.Cluster }}
+      - lb_endpoints:
+        - endpoint:
+            health_check_config:
+              port_value: {{ $.HealthCheckPort }}
+            address:
+              socket_address:
+                address: {{ $address.Address }}
+                port_value: {{ $address.Port }}
+                protocol: {{ $address.Protocol }}
+    {{- end}}
+{{- end }}
 `
 
 // proxyConfig returns a kubeadm config generated from config data, in particular
 // the kubernetes version
-func proxyConfig(data *proxyConfigData) (config string, err error) {
-	t, err := template.New("loadbalancer-config").Parse(proxyDefaultConfigTemplate)
+func proxyConfig(configTemplate string, data *proxyConfigData) (config string, err error) {
+	t, err := template.New("loadbalancer-config").Parse(configTemplate)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to parse config template")
 	}
@@ -206,47 +242,39 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	if service == nil {
 		return nil
 	}
+	var stdout, stderr bytes.Buffer
+	name := loadBalancerName(clusterName, service)
 	config := generateConfig(service, nodes)
 	// create loadbalancer config data
-	loadbalancerConfig, err := proxyConfig(config)
+	ldsConfig, err := proxyConfig(proxyLDSConfigTemplate, config)
 	if err != nil {
 		return errors.Wrap(err, "failed to generate loadbalancer config data")
 	}
 
-	klog.V(2).Infof("updating loadbalancer with config %s", loadbalancerConfig)
-	var stdout, stderr bytes.Buffer
-	name := loadBalancerName(clusterName, service)
-	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPath}, strings.NewReader(loadbalancerConfig), &stdout, &stderr)
+	klog.V(2).Infof("updating loadbalancer with config %s", ldsConfig)
+	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathLDS + ".tmp"}, strings.NewReader(ldsConfig), &stdout, &stderr)
 	if err != nil {
 		return err
 	}
 
-	klog.V(2).Infof("restarting loadbalancer")
-	err = container.Restart(name)
+	cdsConfig, err := proxyConfig(proxyCDSConfigTemplate, config)
+	if err != nil {
+		return errors.Wrap(err, "failed to generate loadbalancer config data")
+	}
+
+	klog.V(2).Infof("updating loadbalancer with config %s", cdsConfig)
+	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathCDS + ".tmp"}, strings.NewReader(cdsConfig), &stdout, &stderr)
 	if err != nil {
 		return err
 	}
-	klog.V(2).Infof("loadbalancer restarted")
-	// Wait until is running and stable, it can happen that the configuration is wrong
-	// and the container dies or restarts, giving the impression the loadbalancer is working
-	// when is not even running.
-	checks := 0
-	err = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (done bool, err error) {
-		if !container.IsRunning(name) {
-			// if is flapping
-			if checks > 0 {
-				return false, fmt.Errorf("loadbalancer %s is not stable", name)
-			}
-			return false, nil
-		}
-		// let's check again to be sure is not constantly restarting
-		if checks == 0 {
-			checks++
-			return false, nil
-		}
-		klog.V(2).Infof("loadbalancer ready and running")
-		return true, nil
-	})
-
-	return err
+	// envoy has an initialization process until starts to forward traffic
+	// https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/init#arch-overview-initialization
+	// also wait for the healthchecks and "no_traffic_interval"
+	cmd := fmt.Sprintf(`chmod a+r /home/envoy/* && mv %s %s && mv %s %s`, proxyConfigPathCDS+".tmp", proxyConfigPathCDS, proxyConfigPathLDS+".tmp", proxyConfigPathLDS)
+	err = container.Exec(name, []string{"bash", "-c", cmd}, nil, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("error updating configuration Stdout: %s Stderr: %s : %w", stdout.String(), stderr.String(), err)
+	}
+	time.Sleep(10 * time.Second)
+	return nil
 }
