@@ -238,6 +238,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	return lbConfig
 }
 
+// TODO: move to xDS via GRPC instead of having to deal with files
 func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) error {
 	if service == nil {
 		return nil
@@ -270,7 +271,7 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	// envoy has an initialization process until starts to forward traffic
 	// https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/init#arch-overview-initialization
 	// also wait for the healthchecks and "no_traffic_interval"
-	cmd := fmt.Sprintf(`chmod a+r /home/envoy/* && mv %s %s && mv %s %s`, proxyConfigPathCDS+".tmp", proxyConfigPathCDS, proxyConfigPathLDS+".tmp", proxyConfigPathLDS)
+	cmd := fmt.Sprintf(`chmod a+rw /home/envoy/* && mv %s %s && mv %s %s`, proxyConfigPathCDS+".tmp", proxyConfigPathCDS, proxyConfigPathLDS+".tmp", proxyConfigPathLDS)
 	err = container.Exec(name, []string{"bash", "-c", cmd}, nil, &stdout, &stderr)
 	if err != nil {
 		return fmt.Errorf("error updating configuration Stdout: %s Stderr: %s : %w", stdout.String(), stderr.String(), err)
