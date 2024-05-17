@@ -219,7 +219,8 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 	args = append(args, image)
 	// we need to override the default envoy configuration
 	// https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/configuration-dynamic-filesystem
-	cmd := []string{"bash", "-c", fmt.Sprintf(`echo -en '%s' > %s && touch %s && touch %s && envoy -c %s`, dynamicFilesystemConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, proxyConfigPath)}
+	envoyCmd := fmt.Sprintf(`envoy -c %s --drain-strategy immediate --drain-time-s 10`, proxyConfigPath)
+	cmd := []string{"bash", "-c", fmt.Sprintf(`echo -en '%s' > %s && touch %s && touch %s && %s`, dynamicFilesystemConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, envoyCmd)}
 	args = append(args, cmd...)
 	klog.V(2).Infof("creating loadbalancer with parameters: %v", args)
 	err := container.Create(name, args)
