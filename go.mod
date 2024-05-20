@@ -5,10 +5,10 @@ go 1.22.0
 require (
 	github.com/google/go-cmp v0.6.0
 	github.com/pkg/errors v0.9.1
-	k8s.io/api v0.30.0
-	k8s.io/apimachinery v0.30.0
+	k8s.io/api v0.30.1
+	k8s.io/apimachinery v0.30.1
 	k8s.io/apiserver v0.30.0
-	k8s.io/client-go v0.30.0
+	k8s.io/client-go v0.30.1
 	k8s.io/cloud-provider v0.30.0
 	k8s.io/component-base v0.30.0
 	k8s.io/controller-manager v0.30.0
