@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/lithammer/dedent"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -230,7 +231,6 @@ func Test_generateConfig(t *testing.T) {
 }
 
 func Test_proxyConfig(t *testing.T) {
-	t.Skip("TODO left for someone with more patience to deal with the indentation issues")
 	tests := []struct {
 		name       string
 		template   string
@@ -254,11 +254,86 @@ func Test_proxyConfig(t *testing.T) {
 				},
 			},
 			wantConfig: `
-`,
+				resources:
+				- "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+				  name: cluster_IPv4_443
+				  connect_timeout: 5s
+				  type: STATIC
+				  lb_policy: RANDOM
+				  health_checks:
+				  - timeout: 5s
+				    interval: 3s
+				    unhealthy_threshold: 2
+				    healthy_threshold: 1
+				    no_traffic_interval: 5s
+				    always_log_health_check_failures: true
+				    always_log_health_check_success: true
+				    event_log_path: /dev/stdout
+				    http_health_check:
+				      path: /healthz
+				  load_assignment:
+				    cluster_name: cluster_IPv4_443
+				    endpoints:
+				      - lb_endpoints:
+				        - endpoint:
+				            health_check_config:
+				              port_value: 32764
+				            address:
+				              socket_address:
+				                address: 192.168.8.2
+				                port_value: 31497
+				                protocol: TCP
+				      - lb_endpoints:
+				        - endpoint:
+				            health_check_config:
+				              port_value: 32764
+				            address:
+				              socket_address:
+				                address: 192.168.8.3
+				                port_value: 31497
+				                protocol: TCP
+				- "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+				  name: cluster_IPv4_80
+				  connect_timeout: 5s
+				  type: STATIC
+				  lb_policy: RANDOM
+				  health_checks:
+				  - timeout: 5s
+				    interval: 3s
+				    unhealthy_threshold: 2
+				    healthy_threshold: 1
+				    no_traffic_interval: 5s
+				    always_log_health_check_failures: true
+				    always_log_health_check_success: true
+				    event_log_path: /dev/stdout
+				    http_health_check:
+				      path: /healthz
+				  load_assignment:
+				    cluster_name: cluster_IPv4_80
+				    endpoints:
+				      - lb_endpoints:
+				        - endpoint:
+				            health_check_config:
+				              port_value: 32764
+				            address:
+				              socket_address:
+				                address: 192.168.8.2
+				                port_value: 30497
+				                protocol: TCP
+				      - lb_endpoints:
+				        - endpoint:
+				            health_check_config:
+				              port_value: 32764
+				            address:
+				              socket_address:
+				                address: 192.168.8.3
+				                port_value: 30497
+				                protocol: TCP
+				`,
 		},
 		{
 			name:     "ipv4 LDS",
-			template: proxyCDSConfigTemplate,
+			template: proxyLDSConfigTemplate,
 			data: &proxyConfigData{
 				HealthCheckPort: 32764,
 				ServicePorts: map[string]servicePort{
@@ -273,7 +348,44 @@ func Test_proxyConfig(t *testing.T) {
 				},
 			},
 			wantConfig: `
-`,
+				resources:
+				- "@type": type.googleapis.com/envoy.config.listener.v3.Listener
+				  name: listener_IPv4_443
+				  address:
+				    socket_address:
+				      address: 0.0.0.0
+				      port_value: 443
+				      protocol: TCP
+				  filter_chains:
+				  - filters:
+				    - name: envoy.filters.network.tcp_proxy
+				      typed_config:
+				        "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+				        access_log:
+				        - name: envoy.file_access_log
+				          typed_config:
+				            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+				        stat_prefix: tcp_proxy
+				        cluster: cluster_IPv4_443
+				- "@type": type.googleapis.com/envoy.config.listener.v3.Listener
+				  name: listener_IPv4_80
+				  address:
+				    socket_address:
+				      address: 0.0.0.0
+				      port_value: 80
+				      protocol: TCP
+				  filter_chains:
+				  - filters:
+				    - name: envoy.filters.network.tcp_proxy
+				      typed_config:
+				        "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+				        access_log:
+				        - name: envoy.file_access_log
+				          typed_config:
+				            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+				        stat_prefix: tcp_proxy
+				        cluster: cluster_IPv4_80
+			`,
 		},
 	}
 	for _, tt := range tests {
@@ -283,9 +395,10 @@ func Test_proxyConfig(t *testing.T) {
 				t.Errorf("proxyConfig() error = %v", err)
 				return
 			}
-			if gotConfig != tt.wantConfig {
+			wantConfig := dedent.Dedent(tt.wantConfig)
+			if gotConfig != wantConfig {
 				t.Logf("%s", gotConfig)
-				t.Errorf("proxyConfig() not expected\n%v", cmp.Diff(gotConfig, tt.wantConfig))
+				t.Errorf("proxyConfig() not expected\n%v", cmp.Diff(gotConfig, wantConfig))
 			}
 		})
 	}
