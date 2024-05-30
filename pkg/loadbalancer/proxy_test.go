@@ -9,6 +9,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 func makeNode(name string, ip string) *v1.Node {
@@ -219,6 +220,47 @@ func Test_generateConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "session affinity",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: v1.ServiceSpec{
+					Type:                  v1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyCluster,
+					IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
+					Ports: []v1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+							NodePort:   30000,
+							Protocol:   v1.ProtocolTCP,
+						},
+					},
+					SessionAffinity: v1.ServiceAffinityClientIP,
+					SessionAffinityConfig: &v1.SessionAffinityConfig{
+						ClientIP: &v1.ClientIPConfig{
+							// FIXME: This is currently ignored
+							TimeoutSeconds: ptr.To[int32](60),
+						},
+					},
+				},
+			},
+			nodes: []*v1.Node{
+				makeNode("a", "10.0.0.1"),
+			},
+			want: &proxyConfigData{
+				HealthCheckPort: 10256,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80_TCP": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}},
+					},
+				},
+				SessionAffinity: "ClientIP",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -385,6 +427,97 @@ func Test_proxyConfig(t *testing.T) {
 				            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
 				        stat_prefix: tcp_proxy
 				        cluster: cluster_IPv4_80
+			`,
+		},
+		{
+			name:     "ipv4 CDS with affinity",
+			template: proxyCDSConfigTemplate,
+			data: &proxyConfigData{
+				HealthCheckPort: 32764,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"192.168.8.2", 30497, string(v1.ProtocolTCP)}, {"192.168.8.3", 30497, string(v1.ProtocolTCP)}},
+					},
+				},
+				SessionAffinity: "ClientIP",
+			},
+			wantConfig: `
+				resources:
+				- "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+				  name: cluster_IPv4_80
+				  connect_timeout: 5s
+				  type: STATIC
+				  lb_policy: RING_HASH
+				  health_checks:
+				  - timeout: 5s
+				    interval: 3s
+				    unhealthy_threshold: 2
+				    healthy_threshold: 1
+				    no_traffic_interval: 5s
+				    always_log_health_check_failures: true
+				    always_log_health_check_success: true
+				    event_log_path: /dev/stdout
+				    http_health_check:
+				      path: /healthz
+				  load_assignment:
+				    cluster_name: cluster_IPv4_80
+				    endpoints:
+				      - lb_endpoints:
+				        - endpoint:
+				            health_check_config:
+				              port_value: 32764
+				            address:
+				              socket_address:
+				                address: 192.168.8.2
+				                port_value: 30497
+				                protocol: TCP
+				      - lb_endpoints:
+				        - endpoint:
+				            health_check_config:
+				              port_value: 32764
+				            address:
+				              socket_address:
+				                address: 192.168.8.3
+				                port_value: 30497
+				                protocol: TCP
+				`,
+		},
+		{
+			name:     "ipv4 LDS with affinity",
+			template: proxyLDSConfigTemplate,
+			data: &proxyConfigData{
+				HealthCheckPort: 32764,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"192.168.8.2", 30497, string(v1.ProtocolTCP)}, {"192.168.8.3", 30497, string(v1.ProtocolTCP)}},
+					},
+				},
+				SessionAffinity: "ClientIP",
+			},
+			wantConfig: `
+				resources:
+				- "@type": type.googleapis.com/envoy.config.listener.v3.Listener
+				  name: listener_IPv4_80
+				  address:
+				    socket_address:
+				      address: 0.0.0.0
+				      port_value: 80
+				      protocol: TCP
+				  filter_chains:
+				  - filters:
+				    - name: envoy.filters.network.tcp_proxy
+				      typed_config:
+				        "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+				        access_log:
+				        - name: envoy.file_access_log
+				          typed_config:
+				            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+				        stat_prefix: tcp_proxy
+				        cluster: cluster_IPv4_80
+				        hash_policy:
+				          source_ip: {}
 			`,
 		},
 	}
