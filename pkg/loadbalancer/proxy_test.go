@@ -261,6 +261,48 @@ func Test_generateConfig(t *testing.T) {
 				SessionAffinity: "ClientIP",
 			},
 		},
+		{
+			name: "source ranges",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: v1.ServiceSpec{
+					Type:                  v1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyCluster,
+					IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
+					Ports: []v1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+							NodePort:   30000,
+							Protocol:   v1.ProtocolTCP,
+						},
+					},
+					LoadBalancerSourceRanges: []string{
+						"10.0.0.0/8",
+						// This is "valid".
+						" 192.168.0.0/16  ",
+					},
+				},
+			},
+			nodes: []*v1.Node{
+				makeNode("a", "10.0.0.1"),
+			},
+			want: &proxyConfigData{
+				HealthCheckPort: 10256,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80_TCP": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}},
+					},
+				},
+				SourceRanges: []sourceRange{
+					{ Prefix: "10.0.0.0", Length: 8},
+					{ Prefix: "192.168.0.0", Length: 16},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -518,6 +560,50 @@ func Test_proxyConfig(t *testing.T) {
 				        cluster: cluster_IPv4_80
 				        hash_policy:
 				          source_ip: {}
+			`,
+		},
+		{
+			name:     "ipv4 LDS with source ranges",
+			template: proxyLDSConfigTemplate,
+			data: &proxyConfigData{
+				HealthCheckPort: 32764,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"192.168.8.2", 30497, string(v1.ProtocolTCP)}, {"192.168.8.3", 30497, string(v1.ProtocolTCP)}},
+					},
+				},
+				SourceRanges: []sourceRange{
+					{ Prefix: "10.0.0.0", Length: 8},
+					{ Prefix: "192.168.0.0", Length: 16},
+				},
+			},
+			wantConfig: `
+				resources:
+				- "@type": type.googleapis.com/envoy.config.listener.v3.Listener
+				  name: listener_IPv4_80
+				  address:
+				    socket_address:
+				      address: 0.0.0.0
+				      port_value: 80
+				      protocol: TCP
+				  filter_chains:
+				  - filters:
+				    - name: envoy.filters.network.tcp_proxy
+				      typed_config:
+				        "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+				        access_log:
+				        - name: envoy.file_access_log
+				          typed_config:
+				            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+				        stat_prefix: tcp_proxy
+				        cluster: cluster_IPv4_80
+				    filter_chain_match:
+				      source_prefix_ranges:
+				      - address_prefix: "10.0.0.0"
+				        prefix_len: 8
+				      - address_prefix: "192.168.0.0"
+				        prefix_len: 16
 			`,
 		},
 	}
