@@ -207,14 +207,16 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 	if s.tunnelManager != nil {
 		// Forward the Service Ports to the host so they are accessible on Mac and Windows
 		for _, port := range service.Spec.Ports {
-			if port.Protocol != v1.ProtocolTCP {
+			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
 				continue
 			}
-			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, "TCP"))
+			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, port.Protocol))
 		}
-		// Publish all ports in the host in random ports
-		args = append(args, "--publish-all")
 	}
+	// publish the admin endpoint
+	args = append(args, fmt.Sprintf("--publish=%d/%s", envoyAdminPort, v1.ProtocolTCP))
+	// Publish all ports in the host in random ports
+	args = append(args, "--publish-all")
 
 	args = append(args, image)
 	// we need to override the default envoy configuration

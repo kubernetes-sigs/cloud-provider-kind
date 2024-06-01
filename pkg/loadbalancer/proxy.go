@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
@@ -19,11 +23,12 @@ import (
 // proxyImage defines the loadbalancer image:tag
 const proxyImage = "envoyproxy/envoy:v1.30.1"
 
-// proxyConfigPath defines the path to the config files in the image
+// keep in sync with dynamicFilesystemConfig
 const (
 	proxyConfigPath    = "/home/envoy/envoy.yaml"
 	proxyConfigPathCDS = "/home/envoy/cds.yaml"
 	proxyConfigPathLDS = "/home/envoy/lds.yaml"
+	envoyAdminPort     = 10000
 )
 
 // start Envoy with dynamic configuration by using files that implement the xDS protocol.
@@ -45,7 +50,7 @@ admin:
   address:
     socket_address:
       address: 0.0.0.0
-      port_value: 9901
+      port_value: 10000
 `
 
 // proxyConfigData is supplied to the loadbalancer config template
@@ -234,7 +239,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 		}
 	}
 	lbConfig.ServicePorts = servicePortConfig
-	klog.V(2).Infof("haproxy config info: %+v", lbConfig)
+	klog.V(2).Infof("envoy config info: %+v", lbConfig)
 	return lbConfig
 }
 
@@ -276,6 +281,46 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	if err != nil {
 		return fmt.Errorf("error updating configuration Stdout: %s Stderr: %s : %w", stdout.String(), stderr.String(), err)
 	}
-	time.Sleep(10 * time.Second)
-	return nil
+	return waitLoadBalancerReady(ctx, name, 30*time.Second)
+}
+
+func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Duration) error {
+	portmaps, err := container.PortMaps(name)
+	if err != nil {
+		return err
+	}
+	port, ok := portmaps[strconv.Itoa(envoyAdminPort)]
+	if !ok {
+		return fmt.Errorf("envoy admin port %d not found, got %v", envoyAdminPort, portmaps)
+	}
+
+	httpClient := http.DefaultClient
+	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, timeout, true, func(ctx context.Context) (done bool, err error) {
+		// iptables port forwarding on localhost only works for IPv4
+		resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%s/ready", port))
+		if err != nil {
+			klog.V(2).Infof("unexpected error trying to get load balancer %s readyness :%v", name, err)
+			return false, nil
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			klog.V(2).Infof("unexpected status code from load balancer %s expected LIVE got %d", name, resp.StatusCode)
+			return false, nil
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			klog.V(2).Infof("unexpected error trying to get load balancer %s readyness :%v", name, err)
+			return false, nil
+		}
+
+		response := strings.TrimSpace(string(body))
+		if response != "LIVE" {
+			klog.V(2).Infof("unexpected ready response from load balancer %s expected LIVE got %s", name, response)
+			return false, nil
+		}
+		return true, nil
+	})
+	return err
 }
