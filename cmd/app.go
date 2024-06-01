@@ -58,6 +58,7 @@ func Main() {
 		}
 	}()
 
+	// initializet loggers, kind logger and klog
 	logger := kindcmd.NewLogger()
 	type verboser interface {
 		SetVerbosity(int)
