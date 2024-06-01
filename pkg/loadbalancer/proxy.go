@@ -45,7 +45,7 @@ admin:
   address:
     socket_address:
       address: 0.0.0.0
-      port_value: 9901
+      port_value: 10000
 `
 
 // proxyConfigData is supplied to the loadbalancer config template
