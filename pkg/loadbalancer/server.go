@@ -210,9 +210,11 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 			if port.Protocol != v1.ProtocolTCP {
 				continue
 			}
-			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, "TCP"))
+			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, port.Protocol))
 		}
 	}
+	// publish the admin endpoint
+	args = append(args, fmt.Sprintf("--publish=%d/%s", envoyAdminPort, v1.ProtocolTCP))
 	// Publish all ports in the host in random ports
 	args = append(args, "--publish-all")
 
