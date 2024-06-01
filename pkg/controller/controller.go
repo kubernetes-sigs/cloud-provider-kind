@@ -53,11 +53,6 @@ func New(logger log.Logger) *Controller {
 func (c *Controller) Run(ctx context.Context) {
 	defer c.cleanup()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
 		// get existing kind clusters
 		clusters, err := c.kind.List()
 		if err != nil {
@@ -105,7 +100,11 @@ func (c *Controller) Run(ctx context.Context) {
 				delete(c.clusters, cluster)
 			}
 		}
-		time.Sleep(30 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
 	}
 }
 
