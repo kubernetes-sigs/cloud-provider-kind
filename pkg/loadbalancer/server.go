@@ -15,6 +15,7 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
@@ -90,6 +91,7 @@ func (s *Server) GetLoadBalancerName(ctx context.Context, clusterName string, se
 func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
 	name := loadBalancerName(clusterName, service)
 	if !container.IsRunning(name) {
+		klog.Infof("container %s for loadbalancer is not running", name)
 		if container.Exist(name) {
 			err := container.Delete(name)
 			if err != nil {
@@ -142,6 +144,13 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 	var err1, err2 error
 	if s.tunnelManager != nil {
 		err1 = s.tunnelManager.removeTunnels(containerName)
+	}
+	// Before deleting the load balancer store the logs if required
+	if config.DefaultConfig.EnableLogDump {
+		klog.V(2).Infof("storing logs for loadbalancer %s", containerName)
+		if err := container.LogDump(containerName, config.DefaultConfig.LogDir); err != nil {
+			klog.Infof("error trying to store logs for load balancer %s : %v", containerName, err)
+		}
 	}
 	err2 = container.Delete(containerName)
 	return errors.Join(err1, err2)

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path"
 	"strings"
 
 	"k8s.io/klog/v2"
@@ -41,6 +43,31 @@ func init() {
 	if podmanIsAvailable() {
 		containerRuntime = "podman"
 	}
+}
+
+func Logs(name string, w io.Writer) error {
+	cmd := exec.Command(containerRuntime, []string{"logs", name}...)
+	cmd.Stderr = w
+	cmd.Stdout = w
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to get container logs: %w", err)
+	}
+	return nil
+}
+
+func LogDump(containerName string, dir string) error {
+	f, err := os.Create(path.Join(dir, containerName+".log"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	err = Logs(containerName, f)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func Create(name string, args []string) error {

@@ -63,7 +63,7 @@ jobs:
     - name: Run cloud-provider-kind
       run: |
         make
-        nohup bin/cloud-provider-kind > ./_artifacts/ccm-kind.log 2>&1 &
+        nohup bin/cloud-provider-kind -v 2 --log-dump --log-dir /_artifacts/loadbalancers > ./_artifacts/ccm-kind.log 2>&1 &
 
     - name: Create multi node cluster
       run: |
@@ -175,6 +175,7 @@ jobs:
       run: |
         /usr/local/bin/kind export logs --name ${{ env.KIND_CLUSTER_NAME}}  --loglevel=debug ./_artifacts/logs
         cp ./_artifacts/ccm-kind.log ./_artifacts/logs
+        cp ./_artifacts/loadbalancers/* ./_artifacts/logs
 
     - name: Upload logs
       if: always()
