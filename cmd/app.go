@@ -25,8 +25,8 @@ var (
 
 func init() {
 	flag.IntVar(&flagV, "v", 2, "Verbosity level")
-	flag.BoolVar(&enableLogDump, "log-dump", false, "store logs toa temporal directory or to the directory specified with log-dir flag")
-	flag.StringVar(&logDumpDir, "log-dir", "", "store logs to the specified directory")
+	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
+	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
