@@ -212,9 +212,9 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 			}
 			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, "TCP"))
 		}
-		// Publish all ports in the host in random ports
-		args = append(args, "--publish-all")
 	}
+	// Publish all ports in the host in random ports
+	args = append(args, "--publish-all")
 
 	args = append(args, image)
 	// we need to override the default envoy configuration

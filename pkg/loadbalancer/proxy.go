@@ -19,11 +19,12 @@ import (
 // proxyImage defines the loadbalancer image:tag
 const proxyImage = "envoyproxy/envoy:v1.30.1"
 
-// proxyConfigPath defines the path to the config files in the image
+// keep in sync with dynamicFilesystemConfig
 const (
 	proxyConfigPath    = "/home/envoy/envoy.yaml"
 	proxyConfigPathCDS = "/home/envoy/cds.yaml"
 	proxyConfigPathLDS = "/home/envoy/lds.yaml"
+	envoyAdminPort     = 10000
 )
 
 // start Envoy with dynamic configuration by using files that implement the xDS protocol.
