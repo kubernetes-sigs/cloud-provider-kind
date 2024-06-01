@@ -157,8 +157,8 @@ func PortMaps(name string) (map[string]string, error) {
 		if len(parts) == 2 {
 			protocol = strings.ToLower(parts[1])
 		}
-		if protocol != "tcp" {
-			klog.Infof("skipping protocol %s not supported, only TCP", protocol)
+		if protocol != "tcp" && protocol != "udp" {
+			klog.Infof("skipping protocol %s not supported, only UDP and TCP", protocol)
 			continue
 		}
 
