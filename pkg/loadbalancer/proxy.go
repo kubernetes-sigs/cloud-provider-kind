@@ -234,7 +234,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 		}
 	}
 	lbConfig.ServicePorts = servicePortConfig
-	klog.V(2).Infof("haproxy config info: %+v", lbConfig)
+	klog.V(2).Infof("envoy config info: %+v", lbConfig)
 	return lbConfig
 }
 
