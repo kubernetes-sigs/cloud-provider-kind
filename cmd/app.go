@@ -90,7 +90,7 @@ func Main() {
 
 		if _, err := os.Stat(logDumpDir); os.IsNotExist(err) {
 			if err := os.MkdirAll(logDumpDir, 0755); err != nil {
-				klog.Fatalf("directory %s does not exist", logDumpDir)
+				klog.Fatalf("directory %s does not exist: %v", logDumpDir, err)
 			}
 		}
 		config.DefaultConfig.EnableLogDump = true
