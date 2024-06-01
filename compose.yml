@@ -1,0 +1,6 @@
+services:
+  cloud-provider:
+    build: .
+    network_mode: "${NET_MODE-host}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
