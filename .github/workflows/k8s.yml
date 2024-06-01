@@ -63,7 +63,7 @@ jobs:
     - name: Run cloud-provider-kind
       run: |
         make
-        nohup bin/cloud-provider-kind -v 2 --log-dump --log-dir /_artifacts/loadbalancers > ./_artifacts/ccm-kind.log 2>&1 &
+        nohup bin/cloud-provider-kind -v 2 --log-dump --log-dir ./_artifacts/loadbalancers > ./_artifacts/ccm-kind.log 2>&1 &
 
     - name: Create multi node cluster
       run: |
