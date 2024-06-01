@@ -4,24 +4,29 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
 	"k8s.io/component-base/logs"
+	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
 
 var (
-	flagV int
+	flagV         int
+	enableLogDump bool
+	logDumpDir    string
 )
 
 func init() {
 	flag.IntVar(&flagV, "v", 2, "Verbosity level")
+	flag.BoolVar(&enableLogDump, "log-dump", false, "store logs toa temporal directory or to the directory specified with log-dir flag")
+	flag.StringVar(&logDumpDir, "log-dir", "", "store logs to the specified directory")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
@@ -33,7 +38,7 @@ func Main() {
 	// Parse command line flags and arguments
 	flag.Parse()
 	flag.VisitAll(func(flag *flag.Flag) {
-		log.Printf("FLAG: --%s=%q", flag.Name, flag.Value)
+		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
 	})
 
 	// trap Ctrl+C and call cancel on the context
@@ -51,14 +56,14 @@ func Main() {
 	go func() {
 		select {
 		case <-signalCh:
-			log.Printf("Exiting: received signal")
+			klog.Infof("Exiting: received signal")
 			cancel()
 		case <-ctx.Done():
 			// cleanup
 		}
 	}()
 
-	// initializet loggers, kind logger and klog
+	// initialize loggers, kind logger and klog
 	logger := kindcmd.NewLogger()
 	type verboser interface {
 		SetVerbosity(int)
@@ -72,5 +77,26 @@ func Main() {
 	if err != nil {
 		logger.Errorf("error setting klog verbosity to %d : %v", flagV, err)
 	}
+
+	// initialize log directory
+	if enableLogDump {
+		if logDumpDir == "" {
+			dir, err := os.MkdirTemp(os.TempDir(), "kind-provider-")
+			if err != nil {
+				klog.Fatal(err)
+			}
+			logDumpDir = dir
+		}
+
+		if _, err := os.Stat(logDumpDir); os.IsNotExist(err) {
+			if err := os.MkdirAll(logDumpDir, 0755); err != nil {
+				klog.Fatalf("directory %s does not exist", logDumpDir)
+			}
+		}
+		config.DefaultConfig.EnableLogDump = true
+		config.DefaultConfig.LogDir = logDumpDir
+		klog.Infof("**** Dumping load balancers logs to: %s", logDumpDir)
+	}
+
 	controller.New(logger).Run(ctx)
 }
