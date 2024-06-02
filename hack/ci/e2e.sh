@@ -222,7 +222,7 @@ main() {
 
   # build cloud-provider-kind
   make
-  nohup bin/cloud-provider-kind > ${ARTIFACTS}/ccm-kind.log 2>&1 &
+  nohup bin/cloud-provider-kind --enable-log-dumping --logs-dir ${ARTIFACTS}/loadbalancers > ${ARTIFACTS}/ccm-kind.log 2>&1 &
 
   # build kubernetes
   K8S_PATH=$(find ${GOPATH} -path '*/k8s.io/kubernetes/go.mod' -print -quit)
