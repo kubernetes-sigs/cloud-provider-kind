@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"strings"
 
 	"k8s.io/klog/v2"
@@ -56,8 +55,8 @@ func Logs(name string, w io.Writer) error {
 	return nil
 }
 
-func LogDump(containerName string, dir string) error {
-	f, err := os.Create(path.Join(dir, containerName+".log"))
+func LogDump(containerName string, fileName string) error {
+	f, err := os.Create(fileName)
 	if err != nil {
 		return err
 	}
