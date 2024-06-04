@@ -58,6 +58,12 @@ type proxyConfigData struct {
 	HealthCheckPort int                    // is the same for all ServicePorts
 	ServicePorts    map[string]servicePort // key is the IP family and Port and Protocol to support MultiPort services
 	SessionAffinity string
+	SourceRanges    []sourceRange
+}
+
+type sourceRange struct {
+	Prefix string
+	Length int
 }
 
 type servicePort struct {
@@ -126,6 +132,14 @@ resources:
         hash_policy:
           source_ip: {}
         {{- end}}
+  {{- if len $.SourceRanges }}
+    filter_chain_match:
+      source_prefix_ranges:
+      {{- range $sr := $.SourceRanges }}
+      - address_prefix: "{{ $sr.Prefix }}"
+        prefix_len: {{ $sr.Length }}
+      {{- end }}
+  {{- end }}
   {{- end}}
 {{- end }}
 `
@@ -239,6 +253,22 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 		}
 	}
 	lbConfig.ServicePorts = servicePortConfig
+
+	for _, sr := range service.Spec.LoadBalancerSourceRanges {
+		// This is validated (though the validation mistakenly allows whitespace)
+		// so we don't bother dealing with parse failures.
+		_, cidr, _ := netutils.ParseCIDRSloppy(strings.TrimSpace(sr))
+		if cidr != nil {
+			len, _ := cidr.Mask.Size()
+			lbConfig.SourceRanges = append(lbConfig.SourceRanges,
+				sourceRange{
+					Prefix: cidr.IP.String(),
+					Length: len,
+				},
+			)
+		}
+	}
+
 	klog.V(2).Infof("envoy config info: %+v", lbConfig)
 	return lbConfig
 }
