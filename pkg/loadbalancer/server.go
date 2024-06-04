@@ -148,7 +148,7 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 	}
 	// Before deleting the load balancer store the logs if required
 	if config.DefaultConfig.EnableLogDump {
-		fileName := path.Join(config.DefaultConfig.LogDir, service.Namespace+"-"+service.Name+".log")
+		fileName := path.Join(config.DefaultConfig.LogDir, service.Namespace+"_"+service.Name+".log")
 		klog.V(2).Infof("storing logs for loadbalancer %s on %s", containerName, fileName)
 		if err := container.LogDump(containerName, fileName); err != nil {
 			klog.Infof("error trying to store logs for load balancer %s : %v", containerName, err)
