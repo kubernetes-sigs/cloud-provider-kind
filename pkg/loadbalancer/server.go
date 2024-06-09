@@ -232,7 +232,13 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 	args = append(args, image)
 	// we need to override the default envoy configuration
 	// https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/configuration-dynamic-filesystem
-	cmd := []string{"bash", "-c", fmt.Sprintf(`echo -en '%s' > %s && touch %s && touch %s && envoy -c %s`, dynamicFilesystemConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, proxyConfigPath)}
+	// envoy crashes in some circumstances, causing the container to restart, the problem is that the container
+	// may come with a different IP and we don't update the status, we may do it, but applications does not use
+	// to handle that the assigned LoadBalancerIP changes.
+	// https://github.com/envoyproxy/envoy/issues/34195
+	cmd := []string{"bash", "-c",
+		fmt.Sprintf(`echo -en '%s' > %s && touch %s && touch %s && while true; do envoy -c %s && break; sleep 1; done`,
+			dynamicFilesystemConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, proxyConfigPath)}
 	args = append(args, cmd...)
 	klog.V(2).Infof("creating loadbalancer with parameters: %v", args)
 	err := container.Create(name, args)
