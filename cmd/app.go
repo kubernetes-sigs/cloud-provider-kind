@@ -18,15 +18,17 @@ import (
 )
 
 var (
-	flagV         int
-	enableLogDump bool
-	logDumpDir    string
+	flagV                    int
+	enableLogDump            bool
+	logDumpDir               string
+	enableLoadBalancerStatus bool
 )
 
 func init() {
 	flag.IntVar(&flagV, "v", 2, "Verbosity level")
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
+	flag.BoolVar(&enableLoadBalancerStatus, "enable-load-balancer-status", false, "output in json the loadbalancer status to stdout")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
@@ -97,6 +99,6 @@ func Main() {
 		config.DefaultConfig.LogDir = logDumpDir
 		klog.Infof("**** Dumping load balancers logs to: %s", logDumpDir)
 	}
-
+	config.DefaultConfig.EnableLoadBalancerStatus = enableLoadBalancerStatus
 	controller.New(logger).Run(ctx)
 }

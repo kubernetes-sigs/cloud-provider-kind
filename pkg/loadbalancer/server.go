@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -133,10 +134,27 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 	if err != nil {
 		return nil, err
 	}
+	if config.DefaultConfig.EnableLoadBalancerStatus {
+		lbEventStatus := make(map[string]v1.LoadBalancerStatus)
+		lbEventStatus["added"] = *status
+		json, err := json.Marshal(lbEventStatus)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Println(string(json))
+	}
 	return status, nil
 }
 
 func (s *Server) UpdateLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) error {
+	if config.DefaultConfig.EnableLoadBalancerStatus {
+		lbEventStatus := make(map[string]v1.LoadBalancerStatus)
+		lbEventStatus["updated"] = service.Status.LoadBalancer
+		json, err := json.Marshal(lbEventStatus)
+		if err == nil {
+			fmt.Println(string(json))
+		}
+	}
 	return proxyUpdateLoadBalancer(ctx, clusterName, service, nodes)
 }
 
@@ -154,7 +172,24 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 			klog.Infof("error trying to store logs for load balancer %s : %v", containerName, err)
 		}
 	}
+
 	err2 = container.Delete(containerName)
+	if config.DefaultConfig.EnableLoadBalancerStatus {
+		lbEventStatus := make(map[string]v1.LoadBalancerStatus)
+		lbEventStatus["deleted"] = service.Status.LoadBalancer
+		json, err := json.Marshal(lbEventStatus)
+		if err == nil {
+			fmt.Println(string(json))
+		}
+	}
+	if config.DefaultConfig.EnableLoadBalancerStatus {
+		lbEventStatus := make(map[string]v1.LoadBalancerStatus)
+		lbEventStatus["deleted"] = service.Status.LoadBalancer
+		json, err := json.Marshal(lbEventStatus)
+		if err == nil {
+			fmt.Println(string(json))
+		}
+	}
 	return errors.Join(err1, err2)
 }
 

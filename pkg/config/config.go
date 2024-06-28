@@ -5,6 +5,7 @@ package config
 var DefaultConfig = &Config{}
 
 type Config struct {
-	EnableLogDump bool
-	LogDir        string
+	EnableLogDump            bool
+	LogDir                   string
+	EnableLoadBalancerStatus bool
 }
