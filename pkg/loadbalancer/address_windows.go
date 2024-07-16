@@ -6,7 +6,7 @@ import (
 	"os/exec"
 )
 
-func AddIPToInterface(ifaceName string, ip string) error {
+func AddIPToLocalInterface(ip string) error {
 	err := exec.Command("netsh", "interface", "ip", "add", "address", "loopback", ip, "255.255.255.255").Run()
 	if err != nil {
 		return err
@@ -14,7 +14,7 @@ func AddIPToInterface(ifaceName string, ip string) error {
 	return nil
 }
 
-func RemoveIPToInterface(ifaceName string, ip string) error {
+func RemoveIPFromLocalInterface(ip string) error {
 	err := exec.Command("netsh", "interface", "ip", "delete", "address", "loopback", ip, "255.255.255.255").Run()
 	if err != nil {
 		return err

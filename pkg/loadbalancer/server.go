@@ -29,10 +29,18 @@ var _ cloudprovider.LoadBalancer = &Server{}
 
 func NewServer() cloudprovider.LoadBalancer {
 	s := &Server{}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
 		s.tunnelManager = NewTunnelManager()
 	}
 	return s
+}
+
+func isWSL2() bool {
+	if v, err := os.ReadFile("/proc/version"); err == nil {
+		return strings.Contains(string(v), "WSL2")
+	}
+
+	return false
 }
 
 func (s *Server) GetLoadBalancer(ctx context.Context, clusterName string, service *v1.Service) (*v1.LoadBalancerStatus, bool, error) {
