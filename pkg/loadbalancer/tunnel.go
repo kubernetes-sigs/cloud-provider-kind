@@ -11,10 +11,6 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
-const (
-	ifaceName = "lo0"
-)
-
 type tunnelManager struct {
 	mu      sync.Mutex
 	tunnels map[string]map[string]*tunnel // first key is the service namespace/name second key is the servicePort
@@ -43,7 +39,7 @@ func (t *tunnelManager) setupTunnels(containerName string) error {
 	}
 
 	klog.V(0).Infof("setting IPv4 address %s associated to container %s", ipv4, containerName)
-	err = AddIPToInterface(ifaceName, ipv4)
+	err = AddIPToLocalInterface(ipv4)
 	if err != nil {
 		return err
 	}
@@ -86,8 +82,8 @@ func (t *tunnelManager) removeTunnels(containerName string) error {
 		tunnel.Stop() // nolint: errcheck
 	}
 
-	klog.V(0).Infof("Removing IPv4 address %s associated to interface %s", tunnelIP, ifaceName)
-	err := RemoveIPToInterface(ifaceName, tunnelIP)
+	klog.V(0).Infof("Removing IPv4 address %s associated to local interface", tunnelIP)
+	err := RemoveIPFromLocalInterface(tunnelIP)
 	if err != nil {
 		return err
 	}
