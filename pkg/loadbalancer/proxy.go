@@ -329,7 +329,7 @@ func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Durati
 		// iptables port forwarding on localhost only works for IPv4
 		resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%s/ready", port))
 		if err != nil {
-			klog.V(2).Infof("unexpected error trying to get load balancer %s readyness :%v", name, err)
+			klog.V(2).Infof("unexpected error trying to get load balancer %s readiness :%v", name, err)
 			return false, nil
 		}
 		defer resp.Body.Close()
@@ -341,7 +341,7 @@ func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Durati
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			klog.V(2).Infof("unexpected error trying to get load balancer %s readyness :%v", name, err)
+			klog.V(2).Infof("unexpected error trying to get load balancer %s readiness :%v", name, err)
 			return false, nil
 		}
 
