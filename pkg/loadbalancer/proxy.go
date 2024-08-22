@@ -21,7 +21,7 @@ import (
 )
 
 // proxyImage defines the loadbalancer image:tag
-const proxyImage = "envoyproxy/envoy:v1.30.1"
+const proxyImage = "docker.io/envoyproxy/envoy:v1.30.1"
 
 // keep in sync with dynamicFilesystemConfig
 const (
