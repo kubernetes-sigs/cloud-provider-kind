@@ -14,7 +14,7 @@ github.com/blang/semver/v4
 # github.com/cespare/xxhash/v2 v2.3.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
-# github.com/davecgh/go-spew v1.1.1
+# github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 ## explicit
 github.com/davecgh/go-spew/spew
 # github.com/emicklei/go-restful/v3 v3.12.1
@@ -25,6 +25,9 @@ github.com/emicklei/go-restful/v3/log
 ## explicit; go 1.18
 github.com/evanphx/json-patch/v5
 github.com/evanphx/json-patch/v5/internal/json
+# github.com/fxamacker/cbor/v2 v2.7.0
+## explicit; go 1.17
+github.com/fxamacker/cbor/v2
 # github.com/go-logr/logr v1.4.2
 ## explicit; go 1.18
 github.com/go-logr/logr
@@ -144,6 +147,9 @@ github.com/spf13/cobra
 # github.com/spf13/pflag v1.0.5
 ## explicit; go 1.12
 github.com/spf13/pflag
+# github.com/x448/float16 v0.8.4
+## explicit; go 1.11
+github.com/x448/float16
 # golang.org/x/net v0.26.0
 ## explicit; go 1.18
 golang.org/x/net/http/httpguts
@@ -272,7 +278,7 @@ k8s.io/api/storage/v1
 k8s.io/api/storage/v1alpha1
 k8s.io/api/storage/v1beta1
 k8s.io/api/storagemigration/v1alpha1
-# k8s.io/apimachinery v0.30.3
+# k8s.io/apimachinery v0.31.0
 ## explicit; go 1.22.0
 k8s.io/apimachinery/pkg/api/equality
 k8s.io/apimachinery/pkg/api/errors
@@ -291,6 +297,8 @@ k8s.io/apimachinery/pkg/labels
 k8s.io/apimachinery/pkg/runtime
 k8s.io/apimachinery/pkg/runtime/schema
 k8s.io/apimachinery/pkg/runtime/serializer
+k8s.io/apimachinery/pkg/runtime/serializer/cbor/direct
+k8s.io/apimachinery/pkg/runtime/serializer/cbor/internal/modes
 k8s.io/apimachinery/pkg/runtime/serializer/json
 k8s.io/apimachinery/pkg/runtime/serializer/protobuf
 k8s.io/apimachinery/pkg/runtime/serializer/recognizer
@@ -628,7 +636,7 @@ k8s.io/kube-openapi/pkg/schemaconv
 k8s.io/kube-openapi/pkg/spec3
 k8s.io/kube-openapi/pkg/util/proto
 k8s.io/kube-openapi/pkg/validation/spec
-# k8s.io/utils v0.0.0-20240502163921-fe8a2dddb1d0
+# k8s.io/utils v0.0.0-20240711033017-18e509b52bc8
 ## explicit; go 1.18
 k8s.io/utils/buffer
 k8s.io/utils/clock
