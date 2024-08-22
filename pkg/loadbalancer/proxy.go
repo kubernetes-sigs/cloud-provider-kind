@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -274,7 +275,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 }
 
 // TODO: move to xDS via GRPC instead of having to deal with files
-func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) error {
+func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node, directConnectivity bool) error {
 	if service == nil {
 		return nil
 	}
@@ -311,23 +312,34 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	if err != nil {
 		return fmt.Errorf("error updating configuration Stdout: %s Stderr: %s : %w", stdout.String(), stderr.String(), err)
 	}
-	return waitLoadBalancerReady(ctx, name, 30*time.Second)
+	return waitLoadBalancerReady(ctx, name, 30*time.Second, directConnectivity)
 }
 
-func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Duration) error {
+func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Duration, directConnectivity bool) error {
 	portmaps, err := container.PortMaps(name)
 	if err != nil {
 		return err
 	}
-	port, ok := portmaps[strconv.Itoa(envoyAdminPort)]
-	if !ok {
-		return fmt.Errorf("envoy admin port %d not found, got %v", envoyAdminPort, portmaps)
+
+	var authority string
+	if directConnectivity {
+		ipv4, _, err := container.IPs(name)
+		if err != nil {
+			return err
+		}
+		authority = net.JoinHostPort(ipv4, strconv.Itoa(envoyAdminPort))
+	} else {
+		port, ok := portmaps[strconv.Itoa(envoyAdminPort)]
+		if !ok {
+			return fmt.Errorf("envoy admin port %d not found, got %v", envoyAdminPort, portmaps)
+		}
+		authority = net.JoinHostPort("127.0.0.1", port)
 	}
 
 	httpClient := http.DefaultClient
 	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, timeout, true, func(ctx context.Context) (done bool, err error) {
 		// iptables port forwarding on localhost only works for IPv4
-		resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%s/ready", port))
+		resp, err := httpClient.Get(fmt.Sprintf("http://%s/ready", authority))
 		if err != nil {
 			klog.V(2).Infof("unexpected error trying to get load balancer %s readiness :%v", name, err)
 			return false, nil

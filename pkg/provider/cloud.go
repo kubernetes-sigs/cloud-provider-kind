@@ -9,11 +9,11 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster"
 )
 
-func New(clusterName string, kindClient *cluster.Provider) cloudprovider.Interface {
+func New(clusterName string, kindClient *cluster.Provider, directConnectivity bool) cloudprovider.Interface {
 	return &cloud{
 		clusterName:  clusterName,
 		kindClient:   kindClient,
-		lbController: loadbalancer.NewServer(),
+		lbController: loadbalancer.NewServer(directConnectivity),
 	}
 }
 

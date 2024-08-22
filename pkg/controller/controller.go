@@ -74,14 +74,14 @@ func (c *Controller) Run(ctx context.Context) {
 				continue
 			}
 
-			kubeClient, err := c.getKubeClient(ctx, cluster)
+			kubeClient, directConnectivity, err := c.getKubeClient(ctx, cluster)
 			if err != nil {
 				klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
 				continue
 			}
 
 			klog.V(2).Infof("Creating new cloud provider for cluster %s", cluster)
-			cloud := provider.New(cluster, c.kind)
+			cloud := provider.New(cluster, c.kind, directConnectivity)
 			ccm, err := startCloudControllerManager(ctx, cluster, kubeClient, cloud)
 			if err != nil {
 				klog.Errorf("Failed to start cloud controller for cluster %s: %v", cluster, err)
@@ -111,14 +111,13 @@ func (c *Controller) Run(ctx context.Context) {
 // getKubeClient returns a kubeclient depending if the ccm runs inside a container
 // inside the same docker network that the kind cluster or run externally in the host
 // It tries first to connect to the external endpoint
-func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
+func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, bool, error) {
 	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	// try internal first
 	for _, internal := range []bool{false, true} {
 		kconfig, err := c.kind.KubeConfig(cluster, internal)
 		if err != nil {
@@ -138,7 +137,7 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 		for i := 0; i < 5; i++ {
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, false, ctx.Err()
 			default:
 			}
 			if probeHTTP(httpClient, config.Host) {
@@ -157,9 +156,9 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 			klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
 			continue
 		}
-		return kubeClient, err
+		return kubeClient, internal, err
 	}
-	return nil, fmt.Errorf("can not find a working kubernetes clientset")
+	return nil, false, fmt.Errorf("can not find a working kubernetes clientset")
 }
 
 func probeHTTP(client *http.Client, address string) bool {

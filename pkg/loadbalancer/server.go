@@ -22,14 +22,17 @@ import (
 )
 
 type Server struct {
+	directConnectivity bool
 	tunnelManager *tunnelManager
 }
 
 var _ cloudprovider.LoadBalancer = &Server{}
 
-func NewServer() cloudprovider.LoadBalancer {
-	s := &Server{}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
+func NewServer(directConnectivity bool) cloudprovider.LoadBalancer {
+	s := &Server{
+		directConnectivity: directConnectivity,
+	}
+	if directConnectivity || runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
 		s.tunnelManager = NewTunnelManager()
 	}
 	return s
@@ -145,7 +148,7 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 }
 
 func (s *Server) UpdateLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) error {
-	return proxyUpdateLoadBalancer(ctx, clusterName, service, nodes)
+	return proxyUpdateLoadBalancer(ctx, clusterName, service, nodes, s.directConnectivity)
 }
 
 func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName string, service *v1.Service) error {
