@@ -331,7 +331,7 @@ k8s.io/apimachinery/pkg/version
 k8s.io/apimachinery/pkg/watch
 k8s.io/apimachinery/third_party/forked/golang/json
 k8s.io/apimachinery/third_party/forked/golang/reflect
-# k8s.io/apiserver v0.30.3
+# k8s.io/apiserver v0.31.0
 ## explicit; go 1.22.0
 k8s.io/apiserver/pkg/util/feature
 # k8s.io/client-go v0.31.0
