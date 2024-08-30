@@ -21,15 +21,17 @@ import (
 )
 
 var (
-	flagV         int
-	enableLogDump bool
-	logDumpDir    string
+	flagV               int
+	enableLogDump       bool
+	logDumpDir          string
+	enableLBPortMapping bool
 )
 
 func init() {
 	flag.IntVar(&flagV, "v", 2, "Verbosity level")
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
+	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
@@ -104,6 +106,11 @@ func Main() {
 	// some platforms require to enable tunneling for the LoadBalancers
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
 		config.DefaultConfig.LoadBalancerConnectivity = config.Tunnel
+	}
+
+	// flag overrides autodetection
+	if enableLBPortMapping {
+		config.DefaultConfig.LoadBalancerConnectivity = config.Portmap
 	}
 
 	// default control plane connectivity to portmap, it will be
