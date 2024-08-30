@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -20,13 +21,15 @@ import (
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	ccmfeatures "k8s.io/controller-manager/pkg/features"
 	"k8s.io/klog/v2"
+	cpkconfig "sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 	"sigs.k8s.io/cloud-provider-kind/pkg/provider"
 	"sigs.k8s.io/kind/pkg/cluster"
-	"sigs.k8s.io/kind/pkg/log"
 )
+
+var once sync.Once
 
 type Controller struct {
 	kind     *cluster.Provider
@@ -40,12 +43,10 @@ type ccm struct {
 	cancelFn          context.CancelFunc
 }
 
-func New(logger log.Logger) *Controller {
+func New(provider *cluster.Provider) *Controller {
 	controllersmetrics.Register()
 	return &Controller{
-		kind: cluster.NewProvider(
-			cluster.ProviderWithLogger(logger),
-		),
+		kind:     provider,
 		clusters: make(map[string]*ccm),
 	}
 }
@@ -108,9 +109,8 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
-// getKubeClient returns a kubeclient depending if the ccm runs inside a container
-// inside the same docker network that the kind cluster or run externally in the host
-// It tries first to connect to the external endpoint
+// getKubeClient returns a kubeclient for the cluster passed as argument
+// It tries first to connect to the internal endpoint.
 func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
 	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
@@ -118,8 +118,8 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	// try internal first
-	for _, internal := range []bool{false, true} {
+	// prefer internal (direct connectivity) over no-internal (commonly portmap)
+	for _, internal := range []bool{true, false} {
 		kconfig, err := c.kind.KubeConfig(cluster, internal)
 		if err != nil {
 			klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
@@ -157,6 +157,14 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 			klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
 			continue
 		}
+		// the first cluster will give us the type of connectivity between
+		// cloud-provider-kind and the clusters and load balancer containers.
+		// In Linux or containerized cloud-provider-kind this will be direct.
+		once.Do(func() {
+			if internal {
+				cpkconfig.DefaultConfig.ControlPlaneConnectivity = cpkconfig.Direct
+			}
+		})
 		return kubeClient, err
 	}
 	return nil, fmt.Errorf("can not find a working kubernetes clientset")

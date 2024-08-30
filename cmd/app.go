@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"k8s.io/component-base/logs"
@@ -14,6 +16,7 @@ import (
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
+	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
 
@@ -98,5 +101,32 @@ func Main() {
 		klog.Infof("**** Dumping load balancers logs to: %s", logDumpDir)
 	}
 
-	controller.New(logger).Run(ctx)
+	// some platforms require to enable tunneling for the LoadBalancers
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
+		config.DefaultConfig.LoadBalancerConnectivity = config.Tunnel
+	}
+
+	// default control plane connectivity to portmap, it will be
+	// overriden if the first cluster added detects direct
+	// connecitivity
+	config.DefaultConfig.ControlPlaneConnectivity = config.Portmap
+
+	// initialize kind provider
+	option, err := cluster.DetectNodeProvider()
+	if err != nil {
+		klog.Fatalf("can not detect cluster provider: %v", err)
+	}
+	kindProvider := cluster.NewProvider(
+		option,
+		cluster.ProviderWithLogger(logger),
+	)
+	controller.New(kindProvider).Run(ctx)
+}
+
+func isWSL2() bool {
+	if v, err := os.ReadFile("/proc/version"); err == nil {
+		return strings.Contains(string(v), "WSL2")
+	}
+
+	return false
 }
