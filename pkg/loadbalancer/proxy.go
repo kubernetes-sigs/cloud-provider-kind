@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
@@ -319,15 +321,26 @@ func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Durati
 	if err != nil {
 		return err
 	}
-	port, ok := portmaps[strconv.Itoa(envoyAdminPort)]
-	if !ok {
-		return fmt.Errorf("envoy admin port %d not found, got %v", envoyAdminPort, portmaps)
+
+	var authority string
+	if config.DefaultConfig.ControlPlaneConnectivity == config.Direct {
+		ipv4, _, err := container.IPs(name)
+		if err != nil {
+			return err
+		}
+		authority = net.JoinHostPort(ipv4, strconv.Itoa(envoyAdminPort))
+	} else {
+		port, ok := portmaps[strconv.Itoa(envoyAdminPort)]
+		if !ok {
+			return fmt.Errorf("envoy admin port %d not found, got %v", envoyAdminPort, portmaps)
+		}
+		authority = net.JoinHostPort("127.0.0.1", port)
 	}
 
 	httpClient := http.DefaultClient
 	err = wait.PollUntilContextTimeout(ctx, 1*time.Second, timeout, true, func(ctx context.Context) (done bool, err error) {
 		// iptables port forwarding on localhost only works for IPv4
-		resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%s/ready", port))
+		resp, err := httpClient.Get(fmt.Sprintf("http://%s/ready", authority))
 		if err != nil {
 			klog.V(2).Infof("unexpected error trying to get load balancer %s readiness :%v", name, err)
 			return false, nil
