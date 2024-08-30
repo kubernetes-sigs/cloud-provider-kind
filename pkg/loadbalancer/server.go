@@ -220,7 +220,8 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		}...)
 	}
 
-	if s.tunnelManager != nil {
+	if s.tunnelManager != nil ||
+		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
 		// Forward the Service Ports to the host so they are accessible on Mac and Windows
 		for _, port := range service.Spec.Ports {
 			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
