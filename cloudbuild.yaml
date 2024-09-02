@@ -1,0 +1,11 @@
+# See https://cloud.google.com/cloud-build/docs/build-config
+options:
+  substitution_option: ALLOW_LOOSE
+  machineType: E2_HIGHCPU_32
+steps:
+- name: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20240718-5ef92b5c36
+  entrypoint: make
+  env:
+  - REGISTRY=gcr.io/k8s-staging-kind
+  - IMAGE_NAME=cloud-provider-kind
+  args: ['release']
