@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
@@ -45,6 +46,15 @@ func Main() {
 	flag.VisitAll(func(flag *flag.Flag) {
 		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
 	})
+
+	// Process on macOS must run using sudo
+	if runtime.GOOS == "darwin" {
+		currentUser, _ := user.Current()
+		if currentUser.Uid != "0" {
+			fmt.Println("Please run this again with `sudo`.")
+			os.Exit(1)
+		}
+	}
 
 	// trap Ctrl+C and call cancel on the context
 	ctx := context.Background()
