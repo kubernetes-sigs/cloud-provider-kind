@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
@@ -48,12 +47,8 @@ func Main() {
 	})
 
 	// Process on macOS must run using sudo
-	if runtime.GOOS == "darwin" {
-		currentUser, _ := user.Current()
-		if currentUser.Uid != "0" {
-			fmt.Println("Please run this again with `sudo`.")
-			os.Exit(1)
-		}
+	if runtime.GOOS == "darwin" && syscall.Geteuid() != 0 {
+		klog.Warning("Please run this again with `sudo`.")
 	}
 
 	// trap Ctrl+C and call cancel on the context
