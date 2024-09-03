@@ -48,7 +48,7 @@ func Main() {
 
 	// Process on macOS must run using sudo
 	if runtime.GOOS == "darwin" && syscall.Geteuid() != 0 {
-		klog.Warning("Please run this again with `sudo`.")
+		klog.Fatalf("Please run this again with `sudo`.")
 	}
 
 	// trap Ctrl+C and call cancel on the context
