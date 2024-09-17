@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: "1.21.7"
-  K8S_VERSION: "v1.29.2"
-  KIND_VERSION: "v0.22.0"
+  GO_VERSION: "1.22.7"
+  K8S_VERSION: "v1.31.0"
+  KIND_VERSION: "v0.24.0"
   KIND_CLUSTER_NAME: "kind-cloud"
 
 jobs:
@@ -179,7 +179,7 @@ jobs:
 
     - name: Upload logs
       if: always()
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
         path: ./_artifacts/logs
