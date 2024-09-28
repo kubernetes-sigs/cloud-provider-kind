@@ -1,4 +1,4 @@
-// Copyright 2023 Google LLC.
+// Copyright 2024 Google LLC.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"text/template"
 	"text/template/parse"
 	"unicode"
@@ -190,22 +191,21 @@ func unmarshalYaml(data []byte) ([]any, error) {
 
 // Mutation algorithm
 func mutateString(s string) string {
-	// Longest possible output string is 2x the original
-	out := make([]rune, utf8.RuneCountInString(s)*2)
+	var sb strings.Builder
 
-	i := 0
+	// Longest possible output string is 2x the original
+	sb.Grow(len(s) * 2)
+
 	for _, r := range s {
-		out[i] = r
-		i++
+		sb.WriteRune(r)
 
 		// Don't repeat quoting-related characters so as to not allow YAML context change in the mutation result
 		if r != '\\' && r != '\'' && r != '"' {
-			out[i] = r
-			i++
+			sb.WriteRune(r)
 		}
 	}
 
-	return string(out[:i])
+	return sb.String()
 }
 
 // Execute applies a parsed template to the specified data object,
