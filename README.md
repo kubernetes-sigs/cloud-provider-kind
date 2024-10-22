@@ -90,8 +90,7 @@ Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/
 Control-plane nodes need to remove the special label `node.kubernetes.io/exclude-from-external-load-balancers` to be able to access the workloads running on those nodes using a LoadBalancer Service.
 
 ```sh
-$ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers-
-node/kind-control-plane unlabeled
+kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers=true
 ```
 
 Once the cluster is running, we need to run the `cloud-provider-kind` in a terminal and keep it running. The `cloud-provider-kind` will monitor all your KIND clusters and `Services` with Type `LoadBalancer` and create the corresponding LoadBalancer containers that will expose those Services.
