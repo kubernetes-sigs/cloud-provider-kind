@@ -208,9 +208,10 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		// including some ones docker would otherwise do by default.
 		// for now this is what we want. in the future we may revisit this.
 		"--privileged",
-		"--restart=on-failure",                   // to deal with the crash casued by https://github.com/envoyproxy/envoy/issues/34195
-		"--sysctl=net.ipv4.ip_forward=1",         // allow ip forwarding
-		"--sysctl=net.ipv4.conf.all.rp_filter=0", // disable rp filter
+		"--restart=on-failure",                           // to deal with the crash casued by https://github.com/envoyproxy/envoy/issues/34195
+		"--sysctl=net.ipv4.ip_forward=1",                 // allow ip forwarding
+		"--sysctl=net.ipv4.conf.all.rp_filter=0",         // disable rp filter
+		"--sysctl=net.ipv4.ip_unprivileged_port_start=1", // Allow lower port numbers for podman (see https://github.com/containers/podman/blob/main/rootless.md for more info)
 	}
 
 	if isIPv6Service(service) {
