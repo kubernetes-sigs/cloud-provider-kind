@@ -6,6 +6,6 @@ steps:
 - name: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20240718-5ef92b5c36
   entrypoint: make
   env:
-  - REGISTRY=gcr.io/k8s-staging-kind
-  - IMAGE_NAME=cloud-provider-kind
+  - REGISTRY=us-central1-docker.pkg.dev/k8s-staging-images/cloud-provider-kind
+  - IMAGE_NAME=cloud-controller-manager
   args: ['release']
