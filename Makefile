@@ -32,7 +32,7 @@ update:
 
 
 # get image name from directory we're building
-IMAGE_NAME=cloud-provider-kind
+IMAGE_NAME?=cloud-provider-kind
 # docker image registry, default to upstream
 REGISTRY?=gcr.io/k8s-staging-kind
 # tag based on date-sha

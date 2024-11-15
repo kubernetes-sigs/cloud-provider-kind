@@ -29,6 +29,9 @@ can make it available elsewhere if appropriate:
 sudo install ~/go/bin/cloud-provider-kind /usr/local/bin
 ```
 
+Starting with v0.4.0, the docker image for cloud-provider-kind is available
+at `registry.k8s.io/cloud-provider-kind/cloud-controller-manager`
+
 You can also build it locally:
 
 ```sh
