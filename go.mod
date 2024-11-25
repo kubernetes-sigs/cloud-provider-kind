@@ -6,10 +6,10 @@ require (
 	github.com/google/go-cmp v0.6.0
 	github.com/lithammer/dedent v1.1.0
 	github.com/pkg/errors v0.9.1
-	k8s.io/api v0.31.1
-	k8s.io/apimachinery v0.31.2
+	k8s.io/api v0.31.3
+	k8s.io/apimachinery v0.31.3
 	k8s.io/apiserver v0.31.1
-	k8s.io/client-go v0.31.1
+	k8s.io/client-go v0.31.3
 	k8s.io/cloud-provider v0.31.1
 	k8s.io/component-base v0.31.1
 	k8s.io/controller-manager v0.31.1
