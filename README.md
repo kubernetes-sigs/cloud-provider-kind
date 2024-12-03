@@ -87,7 +87,7 @@ Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/
 
 ```
 
-**Note**
+### Allowing load balancers access to control plane nodes
 
 By default, [Kubernetes expects workloads will not run on control plane nodes](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/#control-plane-node-isolation)
 and labels them with [`node.kubernetes.io/exclude-from-external-load-balancers`](https://kubernetes.io/docs/reference/labels-annotations-taints/#node-kubernetes-io-exclude-from-external-load-balancers),
@@ -99,6 +99,8 @@ you will need to remove this label to access them using a LoadBalancer:
 ```sh
 $ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers-
 ```
+
+### Running the provider
 
 Once the cluster is running, we need to run the `cloud-provider-kind` in a terminal and keep it running. The `cloud-provider-kind` will monitor all your KIND clusters and `Services` with Type `LoadBalancer` and create the corresponding LoadBalancer containers that will expose those Services.
 
