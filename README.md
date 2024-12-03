@@ -7,12 +7,11 @@ KIND has demonstrated to be a very versatile, efficient, cheap and very useful t
 - [Slack channel](https://kubernetes.slack.com/messages/kind)
 - [Mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-testing)
 
-## Talks 
+## Talks
 
 Kubecon EU 2024 - [Keep Calm and Load Balance on KIND - Antonio Ojea & Benjamin Elder, Google](https://sched.co/1YhhY)
 
 [![Keep Calm and Load Balance on KIND](https://img.youtube.com/vi/U6_-y24rJnI/0.jpg)](https://www.youtube.com/watch?v=U6_-y24rJnI)
-
 
 ## Install
 
@@ -131,14 +130,14 @@ spec:
         app: MyLocalApp
     spec:
       containers:
-      - name: agnhost
-        image: registry.k8s.io/e2e-test-images/agnhost:2.40
-        args:
-          - netexec
-          - --http-port=8080
-          - --udp-port=8080
-        ports:
-        - containerPort: 8080
+        - name: agnhost
+          image: registry.k8s.io/e2e-test-images/agnhost:2.40
+          args:
+            - netexec
+            - --http-port=8080
+            - --udp-port=8080
+          ports:
+            - containerPort: 8080
 ---
 apiVersion: v1
 kind: Service
@@ -191,6 +190,7 @@ Limitations:
 - Overlapping IP between the containers and the host can break connectivity.
 
 Mainly tested with `docker` and `Linux`, though `Windows` and `Mac` are also basically supported:
+
 - On macOS you must run cloud-provider-kind using `sudo`
 - On Windows you must run cloud-provider-kind from a shell that uses `Run as administrator`
 - Further feedback from users will be helpful to support other related platforms.
