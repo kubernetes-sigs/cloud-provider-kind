@@ -98,7 +98,6 @@ you will need to remove this label to access them using a LoadBalancer:
 
 ```sh
 $ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers-
-node/kind-control-plane unlabeled
 ```
 
 Once the cluster is running, we need to run the `cloud-provider-kind` in a terminal and keep it running. The `cloud-provider-kind` will monitor all your KIND clusters and `Services` with Type `LoadBalancer` and create the corresponding LoadBalancer containers that will expose those Services.
