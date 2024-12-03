@@ -89,7 +89,12 @@ Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/
 
 **Note**
 
-Control-plane nodes need to remove the special label `node.kubernetes.io/exclude-from-external-load-balancers` to be able to access the workloads running on those nodes using a LoadBalancer Service.
+By default, [Kubernetes expects workloads will not run on control plane nodes](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/#control-plane-node-isolation)
+and labels them with [`node.kubernetes.io/exclude-from-external-load-balancers`](https://kubernetes.io/docs/reference/labels-annotations-taints/#node-kubernetes-io-exclude-from-external-load-balancers),
+which stops load balancers from accessing them.
+
+If you are running workloads on control plane nodes, as is the [default kind configuration](https://kind.sigs.k8s.io/docs/user/configuration/#nodes),
+you will need to remove this label to access them using a LoadBalancer:
 
 ```sh
 $ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers-
