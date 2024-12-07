@@ -16,6 +16,7 @@ import (
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
+	usedImage "sigs.k8s.io/cloud-provider-kind/pkg/image"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
@@ -25,6 +26,7 @@ var (
 	enableLogDump       bool
 	logDumpDir          string
 	enableLBPortMapping bool
+	listImages          bool
 )
 
 func init() {
@@ -32,6 +34,7 @@ func init() {
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
+	flag.BoolVar(&listImages, "list-images", false, "list images used by cloud-provider-kind")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
@@ -45,6 +48,14 @@ func Main() {
 	flag.VisitAll(func(flag *flag.Flag) {
 		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
 	})
+
+	// List images used by cloud-provider-kind
+	if listImages {
+		for _, img := range usedImage.Images {
+			fmt.Println(img)
+		}
+		return
+	}
 
 	// Process on macOS must run using sudo
 	if runtime.GOOS == "darwin" && syscall.Geteuid() != 0 {
