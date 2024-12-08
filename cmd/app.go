@@ -16,7 +16,7 @@ import (
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
-	usedImage "sigs.k8s.io/cloud-provider-kind/pkg/image"
+	"sigs.k8s.io/cloud-provider-kind/pkg/images"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
@@ -51,7 +51,7 @@ func Main() {
 
 	// List images used by cloud-provider-kind
 	if listImages {
-		for _, img := range usedImage.Images {
+		for _, img := range images.Images {
 			fmt.Println(img)
 		}
 		return

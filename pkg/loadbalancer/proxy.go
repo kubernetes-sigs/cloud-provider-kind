@@ -22,9 +22,6 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
-// proxyImage defines the loadbalancer image:tag
-const proxyImage = "docker.io/envoyproxy/envoy:v1.30.1"
-
 // keep in sync with dynamicFilesystemConfig
 const (
 	proxyConfigPath    = "/home/envoy/envoy.yaml"
