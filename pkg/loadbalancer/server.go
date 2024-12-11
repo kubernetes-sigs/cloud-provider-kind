@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
+	"sigs.k8s.io/cloud-provider-kind/pkg/images"
 )
 
 type Server struct {
@@ -102,7 +103,7 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 	}
 	if !container.Exist(name) {
 		klog.V(2).Infof("creating container for loadbalancer")
-		err := s.createLoadBalancer(clusterName, service, proxyImage)
+		err := s.createLoadBalancer(clusterName, service, images.Images["proxy"])
 		if err != nil {
 			return nil, err
 		}
