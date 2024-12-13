@@ -32,7 +32,21 @@ func podmanIsAvailable() bool {
 		return false
 	}
 	return strings.HasPrefix(lines[0], "podman version")
+}
 
+func nerdctlIsAvailable() bool {
+	cmd := kindexec.Command("nerdctl", "-v")
+	lines, err := kindexec.OutputLines(cmd)
+	if err != nil || len(lines) != 1 {
+		// check finch
+		cmd = kindexec.Command("finch", "-v")
+		lines, err = kindexec.OutputLines(cmd)
+		if err != nil || len(lines) != 1 {
+			return false
+		}
+		return strings.HasPrefix(lines[0], "finch version")
+	}
+	return strings.HasPrefix(lines[0], "nerdctl version")
 }
 
 func init() {
@@ -41,6 +55,15 @@ func init() {
 	}
 	if podmanIsAvailable() {
 		containerRuntime = "podman"
+		return
+	}
+	if nerdctlIsAvailable() {
+		containerRuntime = "nerdctl"
+		if _, err := exec.LookPath("nerdctl"); err != nil {
+			if _, err := exec.LookPath("finch"); err == nil {
+				containerRuntime = "finch"
+			}
+		}
 	}
 }
 
