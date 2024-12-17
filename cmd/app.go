@@ -16,6 +16,7 @@ import (
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
+	"sigs.k8s.io/cloud-provider-kind/pkg/images"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
@@ -28,23 +29,47 @@ var (
 )
 
 func init() {
+	subcommands := [][]string{
+		{"list-images", "list images used by cloud-provider-kind"},
+	}
+
 	flag.IntVar(&flagV, "v", 2, "Verbosity level")
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 
 	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [options]\n\n")
+		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [subcommand] [options]\n\n")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		printSubcommands(subcommands)
+		fmt.Fprint(os.Stderr, "\n")
+		fmt.Fprintln(os.Stderr, "Options:")
 		flag.PrintDefaults()
 	}
 }
 
 func Main() {
+	// Parse subcommands if exist
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "list-images":
+			listImages()
+			return
+		default:
+		}
+	}
+
 	// Parse command line flags and arguments
 	flag.Parse()
 	flag.VisitAll(func(flag *flag.Flag) {
 		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
 	})
+
+	// don't allow subcommands after flags
+	if len(flag.Args()) > 0 {
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	// Process on macOS must run using sudo
 	if runtime.GOOS == "darwin" && syscall.Geteuid() != 0 {
@@ -133,6 +158,19 @@ func Main() {
 		cluster.ProviderWithLogger(logger),
 	)
 	controller.New(kindProvider).Run(ctx)
+}
+
+func printSubcommands(subcommands [][]string) {
+	for _, subcmd := range subcommands {
+		fmt.Fprintf(os.Stderr, "  %s\n", subcmd[0])
+		fmt.Fprintf(os.Stderr, "        %s\n", subcmd[1])
+	}
+}
+
+func listImages() {
+	for _, img := range images.Images {
+		fmt.Println(img)
+	}
 }
 
 func isWSL2() bool {
