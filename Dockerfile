@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.22
+FROM --platform=$BUILDPLATFORM golang:1.23
 WORKDIR /go/src
 # make deps fetching cacheable
 COPY go.mod go.sum ./
