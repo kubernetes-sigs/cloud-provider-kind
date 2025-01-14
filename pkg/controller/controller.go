@@ -141,7 +141,7 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 				return nil, ctx.Err()
 			default:
 			}
-			if probeHTTP(httpClient, config.Host) {
+			if probeHTTP(ctx, httpClient, config.Host) {
 				ok = true
 				break
 			}
@@ -170,9 +170,14 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 	return nil, fmt.Errorf("can not find a working kubernetes clientset")
 }
 
-func probeHTTP(client *http.Client, address string) bool {
+func probeHTTP(ctx context.Context, client *http.Client, address string) bool {
 	klog.Infof("probe HTTP address %s", address)
-	resp, err := client.Get(address)
+	req, err := http.NewRequest("GET", address, nil)
+	if err != nil {
+		return false
+	}
+	req = req.WithContext(ctx)
+	resp, err := client.Do(req)
 	if err != nil {
 		klog.Infof("Failed to connect to HTTP address %s: %v", address, err)
 		return false
