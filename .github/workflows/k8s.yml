@@ -56,7 +56,10 @@ jobs:
         sudo cp ${TMP_DIR}/e2e.test /usr/local/bin/e2e.test
         sudo cp ${TMP_DIR}/kubectl /usr/local/bin/kubectl
         sudo cp ${TMP_DIR}/kind /usr/local/bin/kind
-        sudo chmod +x /usr/local/bin/*
+        sudo chmod +x /usr/local/bin/ginkgo
+        sudo chmod +x /usr/local/bin/e2e.test
+        sudo chmod +x /usr/local/bin/kubectl
+        sudo chmod +x /usr/local/bin/kind
         # Create folder to store artifacts
         mkdir -p _artifacts
 
