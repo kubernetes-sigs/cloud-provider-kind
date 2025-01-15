@@ -2,9 +2,7 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -14,6 +12,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	cloudprovider "k8s.io/cloud-provider"
 	nodecontroller "k8s.io/cloud-provider/controllers/node"
@@ -109,80 +108,76 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
+func (c *Controller) getKubeConfig(cluster string, internal bool) (*rest.Config, error) {
+	kconfig, err := c.kind.KubeConfig(cluster, internal)
+	if err != nil {
+		klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
+		return nil, err
+	}
+
+	config, err := clientcmd.RESTConfigFromKubeConfig([]byte(kconfig))
+	if err != nil {
+		klog.Errorf("Failed to convert kubeconfig for cluster %s: %v", cluster, err)
+		return nil, err
+	}
+	return config, nil
+}
+
 // getKubeClient returns a kubeclient for the cluster passed as argument
 // It tries first to connect to the internal endpoint.
 func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
-	httpClient := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
+	addresses := []string{}
+	internalConfig, err := c.getKubeConfig(cluster, true)
+	if err != nil {
+		klog.Errorf("Failed to get internal kubeconfig for cluster %s: %v", cluster, err)
+	} else {
+		addresses = append(addresses, internalConfig.Host)
 	}
-	// prefer internal (direct connectivity) over no-internal (commonly portmap)
-	for _, internal := range []bool{true, false} {
-		kconfig, err := c.kind.KubeConfig(cluster, internal)
-		if err != nil {
-			klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
-			continue
-		}
+	externalConfig, err := c.getKubeConfig(cluster, false)
+	if err != nil {
+		klog.Errorf("Failed to get external kubeconfig for cluster %s: %v", cluster, err)
+	} else {
+		addresses = append(addresses, externalConfig.Host)
+	}
 
-		config, err := clientcmd.RESTConfigFromKubeConfig([]byte(kconfig))
-		if err != nil {
-			klog.Errorf("Failed to convert kubeconfig for cluster %s: %v", cluster, err)
-			continue
-		}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("could not find kubeconfig for cluster %s", cluster)
+	}
 
-		// check that the apiserver is reachable before continue
-		// to fail fast and avoid waiting until the client operations timeout
-		var ok bool
-		for i := 0; i < 5; i++ {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
-			}
-			if probeHTTP(httpClient, config.Host) {
-				ok = true
-				break
-			}
+	var host string
+	for i := 0; i < 5; i++ {
+		host, err = firstSuccessfulProbe(ctx, addresses)
+		if err != nil {
+			klog.Errorf("Failed to connect to any address in %v: %v", addresses, err)
 			time.Sleep(time.Second * time.Duration(i))
+		} else {
+			klog.Infof("Connected succesfully to %s", host)
+			break
 		}
-		if !ok {
-			klog.Errorf("Failed to connect to apiserver %s: %v", cluster, err)
-			continue
-		}
+	}
 
-		kubeClient, err := kubernetes.NewForConfig(config)
-		if err != nil {
-			klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
-			continue
-		}
+	var config *rest.Config
+	switch host {
+	case internalConfig.Host:
+		config = internalConfig
 		// the first cluster will give us the type of connectivity between
 		// cloud-provider-kind and the clusters and load balancer containers.
 		// In Linux or containerized cloud-provider-kind this will be direct.
 		once.Do(func() {
-			if internal {
-				cpkconfig.DefaultConfig.ControlPlaneConnectivity = cpkconfig.Direct
-			}
+			cpkconfig.DefaultConfig.ControlPlaneConnectivity = cpkconfig.Direct
 		})
+	case externalConfig.Host:
+		config = externalConfig
+	default:
+		return nil, fmt.Errorf("restConfig for host %s not avaliable", host)
+	}
+
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
 		return kubeClient, err
 	}
-	return nil, fmt.Errorf("can not find a working kubernetes clientset")
-}
-
-func probeHTTP(client *http.Client, address string) bool {
-	klog.Infof("probe HTTP address %s", address)
-	resp, err := client.Get(address)
-	if err != nil {
-		klog.Infof("Failed to connect to HTTP address %s: %v", address, err)
-		return false
-	}
-	defer resp.Body.Close()
-	// drain the body
-	io.ReadAll(resp.Body) // nolint:errcheck
-	// we only want to verify connectivity so don't need to check the http status code
-	// as the apiserver may not be ready
-	return true
+	return kubeClient, nil
 }
 
 // TODO: implement leader election to not have problems with  multiple providers
