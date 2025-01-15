@@ -2,9 +2,7 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -112,12 +110,6 @@ func (c *Controller) Run(ctx context.Context) {
 // getKubeClient returns a kubeclient for the cluster passed as argument
 // It tries first to connect to the internal endpoint.
 func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
-	httpClient := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
 	// prefer internal (direct connectivity) over no-internal (commonly portmap)
 	for _, internal := range []bool{true, false} {
 		kconfig, err := c.kind.KubeConfig(cluster, internal)
@@ -141,7 +133,7 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 				return nil, ctx.Err()
 			default:
 			}
-			if probeHTTP(ctx, httpClient, config.Host) {
+			if probeHTTP(ctx, config.Host) {
 				ok = true
 				break
 			}
@@ -168,26 +160,6 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 		return kubeClient, err
 	}
 	return nil, fmt.Errorf("can not find a working kubernetes clientset")
-}
-
-func probeHTTP(ctx context.Context, client *http.Client, address string) bool {
-	klog.Infof("probe HTTP address %s", address)
-	req, err := http.NewRequest("GET", address, nil)
-	if err != nil {
-		return false
-	}
-	req = req.WithContext(ctx)
-	resp, err := client.Do(req)
-	if err != nil {
-		klog.Infof("Failed to connect to HTTP address %s: %v", address, err)
-		return false
-	}
-	defer resp.Body.Close()
-	// drain the body
-	io.ReadAll(resp.Body) // nolint:errcheck
-	// we only want to verify connectivity so don't need to check the http status code
-	// as the apiserver may not be ready
-	return true
 }
 
 // TODO: implement leader election to not have problems with  multiple providers
