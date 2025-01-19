@@ -163,7 +163,7 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 func loadBalancerName(clusterName string, service *v1.Service) string {
 	hash := sha256.Sum256([]byte(loadBalancerSimpleName(clusterName, service)))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
-	name := constants.ContainerPrefix + "-" + encoded[:40]
+	name := constants.ContainerPrefix + "-" + encoded[:16]
 
 	return name
 }
