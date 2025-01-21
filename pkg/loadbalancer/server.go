@@ -162,7 +162,10 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 // loadbalancer name is a unique name for the loadbalancer container
 func loadBalancerName(clusterName string, service *v1.Service) string {
 	h := sha256.New()
-	io.WriteString(h, loadBalancerSimpleName(clusterName, service))
+	_, err := io.WriteString(h, loadBalancerSimpleName(clusterName, service))
+	if err != nil {
+		panic(err)
+	}
 	hash := h.Sum(nil)
 	return fmt.Sprintf("%s-%x", constants.ContainerPrefix, hash[:6])
 }
