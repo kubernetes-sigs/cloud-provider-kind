@@ -6,21 +6,14 @@ import (
 	"os/exec"
 )
 
-func AddIPToLocalInterface(ip string) error {
+func AddIPToLocalInterface(ip string) (string, error) {
 	// TODO: IPv6
-	err := exec.Command("ifconfig", "lo0", "alias", ip, "netmask", "255.255.255.255").Run()
-	if err != nil {
-		return err
-	}
-	return nil
+	output, err := exec.Command("ifconfig", "lo0", "alias", ip, "netmask", "255.255.255.255").CombinedOutput()
+	return string(output), err
 }
 
-func RemoveIPFromLocalInterface(ip string) error {
+func RemoveIPFromLocalInterface(ip string) (string, error) {
 	// delete the IP address
-	err := exec.Command("ifconfig", "lo0", "-alias", ip).Run()
-	if err != nil {
-		return err
-	}
-	return nil
-
+	output, err := exec.Command("ifconfig", "lo0", "-alias", ip).CombinedOutput()
+	return string(output), err
 }
