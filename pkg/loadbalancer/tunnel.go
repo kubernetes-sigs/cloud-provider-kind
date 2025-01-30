@@ -41,7 +41,7 @@ func (t *tunnelManager) setupTunnels(containerName string) error {
 	klog.V(0).Infof("setting IPv4 address %s associated to container %s", ipv4, containerName)
 	output, err := AddIPToLocalInterface(ipv4)
 	if err != nil {
-		klog.V(4).Infof("error adding IP to local interface: %v - %s", err, output)
+		return fmt.Errorf("error adding IP to local interface: %w - %s", err, output)
 	}
 
 	// create tunnel from the ip:svcport to the localhost:portmap
@@ -85,7 +85,7 @@ func (t *tunnelManager) removeTunnels(containerName string) error {
 	klog.V(0).Infof("Removing IPv4 address %s associated to local interface", tunnelIP)
 	output, err := RemoveIPFromLocalInterface(tunnelIP)
 	if err != nil {
-		klog.V(4).Infof("error removing IP from local interface: %v - %s", err, output)
+		return fmt.Errorf("error removing IP from local interface: %w - %s", err, output)
 	}
 	return nil
 }
