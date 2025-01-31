@@ -97,7 +97,7 @@ If you are running workloads on control plane nodes, as is the [default kind con
 you will need to remove this label to access them using a LoadBalancer:
 
 ```sh
-$ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers-
+$ kubectl label node kind-control-plane node.kubernetes.io/exclude-from-external-load-balancers=true
 ```
 
 ### Running the provider
