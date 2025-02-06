@@ -2,20 +2,16 @@
 
 package loadbalancer
 
-import "os/exec"
+import (
+	"os/exec"
+)
 
-func AddIPToLocalInterface(ip string) error {
-	err := exec.Command("ip", "addr", "add", ip, "dev", "lo").Run()
-	if err != nil {
-		return err
-	}
-	return nil
+func AddIPToLocalInterface(ip string) (string, error) {
+	output, err := exec.Command("ip", "addr", "add", ip, "dev", "lo").CombinedOutput()
+	return string(output), err
 }
 
-func RemoveIPFromLocalInterface(ip string) error {
-	err := exec.Command("ip", "addr", "del", ip, "dev", "lo").Run()
-	if err != nil {
-		return err
-	}
-	return nil
+func RemoveIPFromLocalInterface(ip string) (string, error) {
+	output, err := exec.Command("ip", "addr", "del", ip, "dev", "lo").CombinedOutput()
+	return string(output), err
 }

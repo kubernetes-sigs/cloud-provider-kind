@@ -121,7 +121,7 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 		klog.V(2).Infof("updating loadbalancer tunnels on userspace")
 		err = s.tunnelManager.setupTunnels(loadBalancerName(clusterName, service))
 		if err != nil {
-			return nil, err
+			klog.ErrorS(err, "error setting up tunnels")
 		}
 	}
 
