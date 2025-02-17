@@ -1,10 +1,10 @@
+# al.essio.dev/pkg/shellescape v1.5.1
+## explicit; go 1.18
+al.essio.dev/pkg/shellescape
 # github.com/BurntSushi/toml v1.4.0
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/alessio/shellescape v1.4.2
-## explicit; go 1.14
-github.com/alessio/shellescape
 # github.com/beorn7/perks v1.0.1
 ## explicit; go 1.11
 github.com/beorn7/perks/quantile
@@ -681,7 +681,7 @@ k8s.io/utils/trace
 ## explicit; go 1.23
 sigs.k8s.io/json
 sigs.k8s.io/json/internal/golang/encoding/json
-# sigs.k8s.io/kind v0.26.0
+# sigs.k8s.io/kind v0.27.0
 ## explicit; go 1.17
 sigs.k8s.io/kind/pkg/apis/config/defaults
 sigs.k8s.io/kind/pkg/apis/config/v1alpha4
