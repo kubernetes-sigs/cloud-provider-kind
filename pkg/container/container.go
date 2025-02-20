@@ -50,6 +50,12 @@ func nerdctlIsAvailable() bool {
 }
 
 func init() {
+	// allow to override the container provider as we do in KIND
+	if p := os.Getenv("KIND_EXPERIMENTAL_PROVIDER"); p != "" {
+		containerRuntime = p
+		return
+	}
+
 	if dockerIsAvailable() {
 		return
 	}
