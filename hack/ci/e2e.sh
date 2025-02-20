@@ -103,7 +103,6 @@ kubeadmConfigPatches:
     name: config
   apiServer:
     extraArgs:
-      cloud-provider: "external"
       v: "${KIND_CLUSTER_LOG_LEVEL}"
   controllerManager:
     extraArgs:
