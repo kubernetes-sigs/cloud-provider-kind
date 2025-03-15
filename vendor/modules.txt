@@ -234,7 +234,7 @@ gopkg.in/inf.v0
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
-# k8s.io/api v0.32.2
+# k8s.io/api v0.32.3
 ## explicit; go 1.23.0
 k8s.io/api/admissionregistration/v1
 k8s.io/api/admissionregistration/v1alpha1
@@ -292,7 +292,7 @@ k8s.io/api/storage/v1
 k8s.io/api/storage/v1alpha1
 k8s.io/api/storage/v1beta1
 k8s.io/api/storagemigration/v1alpha1
-# k8s.io/apimachinery v0.32.2
+# k8s.io/apimachinery v0.32.3
 ## explicit; go 1.23.0
 k8s.io/apimachinery/pkg/api/equality
 k8s.io/apimachinery/pkg/api/errors
@@ -347,10 +347,10 @@ k8s.io/apimachinery/pkg/version
 k8s.io/apimachinery/pkg/watch
 k8s.io/apimachinery/third_party/forked/golang/json
 k8s.io/apimachinery/third_party/forked/golang/reflect
-# k8s.io/apiserver v0.32.2
+# k8s.io/apiserver v0.32.3
 ## explicit; go 1.23.0
 k8s.io/apiserver/pkg/util/feature
-# k8s.io/client-go v0.32.2
+# k8s.io/client-go v0.32.3
 ## explicit; go 1.23.0
 k8s.io/client-go/applyconfigurations/admissionregistration/v1
 k8s.io/client-go/applyconfigurations/admissionregistration/v1alpha1
@@ -617,7 +617,7 @@ k8s.io/client-go/util/keyutil
 k8s.io/client-go/util/retry
 k8s.io/client-go/util/watchlist
 k8s.io/client-go/util/workqueue
-# k8s.io/cloud-provider v0.32.2
+# k8s.io/cloud-provider v0.32.3
 ## explicit; go 1.23.0
 k8s.io/cloud-provider
 k8s.io/cloud-provider/api
@@ -625,7 +625,7 @@ k8s.io/cloud-provider/controllers/node
 k8s.io/cloud-provider/controllers/service
 k8s.io/cloud-provider/node/helpers
 k8s.io/cloud-provider/service/helpers
-# k8s.io/component-base v0.32.2
+# k8s.io/component-base v0.32.3
 ## explicit; go 1.23.0
 k8s.io/component-base/cli/flag
 k8s.io/component-base/featuregate
@@ -639,10 +639,10 @@ k8s.io/component-base/metrics/prometheus/controllers
 k8s.io/component-base/metrics/prometheus/feature
 k8s.io/component-base/metrics/prometheusextension
 k8s.io/component-base/version
-# k8s.io/component-helpers v0.32.2
+# k8s.io/component-helpers v0.32.3
 ## explicit; go 1.23.0
 k8s.io/component-helpers/node/util
-# k8s.io/controller-manager v0.32.2
+# k8s.io/controller-manager v0.32.3
 ## explicit; go 1.23.0
 k8s.io/controller-manager/pkg/features
 # k8s.io/klog/v2 v2.130.1
