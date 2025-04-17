@@ -1,0 +1,77 @@
+name: bats
+
+on:
+  push:
+    branches:
+      - 'main'
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.23"
+  K8S_VERSION: "v1.32.0"
+  KIND_VERSION: "v0.27.0"
+
+jobs:
+  bats_tests:
+    runs-on: ubuntu-22.04
+    name: Bats e2e tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup Bats and bats libs
+        id: setup-bats
+        uses: bats-core/bats-action@3.0.0
+      - name: Bats tests
+        shell: bash
+        env:
+         BATS_LIB_PATH: ${{ steps.setup-bats.outputs.lib-path }}
+         TERM: xterm
+        run: bats -o _artifacts tests/
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
+          path: ./_artifacts
+ 
+  bats_mac_tests:
+    runs-on: macos-13
+    name: Bats e2e tests on Mac
+    # Skip until port forwarding works
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up environment (download dependencies)
+        run: |
+          brew install docker colima
+          brew install kind
+          brew install golang
+          brew install bats-core
+          brew install kubectl
+          LIMA_SSH_PORT_FORWARDER=true colima start
+      - name: Bats tests
+        env:
+          TERM: linux
+        run: |
+          bash --version
+          bash -c "time bats -o _artifacts --trace --formatter tap tests/"
+      - name: Debug info
+        if: always()
+        run: |
+          docker ps
+          kubectl get pods -v7
+          kubectl get services -v7
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
+          path: ./_artifacts
+         

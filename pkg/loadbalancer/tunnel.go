@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"k8s.io/klog/v2"
 
@@ -99,6 +100,7 @@ func (t *tunnelManager) removeTunnels(containerName string) error {
 // tunnel listens on localIP:localPort and proxies the connection to remoteIP:remotePort
 type tunnel struct {
 	listener   net.Listener
+	udpConn    *net.UDPConn
 	localIP    string
 	localPort  string
 	protocol   string
@@ -117,36 +119,58 @@ func NewTunnel(localIP, localPort, protocol, remoteIP, remotePort string) *tunne
 }
 
 func (t *tunnel) Start() error {
-	klog.Infof("Starting tunnel on %s", net.JoinHostPort(t.localIP, t.localPort))
-	ln, err := net.Listen(t.protocol, net.JoinHostPort(t.localIP, t.localPort))
-	if err != nil {
-		return err
-	}
-
-	t.listener = ln
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				klog.Infof("unexpected error listening: %v", err)
-				return
-			} else {
-				go func() {
-					err := t.handleConnection(conn)
-					if err != nil {
-						klog.Infof("unexpected error on connection: %v", err)
-					}
-				}()
-			}
+	klog.Infof("Starting tunnel on %s %s", net.JoinHostPort(t.localIP, t.localPort), t.protocol)
+	if t.protocol == "udp" {
+		localAddrStr := net.JoinHostPort(t.localIP, t.localPort)
+		udpAddr, err := net.ResolveUDPAddr("udp4", localAddrStr)
+		if err != nil {
+			return err
 		}
-	}()
+		conn, err := net.ListenUDP("udp4", udpAddr)
+		t.udpConn = conn
+		go func() {
+			for {
+				err = t.handleUDPConnection(conn)
+				if err != nil {
+					klog.Infof("unexpected error on connection: %v", err)
+				}
+			}
+		}()
+
+	} else {
+		ln, err := net.Listen(t.protocol, net.JoinHostPort(t.localIP, t.localPort))
+		if err != nil {
+			return err
+		}
+
+		t.listener = ln
+
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					klog.Infof("unexpected error listening: %v", err)
+					return
+				} else {
+					go func() {
+						err := t.handleConnection(conn)
+						if err != nil {
+							klog.Infof("unexpected error on connection: %v", err)
+						}
+					}()
+				}
+			}
+		}()
+	}
 	return nil
 }
 
 func (t *tunnel) Stop() error {
 	if t.listener != nil {
-		return t.listener.Close()
+		_ = t.listener.Close()
+	}
+	if t.udpConn != nil {
+		_ = t.udpConn.Close()
 	}
 	return nil
 }
@@ -170,4 +194,43 @@ func (t *tunnel) handleConnection(local net.Conn) error {
 	}()
 	wg.Wait()
 	return nil
+}
+
+func (t *tunnel) handleUDPConnection(conn *net.UDPConn) error {
+	buf := make([]byte, 1500)
+	nRead, srcAddr, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		return err
+	}
+	klog.V(4).Infof("Read %d bytes from %s", nRead, srcAddr.String())
+
+	klog.V(4).Infof("Connecting to %s", net.JoinHostPort(t.remoteIP, t.remotePort))
+	remoteConn, err := net.Dial("udp4", net.JoinHostPort(t.remoteIP, t.remotePort))
+	if err != nil {
+		return fmt.Errorf("can't connect to server %q: %v", net.JoinHostPort(t.remoteIP, t.remotePort), err)
+	}
+	defer remoteConn.Close()
+
+	nWrite, err := remoteConn.Write(buf[:nRead])
+	if err != nil {
+		return fmt.Errorf("fail to write to remote %s: %s", remoteConn.RemoteAddr(), err)
+	} else if nWrite < nRead {
+		klog.V(2).Infof("Buffer underflow %d < %d to remote %s", nWrite, nRead, remoteConn.RemoteAddr())
+	}
+	klog.V(4).Infof("Wrote %d bytes to to %s", nWrite, remoteConn.RemoteAddr().String())
+
+	buf = make([]byte, 1500)
+	err = remoteConn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Add deadline to ensure it doesn't block forever
+	if err != nil {
+		return fmt.Errorf("can not set read deadline: %v", err)
+	}
+	nRead, err = remoteConn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("fail to read from remote %s: %s", remoteConn.RemoteAddr(), err)
+	}
+	klog.V(4).Infof("Read %d bytes from %s", nRead, remoteConn.RemoteAddr().String())
+
+	_, err = conn.WriteToUDP(buf[:nRead], srcAddr)
+
+	return err
 }
