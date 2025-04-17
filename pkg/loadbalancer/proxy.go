@@ -327,7 +327,7 @@ func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Durati
 		}
 		authority = net.JoinHostPort(ipv4, strconv.Itoa(envoyAdminPort))
 	} else {
-		port, ok := portmaps[strconv.Itoa(envoyAdminPort)]
+		port, ok := portmaps[strconv.Itoa(envoyAdminPort)+"/tcp"]
 		if !ok {
 			return fmt.Errorf("envoy admin port %d not found, got %v", envoyAdminPort, portmaps)
 		}

@@ -220,7 +220,7 @@ func PortMaps(name string) (map[string]string, error) {
 		// TODO we just can get the first entry or look for ip families
 		for _, pm := range v {
 			if pm.HostPort != "" {
-				result[parts[0]] = pm.HostPort
+				result[parts[0]+"/"+protocol] = pm.HostPort
 				break
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"k8s.io/klog/v2"
@@ -49,7 +50,12 @@ func (t *tunnelManager) setupTunnels(containerName string) error {
 	defer t.mu.Unlock()
 	// There is one IP per Service and a tunnel per Service Port
 	for containerPort, hostPort := range portmaps {
-		tun := NewTunnel(ipv4, containerPort, "localhost", hostPort)
+		parts := strings.Split(containerPort, "/")
+		if len(parts) != 2 {
+			return fmt.Errorf("expected format port/protocol for container port, got %s", containerPort)
+		}
+
+		tun := NewTunnel(ipv4, parts[0], parts[1], "localhost", hostPort)
 		// TODO check if we can leak tunnels
 		err = tun.Start()
 		if err != nil {
@@ -95,14 +101,16 @@ type tunnel struct {
 	listener   net.Listener
 	localIP    string
 	localPort  string
+	protocol   string
 	remoteIP   string // address:Port
 	remotePort string
 }
 
-func NewTunnel(localIP, localPort, remoteIP, remotePort string) *tunnel {
+func NewTunnel(localIP, localPort, protocol, remoteIP, remotePort string) *tunnel {
 	return &tunnel{
 		localIP:    localIP,
 		localPort:  localPort,
+		protocol:   protocol,
 		remoteIP:   remoteIP,
 		remotePort: remotePort,
 	}
@@ -110,7 +118,7 @@ func NewTunnel(localIP, localPort, remoteIP, remotePort string) *tunnel {
 
 func (t *tunnel) Start() error {
 	klog.Infof("Starting tunnel on %s", net.JoinHostPort(t.localIP, t.localPort))
-	ln, err := net.Listen("tcp", net.JoinHostPort(t.localIP, t.localPort))
+	ln, err := net.Listen(t.protocol, net.JoinHostPort(t.localIP, t.localPort))
 	if err != nil {
 		return err
 	}
@@ -144,7 +152,7 @@ func (t *tunnel) Stop() error {
 }
 
 func (t *tunnel) handleConnection(local net.Conn) error {
-	remote, err := net.Dial("tcp", net.JoinHostPort(t.remoteIP, t.remotePort))
+	remote, err := net.Dial(t.protocol, net.JoinHostPort(t.remoteIP, t.remotePort))
 	if err != nil {
 		return fmt.Errorf("can't connect to server %q: %v", net.JoinHostPort(t.remoteIP, t.remotePort), err)
 	}
