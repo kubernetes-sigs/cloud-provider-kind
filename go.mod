@@ -16,6 +16,7 @@ require (
 	k8s.io/controller-manager v0.33.0
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/utils v0.0.0-20241210054802-24370beab758
+	sigs.k8s.io/gateway-api v1.2.1
 	sigs.k8s.io/kind v0.27.0
 )
 
