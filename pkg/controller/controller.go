@@ -23,9 +23,14 @@ import (
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	ccmfeatures "k8s.io/controller-manager/pkg/features"
 	"k8s.io/klog/v2"
+
+	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
+
 	cpkconfig "sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
+	"sigs.k8s.io/cloud-provider-kind/pkg/gateway"
 	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 	"sigs.k8s.io/cloud-provider-kind/pkg/provider"
 	"sigs.k8s.io/kind/pkg/cluster"
@@ -42,6 +47,7 @@ type ccm struct {
 	factory           informers.SharedInformerFactory
 	serviceController *servicecontroller.Controller
 	nodeController    *nodecontroller.CloudNodeController
+	gatewayController *gateway.Controller
 	cancelFn          context.CancelFunc
 }
 
@@ -77,7 +83,7 @@ func (c *Controller) Run(ctx context.Context) {
 				continue
 			}
 
-			kubeClient, err := c.getKubeClient(ctx, cluster)
+			restConfig, err := c.getRestConfig(ctx, cluster)
 			if err != nil {
 				klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
 				continue
@@ -85,7 +91,7 @@ func (c *Controller) Run(ctx context.Context) {
 
 			klog.V(2).Infof("Creating new cloud provider for cluster %s", cluster)
 			cloud := provider.New(cluster, c.kind)
-			ccm, err := startCloudControllerManager(ctx, cluster, kubeClient, cloud)
+			ccm, err := startCloudControllerManager(ctx, cluster, restConfig, cloud)
 			if err != nil {
 				klog.Errorf("Failed to start cloud controller for cluster %s: %v", cluster, err)
 				continue
@@ -126,9 +132,9 @@ func (c *Controller) getKubeConfig(cluster string, internal bool) (*rest.Config,
 	return config, nil
 }
 
-// getKubeClient returns a kubeclient for the cluster passed as argument
+// getRestConfig returns a valid rest.Config for the cluster passed as argument
 // It tries first to connect to the internal endpoint.
-func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kubernetes.Interface, error) {
+func (c *Controller) getRestConfig(ctx context.Context, cluster string) (*rest.Config, error) {
 	addresses := []string{}
 	internalConfig, err := c.getKubeConfig(cluster, true)
 	if err != nil {
@@ -175,22 +181,23 @@ func (c *Controller) getKubeClient(ctx context.Context, cluster string) (kuberne
 		return nil, fmt.Errorf("restConfig for host %s not avaliable", host)
 	}
 
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
-		return kubeClient, err
-	}
-	return kubeClient, nil
+	return config, nil
 }
 
 // TODO: implement leader election to not have problems with  multiple providers
 // ref: https://github.com/kubernetes/kubernetes/blob/d97ea0f705847f90740cac3bc3dd8f6a4026d0b5/cmd/kube-scheduler/app/server.go#L211
-func startCloudControllerManager(ctx context.Context, clusterName string, kubeClient kubernetes.Interface, cloud cloudprovider.Interface) (*ccm, error) {
+func startCloudControllerManager(ctx context.Context, clusterName string, config *rest.Config, cloud cloudprovider.Interface) (*ccm, error) {
 	// TODO: we need to set up the ccm specific feature gates
 	// but try to avoid to expose this to users
 	featureGates := utilfeature.DefaultMutableFeatureGate
 	err := ccmfeatures.SetupCurrentKubernetesSpecificFeatureGates(featureGates)
 	if err != nil {
+		return nil, err
+	}
+
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		klog.Errorf("Failed to create kubeClient for cluster %s: %v", clusterName, err)
 		return nil, err
 	}
 
@@ -259,6 +266,40 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 	}
 	sharedInformers.Start(ctx.Done())
 
+	// Gateway setup
+	gwClient, err := gatewayclient.NewForConfig(config)
+	if err != nil {
+		// This error shouldn't fail. It lives like this as a legacy.
+		klog.Errorf("Failed to create Gateway API client: %v", err)
+		cancel()
+		return nil, err
+	}
+
+	sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
+
+	gatewayController, err := gateway.New(
+		gwClient,
+		sharedGwInformers.Gateway().V1().Gateways(),
+		sharedGwInformers.Gateway().V1().HTTPRoutes(),
+		sharedGwInformers.Gateway().V1().GRPCRoutes(),
+	)
+	if err != nil {
+		klog.Errorf("Failed to start gateway controller: %v", err)
+		cancel()
+		return nil, err
+	}
+
+	err = gatewayController.Init(ctx)
+	if err != nil {
+		klog.Errorf("Failed to initialize gateway controller: %v", err)
+		cancel()
+		return nil, err
+	}
+
+	go gatewayController.Run(ctx)
+
+	sharedGwInformers.Start(ctx.Done())
+
 	// This has to cleanup all the resources allocated by the cloud provider in this cluster
 	// - containers as loadbalancers
 	// - in windows and darwin ip addresses on the loopback interface
@@ -303,6 +344,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 		factory:           sharedInformers,
 		serviceController: serviceController,
 		nodeController:    nodeController,
+		gatewayController: gatewayController,
 		cancelFn:          cancelFn}, nil
 }
 
