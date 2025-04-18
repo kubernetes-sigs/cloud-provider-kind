@@ -26,6 +26,7 @@ var (
 	enableLogDump       bool
 	logDumpDir          string
 	enableLBPortMapping bool
+	gatewayChannel      string
 )
 
 func init() {
@@ -37,6 +38,7 @@ func init() {
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
+	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [subcommand] [options]\n\n")
@@ -112,6 +114,11 @@ func Main() {
 	if err != nil {
 		logger.Errorf("error setting klog verbosity to %d : %v", flagV, err)
 	}
+
+	if gatewayChannel != "standard" && gatewayChannel != "experimental" {
+		klog.Fatalf("Unknown Gateway API release channel %s", gatewayChannel)
+	}
+	config.DefaultConfig.GatewayReleaseChannel = gatewayChannel
 
 	// initialize log directory
 	if enableLogDump {

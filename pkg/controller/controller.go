@@ -267,6 +267,20 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	sharedInformers.Start(ctx.Done())
 
 	// Gateway setup
+	crdManager, err := gateway.NewCRDManager(config)
+	if err != nil {
+		klog.Errorf("Failed to create Gateway API CRD manager: %v", err)
+		cancel()
+		return nil, err
+	}
+
+	err = crdManager.InstallCRDs(ctx, cpkconfig.DefaultConfig.GatewayReleaseChannel)
+	if err != nil {
+		klog.Errorf("Failed to install Gateway API CRDs: %v", err)
+		cancel()
+		return nil, err
+	}
+
 	gwClient, err := gatewayclient.NewForConfig(config)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.

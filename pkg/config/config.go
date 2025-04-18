@@ -14,6 +14,9 @@ type Config struct {
 	LoadBalancerConnectivity Connectivity
 	// Type of connectivity between the cloud-provider-kind and the clusters
 	ControlPlaneConnectivity Connectivity
+	// Gateway API Release channel (default stable)
+	// https://gateway-api.sigs.k8s.io/concepts/versioning/
+	GatewayReleaseChannel string
 }
 
 type Connectivity int
