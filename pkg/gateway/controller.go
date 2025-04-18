@@ -201,7 +201,7 @@ func (c *Controller) Init(ctx context.Context) error {
 	if apierrors.IsNotFound(err) {
 		gwClass, err = c.gwClient.GatewayV1().GatewayClasses().Create(ctx, &kindGwClass, metav1.CreateOptions{})
 		if err != nil {
-			klog.Infof("faile to create cloud-provider-kind GatewayClass: %v")
+			klog.Infof("failed to create cloud-provider-kind GatewayClass: %v", err)
 			return err
 		}
 	}
@@ -209,7 +209,7 @@ func (c *Controller) Init(ctx context.Context) error {
 	condition := metav1.Condition{
 		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
 		Status:  metav1.ConditionTrue,
-		Reason:  string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Reason:  string(gatewayv1.GatewayClassReasonAccepted),
 		Message: "Managed by Cloud Provider KIND controller",
 	}
 
