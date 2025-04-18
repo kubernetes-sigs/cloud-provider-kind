@@ -70,3 +70,25 @@
     [[ ! -z "$HOSTNAME" ]] && [  "$HOSTNAME" = "$POD" ]
     kubectl delete -f "$BATS_TEST_DIRNAME"/../examples/loadbalancer_udp_tcp.yaml
 }
+
+@test "Simple Gateway" {
+    kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+    kubectl wait --for=condition=ready pods -l app=MyApp
+    for i in {1..5}
+    do
+        IP=$(kubectl get gateway multiprotocol --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        [[ ! -z "$IP" ]] && break || sleep 1
+    done
+    echo "IP: $IP"
+    POD=$(kubectl get pod -l app=MyApp -o jsonpath='{.items[0].metadata.name}')
+    echo "Pod $POD"
+    for i in {1..5}
+    do
+        HOSTNAME=$(curl -s http://${IP}:80/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via TCP: $HOSTNAME"
+    [  "$HOSTNAME" = "$POD" ]
+
+    kubectl delete -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+}
