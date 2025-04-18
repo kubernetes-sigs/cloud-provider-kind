@@ -187,7 +187,7 @@ func (c *Controller) Init(ctx context.Context) error {
 	// Install GatewayAPI CRDs if do not exist
 
 	// Create GatewayClass if it does not exist
-	gwClass := gatewayv1.GatewayClass{
+	kindGwClass := gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: GWClassName,
 		},
@@ -197,10 +197,27 @@ func (c *Controller) Init(ctx context.Context) error {
 		},
 	}
 
-	if _, err := c.gwClient.GatewayV1().GatewayClasses().Get(ctx, GWClassName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-		_, err := c.gwClient.GatewayV1().GatewayClasses().Create(ctx, &gwClass, metav1.CreateOptions{})
+	gwClass, err := c.gwClient.GatewayV1().GatewayClasses().Get(ctx, GWClassName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		gwClass, err = c.gwClient.GatewayV1().GatewayClasses().Create(ctx, &kindGwClass, metav1.CreateOptions{})
 		if err != nil {
 			klog.Infof("faile to create cloud-provider-kind GatewayClass: %v")
+			return err
+		}
+	}
+	// Update status
+	condition := metav1.Condition{
+		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:  metav1.ConditionTrue,
+		Reason:  string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Message: "Managed by Cloud Provider KIND controller",
+	}
+
+	// TODO server side apply
+	if conditions, ok := UpdateConditionIfChanged(gwClass.Status.Conditions, condition); ok {
+		gwClass.Status.Conditions = conditions
+		_, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(ctx, gwClass, metav1.UpdateOptions{})
+		if err != nil {
 			return err
 		}
 	}
@@ -252,4 +269,33 @@ func (c *Controller) isOwned(references []gatewayv1.ParentReference) bool {
 		}
 	}
 	return false
+}
+
+// UpdateConditionIfChanged updates or insert a condition if it has been changed.
+// Returns false if there are no changes
+func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Condition) ([]metav1.Condition, bool) {
+	exist := false
+	newConditions := make([]metav1.Condition, 0, len(conditions))
+	for _, existing := range conditions {
+		if existing.Type == condition.Type {
+			exist = true
+			if existing.Status != condition.Status || existing.Reason != condition.Reason || existing.Message != condition.Message {
+				condition.LastTransitionTime = metav1.Now()
+				newConditions = append(newConditions, condition)
+			} else {
+				// there are no changes
+				return conditions, false
+			}
+		} else {
+			newConditions = append(newConditions, existing)
+		}
+	}
+
+	// it is a new condition
+	if !exist {
+		condition.LastTransitionTime = metav1.Now()
+		newConditions = append(newConditions, condition)
+	}
+
+	return newConditions, true
 }
