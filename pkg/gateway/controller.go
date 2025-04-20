@@ -15,6 +15,8 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
+	"sigs.k8s.io/cloud-provider-kind/pkg/tunnels"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
@@ -66,6 +68,8 @@ type Controller struct {
 	// envoyproxy control plane
 	xdsserver    envoyproxyserver.Server
 	xdsLocalPort int
+
+	tunnelManager *tunnels.TunnelManager
 }
 
 func New(
@@ -202,6 +206,10 @@ func New(
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel {
+		c.tunnelManager = tunnels.NewTunnelManager()
 	}
 
 	return c, nil
