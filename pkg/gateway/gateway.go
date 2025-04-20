@@ -22,9 +22,9 @@ import (
 )
 
 // gatewayName name is a unique name for the gateway container
-func gatewayName(clusterName string, gateway *gatewayv1.Gateway) string {
+func gatewayName(clusterName, namespace, name string) string {
 	h := sha256.New()
-	_, err := io.WriteString(h, gatewaySimpleName(clusterName, gateway))
+	_, err := io.WriteString(h, gatewaySimpleName(clusterName, namespace, name))
 	if err != nil {
 		panic(err)
 	}
@@ -32,20 +32,20 @@ func gatewayName(clusterName string, gateway *gatewayv1.Gateway) string {
 	return fmt.Sprintf("%s-%x", constants.ContainerPrefix, hash[:6])
 }
 
-func gatewaySimpleName(clusterName string, gateway *gatewayv1.Gateway) string {
-	return clusterName + "/" + gateway.Namespace + "/" + gateway.Name
+func gatewaySimpleName(clusterName, namespace, name string) string {
+	return clusterName + "/" + namespace + "/" + name
 }
 
 // createGateway create a docker container with a gateway
-func (c *Controller) createGateway(clusterName string, gateway *gatewayv1.Gateway) error {
-	name := gatewayName(clusterName, gateway)
-	simpleName := gatewaySimpleName(clusterName, gateway)
+func createGateway(clusterName string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
+	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
+	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfig := &configData{
 		Cluster:             simpleName,
 		Id:                  name,
 		AdminPort:           envoyAdminPort,
-		ControlPlaneAddress: c.xdsLocalAddress,
-		ControlPlanePort:    c.xdsLocalPort,
+		ControlPlaneAddress: localAddress,
+		ControlPlanePort:    localPort,
 	}
 	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfig)
 	if err != nil {
@@ -86,8 +86,7 @@ func (c *Controller) createGateway(clusterName string, gateway *gatewayv1.Gatewa
 		"--sysctl=net.ipv6.conf.all.forwarding=1",   // allow ipv6 forwarding})
 	}...)
 
-	if c.tunnelManager != nil ||
-		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
+	if enableTunnel {
 		// Forward the Service Ports to the host so they are accessible on Mac and Windows
 		for _, listener := range gateway.Spec.Listeners {
 			if listener.Protocol == gatewayv1.UDPProtocolType {
@@ -155,14 +154,36 @@ func (c *Controller) syncGateway(key string) error {
 		klog.Errorf("Fetching object with key %s from store failed with %v", key, err)
 		return err
 	}
+	containerName := gatewayName(c.clusterName, namespace, name)
 
 	if apierrors.IsNotFound(err) {
 		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
-		fmt.Printf("Gateway %s does not exist anymore\n", key)
+		klog.Infof("Gateway %s does not exist anymore, deleting \n", key)
+		err := container.Delete(containerName)
+		if err != nil {
+			return fmt.Errorf("can not delete container %s for gateway %s/%s on cluster %s : %v", containerName, namespace, name, c.clusterName, err)
+		}
 	} else {
 		// Note that you also have to check the uid if you have a local controlled resource, which
 		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
-		fmt.Printf("Sync/Add/Update for Gateway %s\n", gw.GetName())
+		klog.Infof("Syncing Gateway %s\n", gw.GetName())
+		if !container.IsRunning(containerName) {
+			klog.Infof("container %s for gateway is not running", name)
+			if container.Exist(containerName) {
+				err := container.Delete(containerName)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if !container.Exist(name) {
+			klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
+		}
+		enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
+		err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -279,6 +279,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
 
 	gatewayController, err := gateway.New(
+		clusterName,
 		gwClient,
 		sharedGwInformers.Gateway().V1().Gateways(),
 		sharedGwInformers.Gateway().V1().HTTPRoutes(),

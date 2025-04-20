@@ -53,7 +53,9 @@ const (
 )
 
 type Controller struct {
-	gwClient            gatewayclient.Interface
+	clusterName string
+	gwClient    gatewayclient.Interface
+
 	gatewayLister       gatewaylisters.GatewayLister
 	gatewayListerSynced cache.InformerSynced
 	gatewayqueue        workqueue.TypedRateLimitingInterface[string]
@@ -75,12 +77,14 @@ type Controller struct {
 }
 
 func New(
+	clusterName string,
 	gwClient *gatewayclient.Clientset,
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
 ) (*Controller, error) {
 	c := &Controller{
+		clusterName:         clusterName,
 		gwClient:            gwClient,
 		gatewayLister:       gatewayInformer.Lister(),
 		gatewayListerSynced: gatewayInformer.Informer().HasSynced,
