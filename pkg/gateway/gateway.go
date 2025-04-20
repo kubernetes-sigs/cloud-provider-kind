@@ -164,8 +164,6 @@ func (c *Controller) syncGateway(key string) error {
 			return fmt.Errorf("can not delete container %s for gateway %s/%s on cluster %s : %v", containerName, namespace, name, c.clusterName, err)
 		}
 	} else {
-		// Note that you also have to check the uid if you have a local controlled resource, which
-		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
 		klog.Infof("Syncing Gateway %s\n", gw.GetName())
 		if !container.IsRunning(containerName) {
 			klog.Infof("container %s for gateway is not running", name)
@@ -178,12 +176,13 @@ func (c *Controller) syncGateway(key string) error {
 		}
 		if !container.Exist(name) {
 			klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
+			enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
+			err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
+			if err != nil {
+				return err
+			}
 		}
-		enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
-		err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
-		if err != nil {
-			return err
-		}
+
 	}
 	return nil
 }
