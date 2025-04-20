@@ -69,6 +69,7 @@ type Controller struct {
 	grpcroutequeue        workqueue.TypedRateLimitingInterface[string]
 
 	// envoyproxy control plane
+	xdscache        envoyproxycache.SnapshotCache
 	xdsserver       envoyproxyserver.Server
 	xdsLocalAddress string
 	xdsLocalPort    int
@@ -271,8 +272,8 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	klog.Info("Starting Envoy proxy controller")
 	// Create a cache
-	envoycache := envoyproxycache.NewSnapshotCache(false, envoyproxycache.IDHash{}, nil)
-	c.xdsserver = envoyproxyserver.NewServer(ctx, envoycache, nil)
+	c.xdscache = envoyproxycache.NewSnapshotCache(false, envoyproxycache.IDHash{}, nil)
+	c.xdsserver = envoyproxyserver.NewServer(ctx, c.xdscache, nil)
 
 	var grpcOptions []grpc.ServerOption
 	grpcOptions = append(grpcOptions,
