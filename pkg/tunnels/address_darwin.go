@@ -1,6 +1,6 @@
 //go:build darwin
 
-package loadbalancer
+package tunnels
 
 import (
 	"os/exec"
