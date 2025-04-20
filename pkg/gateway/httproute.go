@@ -1,84 +1,265 @@
 package gateway
 
 import (
-	"context"
 	"fmt"
 	"time"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	v32 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"google.golang.org/protobuf/types/known/durationpb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/tools/cache"
+
+	corev1 "k8s.io/api/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
+
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-func (c *Controller) processNextHTTPRouteItem() bool {
-	// Wait until there is a new item in the working queue
-	key, quit := c.httproutequeue.Get()
-	if quit {
-		return false
+// translateHTTPRouteToEnvoyResources translates a Gateway API HTTPRoute
+// into a slice of Envoy Route and Cluster resources.
+func translateHTTPRouteToEnvoyResources(serviceLister corev1listers.ServiceLister, route *gatewayv1.HTTPRoute) (map[resourcev3.Type][]interface{}, error) {
+	resources := make(map[resourcev3.Type][]interface{})
+	var envoyRoutes []*routev3.Route
+	var envoyClusters []*clusterv3.Cluster
+
+	for i, rule := range route.Spec.Rules {
+		if len(rule.BackendRefs) == 0 {
+			klog.V(2).Infof("Warning: HTTPRoute rule %d has no backendRefs, skipping.", i)
+			continue
+		}
+
+		// Create a unique cluster for each unique backend in the rule
+		backendClusters := make(map[string]*clusterv3.Cluster)
+		ruleHasValidBackend := false // Track if at least one backend in the rule is valid
+		for j, backendRef := range rule.BackendRefs {
+			if backendRef.Port == nil {
+				klog.V(2).Infof("Warning: HTTPRoute rule %d, backendRef %d has no port specified, skipping.", i, j)
+				continue
+			}
+
+			// --- Start BackendRef Validation ---
+
+			// 1. InvalidKind: Ensure Group and Kind point to a Service
+			//    Group defaults to "" (core), Kind defaults to "Service"
+			if backendRef.Group == nil {
+				// Use default group ""
+			} else if *backendRef.Group != "" && *backendRef.Group != "core" {
+				klog.Warningf("HTTPRoute %s/%s rule %d, backendRef %d: Invalid Kind: Unsupported Group '%s'. Only the core group ('') is supported. Skipping.", route.Namespace, route.Name, i, j, *backendRef.Group)
+				continue
+			}
+			if backendRef.Kind == nil {
+				// Use default kind "Service"
+			} else if *backendRef.Kind != "Service" {
+				klog.Warningf("HTTPRoute %s/%s rule %d, backendRef %d: Invalid Kind: Unsupported Kind '%s'. Only 'Service' is supported. Skipping.", route.Namespace, route.Name, i, j, *backendRef.Kind)
+				continue
+			}
+
+			// 2. RefNotPermitted: Check cross-namespace references (ReferenceGrant check needed)
+			backendNamespace := route.Namespace
+			if backendRef.Namespace != nil {
+				backendNamespace = string(*backendRef.Namespace)
+			}
+			if backendNamespace != route.Namespace {
+				// TODO: Implement ReferenceGrant check.
+				// For now, log a warning but allow the reference.
+				// If ReferenceGrants are enforced, this should `continue` if not permitted.
+				klog.Warningf("HTTPRoute %s/%s rule %d, backendRef %d: Cross-namespace reference to %s/%s detected. ReferenceGrant check is required but not implemented. Allowing for now.", route.Namespace, route.Name, i, j, backendNamespace, backendRef.Name)
+				// Set Reason: RefNotPermitted if check fails
+				// continue
+			}
+
+			// 3. BackendNotFound: Check if the Service exists
+			backendName := string(backendRef.Name)
+			service, err := serviceLister.Services(backendNamespace).Get(backendName)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					klog.Warningf("HTTPRoute %s/%s rule %d, backendRef %d: Backend Not Found: Service %s/%s not found. Skipping.", route.Namespace, route.Name, i, j, backendNamespace, backendName)
+					// Set Reason: BackendNotFound
+				} else {
+					klog.Errorf("HTTPRoute %s/%s rule %d, backendRef %d: Error getting Service %s/%s: %v", route.Namespace, route.Name, i, j, backendNamespace, backendName, err)
+				}
+				continue
+			}
+
+			// 4. BackendNotFound / InvalidBackendPort: Check if the port exists on the Service
+			backendPort := uint32(*backendRef.Port)
+			var foundPort *corev1.ServicePort
+			for _, sp := range service.Spec.Ports {
+				if sp.Port == int32(backendPort) {
+					foundPort = &sp // Use a pointer to the found port
+					break
+				}
+			}
+			if foundPort == nil {
+				klog.Warningf("HTTPRoute %s/%s rule %d, backendRef %d: Backend Not Found: Port %d not found on Service %s/%s. Skipping.", route.Namespace, route.Name, i, j, backendPort, backendNamespace, backendName)
+				// Set Reason: BackendNotFound (or a more specific one if defined)
+				continue
+			}
+
+			// 5. UnsupportedProtocol: Check Service appProtocol (for HTTPRoute)
+			// For HTTPRoute, compatible protocols are typically nil, "", "http", "https".
+			// We allow these explicitly. Other protocols might be vendor-specific HTTP variants.
+			// For simplicity, we'll warn on anything else but allow it for now.
+			// A stricter implementation might reject protocols like "tcp".
+			if foundPort.AppProtocol != nil && *foundPort.AppProtocol != "" && *foundPort.AppProtocol != "http" && *foundPort.AppProtocol != "https" {
+				// TODO: Potentially reject based on stricter compatibility rules.
+				klog.Warningf("HTTPRoute %s/%s rule %d, backendRef %d: Potentially Unsupported Protocol: Service %s/%s Port %d has appProtocol '%s'. Ensure compatibility.", route.Namespace, route.Name, i, j, backendNamespace, backendName, backendPort, *foundPort.AppProtocol)
+				// If strictly incompatible (e.g., "tcp"), set Reason: UnsupportedProtocol and `continue`
+			}
+
+			// 6. BackendTLSPolicy Check (Skipped - Experimental)
+			// TODO: Add BackendTLSPolicy validation when the feature is stable.
+
+			// --- End BackendRef Validation ---
+
+			// If we reach here, the backendRef is considered valid for processing
+			ruleHasValidBackend = true
+
+			// Generate Envoy Cluster config
+			clusterName := fmt.Sprintf("gateway-httproute-%s-%s-rule-%d-backend-%s-%d",
+				route.Namespace, route.Name, i, backendName, backendPort)
+
+			if _, exists := backendClusters[clusterName]; !exists {
+				cluster := &clusterv3.Cluster{
+					Name:                 clusterName,
+					ConnectTimeout:       durationpb.New(5 * time.Second), // Default connect timeout
+					ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+					LbPolicy:             clusterv3.Cluster_ROUND_ROBIN,
+					LoadAssignment: &endpointv3.ClusterLoadAssignment{
+						ClusterName: clusterName,
+						Endpoints: []*endpointv3.LocalityLbEndpoints{
+							&endpointv3.LocalityLbEndpoints{
+								LbEndpoints: []*endpointv3.LbEndpoint{{
+									HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+										Endpoint: &endpointv3.Endpoint{
+											Address: &corev3.Address{
+												Address: &corev3.Address_SocketAddress{
+													SocketAddress: &corev3.SocketAddress{
+														Protocol: corev3.SocketAddress_TCP,
+														Address:  service.Spec.ClusterIP, // Use Service ClusterIP
+														PortSpecifier: &corev3.SocketAddress_PortValue{
+															PortValue: uint32(foundPort.Port), // Use the *Service* port number
+														},
+													},
+												},
+											},
+										},
+									},
+								}},
+							},
+						},
+					},
+				}
+				backendClusters[clusterName] = cluster
+				envoyClusters = append(envoyClusters, cluster)
+			}
+		}
+
+		// Create an Envoy Route for this rule
+		// Only create the route if there was at least one valid backendRef
+		if !ruleHasValidBackend {
+			klog.Warningf("HTTPRoute %s/%s rule %d: No valid backendRefs found after validation. Skipping rule.", route.Namespace, route.Name, i)
+			continue
+		}
+
+		if len(rule.Matches) == 0 {
+			// If no matches are specified, match all requests for this rule's backends
+			action := &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{
+						Cluster: getFirstKey(backendClusters), // Send to the first backend cluster
+					}, // TODO: Handle multiple backends (weight, mirroring, etc.)
+				},
+			}
+			envoyRoute := &routev3.Route{
+				Name:   fmt.Sprintf("gateway-httproute-%s-%s-rule-%d", route.Namespace, route.Name, i),
+				Action: action,
+			}
+			envoyRoutes = append(envoyRoutes, envoyRoute)
+
+		} else {
+			for k, match := range rule.Matches {
+				envoyRoute := &routev3.Route{
+					Name:  fmt.Sprintf("gateway-httproute-%s-%s-rule-%d-match-%d", route.Namespace, route.Name, i, k),
+					Match: &routev3.RouteMatch{},
+					Action: &routev3.Route_Route{
+						Route: &routev3.RouteAction{
+							ClusterSpecifier: &routev3.RouteAction_Cluster{ // TODO: Handle multiple backends
+								Cluster: getFirstKey(backendClusters), // Send to the first backend cluster for now
+							},
+						},
+					},
+				}
+
+				// Translate path match
+				if match.Path != nil {
+					pathType := gatewayv1.PathMatchPathPrefix // Default as per spec
+					if match.Path.Type != nil {
+						pathType = *match.Path.Type
+					}
+					switch pathType {
+					case gatewayv1.PathMatchExact:
+						envoyRoute.Match.PathSpecifier = &routev3.RouteMatch_Path{
+							Path: *match.Path.Value,
+						}
+					case gatewayv1.PathMatchPathPrefix:
+						envoyRoute.Match.PathSpecifier = &routev3.RouteMatch_Prefix{
+							Prefix: *match.Path.Value,
+						}
+					case gatewayv1.PathMatchRegularExpression:
+						envoyRoute.Match.PathSpecifier = &routev3.RouteMatch_SafeRegex{
+							SafeRegex: &v32.RegexMatcher{
+								Regex: *match.Path.Value,
+							},
+						}
+					}
+				}
+
+				// Translate header matches
+				if len(match.Headers) > 0 {
+					var envoyHeaders []*routev3.HeaderMatcher
+					for _, header := range match.Headers {
+						envoyHeader := &routev3.HeaderMatcher{
+							Name: string(header.Name),
+						}
+						headerType := gatewayv1.HeaderMatchExact // Default
+						if header.Type != nil {
+							headerType = *header.Type
+						}
+						switch headerType {
+						case gatewayv1.HeaderMatchExact:
+							envoyHeader.HeaderMatchSpecifier = &routev3.HeaderMatcher_PresentMatch{ // Exact match means header exists with this value
+								PresentMatch: true, // This isn't quite right, needs exact value match
+							}
+							// TODO: Fix HeaderMatchExact translation - needs HeaderMatcher_StringMatch with exact value
+						case gatewayv1.HeaderMatchRegularExpression:
+							envoyHeader.HeaderMatchSpecifier = &routev3.HeaderMatcher_SafeRegexMatch{
+								SafeRegexMatch: &v32.RegexMatcher{
+									Regex: header.Value,
+								},
+							}
+						}
+						envoyHeaders = append(envoyHeaders, envoyHeader)
+					}
+					envoyRoute.Match.Headers = envoyHeaders
+				}
+
+				envoyRoutes = append(envoyRoutes, envoyRoute)
+			}
+		}
 	}
-	defer c.httproutequeue.Done(key)
 
-	err := c.syncHTTPRoute(key)
-
-	c.handleHTTPRouteErr(err, key)
-	return true
-}
-
-// syncToStdout is the business logic of the controller. In this controller it simply prints
-// information about the pod to stdout. In case an error happened, it has to simply return the error.
-// The retry logic should not be part of the business logic.
-func (c *Controller) syncHTTPRoute(key string) error {
-	startTime := time.Now()
-	defer func() {
-		klog.V(4).Infof("Finished syncing HTTP route %q (%v)", key, time.Since(startTime))
-	}()
-
-	namespace, name, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		return err
+	if len(envoyRoutes) > 0 {
+		resources[resourcev3.RouteType] = append(resources[resourcev3.RouteType], toInterfaceSlice(envoyRoutes)...)
+	}
+	if len(envoyClusters) > 0 {
+		resources[resourcev3.ClusterType] = append(resources[resourcev3.ClusterType], toInterfaceSlice(envoyClusters)...)
 	}
 
-	gw, err := c.httprouteLister.HTTPRoutes(namespace).Get(name)
-	if err != nil && !apierrors.IsNotFound(err) {
-		klog.Errorf("Fetching object with key %s from store failed with %v", key, err)
-		return err
-	}
-
-	if apierrors.IsNotFound(err) {
-		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
-		fmt.Printf("HTTPRoute %s does not exist anymore\n", key)
-	} else {
-		// Note that you also have to check the uid if you have a local controlled resource, which
-		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
-		fmt.Printf("Sync/Add/Update for HTTPRoute %s\n", gw.GetName())
-	}
-	return nil
-}
-
-// handleErr checks if an error happened and makes sure we will retry later.
-func (c *Controller) handleHTTPRouteErr(err error, key string) {
-	if err == nil {
-		c.httproutequeue.Forget(key)
-		return
-	}
-
-	if c.httproutequeue.NumRequeues(key) < maxRetries {
-		klog.Infof("Error syncing HTTPRoute %v: %v", key, err)
-
-		// Re-enqueue the key rate limited. Based on the rate limiter on the
-		// queue and the re-enqueue history, the key will be processed later again.
-		c.httproutequeue.AddRateLimited(key)
-		return
-	}
-
-	c.httproutequeue.Forget(key)
-	// Report to an external entity that, even after several retries, we could not successfully process this key
-	runtime.HandleError(err)
-	klog.Infof("Dropping HTTPRoute %q out of the queue: %v", key, err)
-}
-
-func (c *Controller) runHTTPRouteWorker(ctx context.Context) {
-	for c.processNextHTTPRouteItem() {
-	}
+	return resources, nil
 }

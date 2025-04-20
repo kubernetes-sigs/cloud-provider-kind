@@ -251,8 +251,6 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	}
 	go nodeController.Run(ctx.Done(), ccmMetrics)
 
-	sharedInformers.Start(ctx.Done())
-
 	// Gateway setup
 	crdManager, err := gateway.NewCRDManager(config)
 	if err != nil {
@@ -279,7 +277,10 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
 
 	gatewayController, err := gateway.New(
+		clusterName,
 		gwClient,
+		sharedInformers.Core().V1().Namespaces(),
+		sharedInformers.Core().V1().Services(),
 		sharedGwInformers.Gateway().V1().Gateways(),
 		sharedGwInformers.Gateway().V1().HTTPRoutes(),
 		sharedGwInformers.Gateway().V1().GRPCRoutes(),
@@ -297,8 +298,11 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		return nil, err
 	}
 
-	go gatewayController.Run(ctx)
+	go func() {
+		_ = gatewayController.Run(ctx)
+	}()
 
+	sharedInformers.Start(ctx.Done())
 	sharedGwInformers.Start(ctx.Done())
 
 	// This has to cleanup all the resources allocated by the cloud provider in this cluster
@@ -322,22 +326,8 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		}
 
 		for _, name := range containers {
-			// create fake service to pass to the cloud provider method
-			v, err := container.GetLabelValue(name, constants.LoadBalancerNameLabelKey)
-			if err != nil {
-				klog.Infof("could not get the label for the loadbalancer on container %s on cluster %s : %v", name, clusterName, err)
-				continue
-			}
-			clusterName, service := loadbalancer.ServiceFromLoadBalancerSimpleName(v)
-			if service == nil {
-				klog.Infof("invalid format for loadbalancer on cluster %s: %s", clusterName, v)
-				continue
-			}
-			err = lbController.EnsureLoadBalancerDeleted(context.Background(), clusterName, service)
-			if err != nil {
-				klog.Infof("error deleting loadbalancer %s/%s on cluster %s : %v", service.Namespace, service.Name, clusterName, err)
-				continue
-			}
+			cleanupLoadBalancer(lbController, name)
+			cleanupGateway(name)
 		}
 	}
 
@@ -355,5 +345,38 @@ func (c *Controller) cleanup() {
 		klog.Infof("Cleaning resources for cluster %s", cluster)
 		ccm.cancelFn()
 		delete(c.clusters, cluster)
+	}
+}
+
+func cleanupLoadBalancer(lbController cloudprovider.LoadBalancer, name string) {
+	// create fake service to pass to the cloud provider method
+	v, err := container.GetLabelValue(name, constants.LoadBalancerNameLabelKey)
+	if err != nil || v == "" {
+		klog.Infof("could not get the label for the loadbalancer on container %s : %v", name, err)
+		return
+	}
+	clusterName, service := loadbalancer.ServiceFromLoadBalancerSimpleName(v)
+	if service == nil {
+		klog.Infof("invalid format for loadbalancer on cluster %s: %s", clusterName, v)
+		return
+	}
+	err = lbController.EnsureLoadBalancerDeleted(context.Background(), clusterName, service)
+	if err != nil {
+		klog.Infof("error deleting loadbalancer %s/%s on cluster %s : %v", service.Namespace, service.Name, clusterName, err)
+		return
+	}
+}
+
+func cleanupGateway(name string) {
+	// create fake service to pass to the cloud provider method
+	v, err := container.GetLabelValue(name, constants.GatewayNameLabelKey)
+	if err != nil || v == "" {
+		klog.Infof("could not get the label for the loadbalancer on container %s : %v", name, err)
+		return
+	}
+	err = container.Delete(name)
+	if err != nil {
+		klog.Infof("error deleting container %s gateway %s : %v", name, v, err)
+		return
 	}
 }
