@@ -44,7 +44,7 @@ func (c *Controller) createGateway(clusterName string, gateway *gatewayv1.Gatewa
 		Cluster:             simpleName,
 		Id:                  name,
 		AdminPort:           envoyAdminPort,
-		ControlPlaneAddress: "localhost",
+		ControlPlaneAddress: c.xdsLocalAddress,
 		ControlPlanePort:    c.xdsLocalPort,
 	}
 	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfig)

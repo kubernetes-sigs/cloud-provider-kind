@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -66,8 +67,9 @@ type Controller struct {
 	grpcroutequeue        workqueue.TypedRateLimitingInterface[string]
 
 	// envoyproxy control plane
-	xdsserver    envoyproxyserver.Server
-	xdsLocalPort int
+	xdsserver       envoyproxyserver.Server
+	xdsLocalAddress string
+	xdsLocalPort    int
 
 	tunnelManager *tunnels.TunnelManager
 }
@@ -290,8 +292,12 @@ func (c *Controller) Run(ctx context.Context) error {
 	secretservice.RegisterSecretDiscoveryServiceServer(grpcServer, c.xdsserver)
 	runtimeservice.RegisterRuntimeDiscoveryServiceServer(grpcServer, c.xdsserver)
 
+	address, err := GetControlPlaneAddress()
+	if err != nil {
+		return err
+	}
 	// open a listener on the control plane using a random port
-	listener, err := net.Listen("tcp", fmt.Sprintf(":0"))
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", address))
 	if err != nil {
 		return err
 	}
@@ -306,6 +312,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 
 	// Access the Port field
+	c.xdsLocalAddress = address
 	c.xdsLocalPort = tcpAddr.Port
 	go func() {
 		klog.Infof("management server listening on %d\n", c.xdsLocalPort)
@@ -384,4 +391,53 @@ func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Co
 	}
 
 	return newConditions, true
+}
+
+func GetControlPlaneAddress() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	sort.Slice(interfaces, func(i, j int) bool {
+		nameI := interfaces[i].Name
+		nameJ := interfaces[j].Name
+
+		// Prefer docker0
+		if nameI == "docker0" {
+			return true
+		}
+		if nameJ == "docker0" {
+			return false
+		}
+
+		if nameI == "eth0" {
+			return nameJ != "docker0" // "eth0" comes before anything else except "docker0"
+		}
+		if nameJ == "eth0" {
+			return false
+		}
+
+		return nameI < nameJ // Sort the rest alphabetically
+	})
+
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue // Skip down interfaces and loopback interfaces
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLinkLocalUnicast() && !ipNet.IP.IsLoopback() {
+				return ipNet.IP.String(), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no suitable global unicast IPv4 address found on any active non-loopback interface")
 }
