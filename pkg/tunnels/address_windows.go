@@ -1,6 +1,6 @@
 //go:build windows
 
-package loadbalancer
+package tunnels
 
 import (
 	"os/exec"

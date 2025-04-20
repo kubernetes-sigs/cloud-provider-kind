@@ -1,4 +1,4 @@
-package loadbalancer
+package tunnels
 
 import (
 	"fmt"
@@ -13,19 +13,19 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 )
 
-type tunnelManager struct {
+type TunnelManager struct {
 	mu      sync.Mutex
 	tunnels map[string]map[string]*tunnel // first key is the service namespace/name second key is the servicePort
 }
 
-func NewTunnelManager() *tunnelManager {
-	t := &tunnelManager{
+func NewTunnelManager() *TunnelManager {
+	t := &TunnelManager{
 		tunnels: map[string]map[string]*tunnel{},
 	}
 	return t
 }
 
-func (t *tunnelManager) setupTunnels(containerName string) error {
+func (t *TunnelManager) SetupTunnels(containerName string) error {
 	// get the portmapping from the container and its internal IPs and forward them
 	// 1. Create the fake IP on the tunnel interface
 	// 2. Capture the traffic directed to that IP port and forward to the exposed port in the host
@@ -71,7 +71,7 @@ func (t *tunnelManager) setupTunnels(containerName string) error {
 	return nil
 }
 
-func (t *tunnelManager) removeTunnels(containerName string) error {
+func (t *TunnelManager) RemoveTunnels(containerName string) error {
 	klog.V(0).Infof("stopping tunnels on containers %s", containerName)
 	t.mu.Lock()
 	defer t.mu.Unlock()
