@@ -2,14 +2,125 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
+	"os"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
+	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
+	"sigs.k8s.io/cloud-provider-kind/pkg/container"
+	"sigs.k8s.io/cloud-provider-kind/pkg/images"
+
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+// gatewayName name is a unique name for the gateway container
+func gatewayName(clusterName string, gateway *gatewayv1.Gateway) string {
+	h := sha256.New()
+	_, err := io.WriteString(h, gatewaySimpleName(clusterName, gateway))
+	if err != nil {
+		panic(err)
+	}
+	hash := h.Sum(nil)
+	return fmt.Sprintf("%s-%x", constants.ContainerPrefix, hash[:6])
+}
+
+func gatewaySimpleName(clusterName string, gateway *gatewayv1.Gateway) string {
+	return clusterName + "/" + gateway.Namespace + "/" + gateway.Name
+}
+
+// createGateway create a docker container with a gateway
+func (c *Controller) createGateway(clusterName string, gateway *gatewayv1.Gateway) error {
+	name := gatewayName(clusterName, gateway)
+	simpleName := gatewaySimpleName(clusterName, gateway)
+	envoyConfig := &configData{
+		Cluster:             simpleName,
+		Id:                  name,
+		AdminPort:           envoyAdminPort,
+		ControlPlaneAddress: "localhost",
+		ControlPlanePort:    c.xdsLocalPort,
+	}
+	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfig)
+	if err != nil {
+		return err
+	}
+	networkName := constants.FixedNetworkName
+	if n := os.Getenv("KIND_EXPERIMENTAL_DOCKER_NETWORK"); n != "" {
+		networkName = n
+	}
+
+	args := []string{
+		"--detach", // run the container detached
+		"--tty",    // allocate a tty for entrypoint logs
+		// label the node with the cluster ID
+		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
+		// label the node with the load balancer name
+		"--label", fmt.Sprintf("%s=%s", constants.GatewayNameLabelKey, simpleName),
+		// user a user defined docker network so we get embedded DNS
+		"--net", networkName,
+		"--init=false",
+		"--hostname", name, // make hostname match container name
+		// label the node with the role ID
+		// running containers in a container requires privileged
+		// NOTE: we could try to replicate this with --cap-add, and use less
+		// privileges, but this flag also changes some mounts that are necessary
+		// including some ones docker would otherwise do by default.
+		// for now this is what we want. in the future we may revisit this.
+		"--privileged",
+		"--restart=on-failure",                           // to deal with the crash casued by https://github.com/envoyproxy/envoy/issues/34195
+		"--sysctl=net.ipv4.ip_forward=1",                 // allow ip forwarding
+		"--sysctl=net.ipv4.conf.all.rp_filter=0",         // disable rp filter
+		"--sysctl=net.ipv4.ip_unprivileged_port_start=1", // Allow lower port numbers for podman (see https://github.com/containers/podman/blob/main/rootless.md for more info)
+	}
+
+	// allow IPv6 always
+	args = append(args, []string{
+		"--sysctl=net.ipv6.conf.all.disable_ipv6=0", // enable IPv6
+		"--sysctl=net.ipv6.conf.all.forwarding=1",   // allow ipv6 forwarding})
+	}...)
+
+	if c.tunnelManager != nil ||
+		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
+		// Forward the Service Ports to the host so they are accessible on Mac and Windows
+		for _, listener := range gateway.Spec.Listeners {
+			if listener.Protocol == gatewayv1.UDPProtocolType {
+				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, "udp"))
+			} else {
+				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, "tcp"))
+			}
+		}
+	}
+	// publish the admin endpoint
+	args = append(args, fmt.Sprintf("--publish=%d/tcp", envoyAdminPort))
+	// Publish all ports in the host in random ports
+	args = append(args, "--publish-all")
+
+	args = append(args, images.Images["proxy"])
+	// we need to override the default envoy configuration
+	// https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/configuration-dynamic-filesystem
+	// envoy crashes in some circumstances, causing the container to restart, the problem is that the container
+	// may come with a different IP and we don't update the status, we may do it, but applications does not use
+	// to handle that the assigned LoadBalancerIP changes.
+	// https://github.com/envoyproxy/envoy/issues/34195
+	cmd := []string{"bash", "-c",
+		fmt.Sprintf(`echo -en '%s' > %s && while true; do envoy -c %s && break; sleep 1; done`,
+			dynamicFilesystemConfig, proxyConfigPath, proxyConfigPath)}
+	args = append(args, cmd...)
+	klog.V(2).Infof("creating gateway with parameters: %v", args)
+	err = container.Create(name, args)
+	if err != nil {
+		return fmt.Errorf("failed to create continers %s %v: %w", name, args, err)
+	}
+
+	return nil
+}
 
 func (c *Controller) processNextGatewayItem() bool {
 	// Wait until there is a new item in the working queue
