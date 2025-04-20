@@ -83,7 +83,7 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir string) error {
 		}
 
 		// Process only YAML files
-		if !(strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml")) {
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
 			klog.V(4).Infof("Skipping non-yaml file: %s", path)
 			return nil
 		}

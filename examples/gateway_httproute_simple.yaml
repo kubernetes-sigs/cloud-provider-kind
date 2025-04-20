@@ -27,7 +27,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: MyApp
+  name: myapp
 spec:
   selector:
     matchLabels:
@@ -39,7 +39,7 @@ spec:
         app: MyApp
     spec:
       containers:
-      - name: MyApp
+      - name: myapp
         image: registry.k8s.io/e2e-test-images/agnhost:2.39
         args:
           - netexec
