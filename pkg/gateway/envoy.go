@@ -20,7 +20,7 @@ const (
 // https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/configuration-dynamic-control-plane
 const dynamicControlPlaneConfig = `node:
   cluster: {{ .Cluster }}
-  id: {{ .Id }}
+  id: {{ .ID }}
 
 dynamic_resources:
   ads_config:
@@ -72,7 +72,7 @@ admin:
 
 type configData struct {
 	Cluster             string
-	Id                  string
+	ID                  string
 	AdminPort           int
 	ControlPlaneAddress string
 	ControlPlanePort    int
@@ -81,7 +81,7 @@ type configData struct {
 // generateEnvoyConfig returns an envoy config generated from config data
 func generateEnvoyConfig(data *configData) (config string, err error) {
 	if data.Cluster == "" ||
-		data.Id == "" ||
+		data.ID == "" ||
 		data.AdminPort == 0 ||
 		data.ControlPlaneAddress == "" ||
 		data.ControlPlanePort == 0 {

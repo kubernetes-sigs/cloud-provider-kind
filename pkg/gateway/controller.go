@@ -312,7 +312,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	// Assert the address to a net.TCPAddr to access the Port field
 	tcpAddr, ok := addr.(*net.TCPAddr)
 	if !ok {
-		return fmt.Errorf("Could not assert listener address to TCPAddr: %s", addr.String())
+		return fmt.Errorf("could not assert listener address to TCPAddr: %s", addr.String())
 	}
 
 	// Access the Port field
@@ -334,7 +334,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
 	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(), c.gatewayListerSynced, c.httprouteListerSynced, c.grpcrouteListerSynced) {
-		return fmt.Errorf("Timed out waiting for caches to sync")
+		return fmt.Errorf("timed out waiting for caches to sync")
 	}
 
 	for i := 0; i < workers; i++ {

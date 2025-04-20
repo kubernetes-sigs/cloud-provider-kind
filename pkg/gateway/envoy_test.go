@@ -13,7 +13,7 @@ func TestGenerateEnvoyConfigTable(t *testing.T) {
 			name: "Default Configuration",
 			configData: &configData{
 				Cluster:             "test-cluster",
-				Id:                  "test-id",
+				ID:                  "test-id",
 				AdminPort:           9000,
 				ControlPlaneAddress: "192.168.1.10",
 				ControlPlanePort:    8080,
@@ -75,7 +75,7 @@ admin:
 			name: "Different Ports and Addresses",
 			configData: &configData{
 				Cluster:             "another-cluster",
-				Id:                  "instance-01",
+				ID:                  "instance-01",
 				AdminPort:           12345,
 				ControlPlaneAddress: "10.0.1.5",
 				ControlPlanePort:    50051,
@@ -137,7 +137,7 @@ admin:
 			name: "Empty Cluster and ID",
 			configData: &configData{
 				Cluster:             "",
-				Id:                  "",
+				ID:                  "",
 				AdminPort:           80,
 				ControlPlaneAddress: "localhost",
 				ControlPlanePort:    8080,

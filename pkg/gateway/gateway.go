@@ -42,7 +42,7 @@ func createGateway(clusterName string, localAddress string, localPort int, gatew
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfig := &configData{
 		Cluster:             simpleName,
-		Id:                  name,
+		ID:                  name,
 		AdminPort:           envoyAdminPort,
 		ControlPlaneAddress: localAddress,
 		ControlPlanePort:    localPort,

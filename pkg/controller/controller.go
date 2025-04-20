@@ -298,7 +298,9 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		return nil, err
 	}
 
-	go gatewayController.Run(ctx)
+	go func() {
+		_ = gatewayController.Run(ctx)
+	}()
 
 	sharedGwInformers.Start(ctx.Done())
 
