@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,6 +19,19 @@ import (
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+
+	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
+	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
+	listenerservice "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
+	routeservice "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	runtimeservice "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
+	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
+	envoyproxycache "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	envoyproxyserver "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
 
 const (
@@ -25,6 +39,14 @@ const (
 	GWClassName    = "cloud-provider-kind"
 	maxRetries     = 5
 	workers        = 5
+)
+
+// from https://github.com/envoyproxy/go-control-plane/blob/main/internal/example/server.go#L110
+const (
+	grpcKeepaliveTime        = 30 * time.Second
+	grpcKeepaliveTimeout     = 5 * time.Second
+	grpcKeepaliveMinTime     = 30 * time.Second
+	grpcMaxConcurrentStreams = 1000000
 )
 
 type Controller struct {
@@ -40,6 +62,10 @@ type Controller struct {
 	grpcrouteLister       gatewaylisters.GRPCRouteLister
 	grpcrouteListerSynced cache.InformerSynced
 	grpcroutequeue        workqueue.TypedRateLimitingInterface[string]
+
+	// envoyproxy control plane
+	xdsserver    envoyproxyserver.Server
+	xdsLocalPort int
 }
 
 func New(
@@ -228,6 +254,58 @@ func (c *Controller) Init(ctx context.Context) error {
 // Run begins watching and syncing.
 func (c *Controller) Run(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
+
+	klog.Info("Starting Envoy proxy controller")
+	// Create a cache
+	envoycache := envoyproxycache.NewSnapshotCache(false, envoyproxycache.IDHash{}, nil)
+	c.xdsserver = envoyproxyserver.NewServer(ctx, envoycache, nil)
+
+	var grpcOptions []grpc.ServerOption
+	grpcOptions = append(grpcOptions,
+		grpc.MaxConcurrentStreams(grpcMaxConcurrentStreams),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    grpcKeepaliveTime,
+			Timeout: grpcKeepaliveTimeout,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             grpcKeepaliveMinTime,
+			PermitWithoutStream: true,
+		}),
+	)
+	grpcServer := grpc.NewServer(grpcOptions...)
+
+	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, c.xdsserver)
+	endpointservice.RegisterEndpointDiscoveryServiceServer(grpcServer, c.xdsserver)
+	clusterservice.RegisterClusterDiscoveryServiceServer(grpcServer, c.xdsserver)
+	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, c.xdsserver)
+	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, c.xdsserver)
+	secretservice.RegisterSecretDiscoveryServiceServer(grpcServer, c.xdsserver)
+	runtimeservice.RegisterRuntimeDiscoveryServiceServer(grpcServer, c.xdsserver)
+
+	// open a listener on the control plane using a random port
+	listener, err := net.Listen("tcp", fmt.Sprintf(":0"))
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	// Get the address of the listener
+	addr := listener.Addr()
+
+	// Assert the address to a net.TCPAddr to access the Port field
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("Could not assert listener address to TCPAddr: %s", addr.String())
+	}
+
+	// Access the Port field
+	c.xdsLocalPort = tcpAddr.Port
+	go func() {
+		klog.Infof("management server listening on %d\n", c.xdsLocalPort)
+		if err = grpcServer.Serve(listener); err != nil {
+			klog.Infoln(err)
+		}
+		grpcServer.Stop()
+	}()
 
 	// Let the workers stop when we are done
 	defer c.gatewayqueue.ShutDown()
