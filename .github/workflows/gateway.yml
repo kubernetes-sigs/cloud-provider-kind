@@ -114,6 +114,9 @@ jobs:
             --kubeconfig=_artifacts/kubeconfig.conf \
             --organization=sigs.k8s.io \
             --project=cloud-provider-kind \
+            --url=https://github.com/kubernetes-sigs/cloud-provider-kind \
+            --version=test \
+            --contact=antonio.ojea.garcia@gmail.com \
             --gateway-class=cloud-provider-kind \
             --supported-features=Gateway,HTTPRoute \
             --report-output=./_artifacts
