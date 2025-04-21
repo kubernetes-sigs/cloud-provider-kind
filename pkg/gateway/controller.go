@@ -70,11 +70,9 @@ type Controller struct {
 
 	httprouteLister       gatewaylisters.HTTPRouteLister
 	httprouteListerSynced cache.InformerSynced
-	httproutequeue        workqueue.TypedRateLimitingInterface[string]
 
 	grpcrouteLister       gatewaylisters.GRPCRouteLister
 	grpcrouteListerSynced cache.InformerSynced
-	grpcroutequeue        workqueue.TypedRateLimitingInterface[string]
 
 	// envoyproxy control plane
 	xdscache        cachev3.SnapshotCache
@@ -107,16 +105,9 @@ func New(
 		),
 		httprouteLister:       httprouteInformer.Lister(),
 		httprouteListerSynced: httprouteInformer.Informer().HasSynced,
-		httproutequeue: workqueue.NewTypedRateLimitingQueueWithConfig(
-			workqueue.DefaultTypedControllerRateLimiter[string](),
-			workqueue.TypedRateLimitingQueueConfig[string]{Name: "httproute"},
-		),
+
 		grpcrouteLister:       grpcrouteInformer.Lister(),
 		grpcrouteListerSynced: grpcrouteInformer.Informer().HasSynced,
-		grpcroutequeue: workqueue.NewTypedRateLimitingQueueWithConfig(
-			workqueue.DefaultTypedControllerRateLimiter[string](),
-			workqueue.TypedRateLimitingQueueConfig[string]{Name: "grpcroute"},
-		),
 	}
 
 	_, err := gatewayInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -332,8 +323,6 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	// Let the workers stop when we are done
 	defer c.gatewayqueue.ShutDown()
-	defer c.httproutequeue.ShutDown()
-	defer c.grpcroutequeue.ShutDown()
 	klog.Info("Starting Gateway API controller")
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
