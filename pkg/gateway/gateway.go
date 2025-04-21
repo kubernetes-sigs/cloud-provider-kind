@@ -14,6 +14,8 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -195,7 +197,7 @@ func (c *Controller) syncGateway(key string) error {
 
 	// Update configuration
 	resources := map[resourcev3.Type][]envoyproxytypes.Resource{}
-
+	conditions := []metav1.Condition{}
 	for _, listener := range gw.Spec.Listeners {
 		// Determine the Envoy protocol based on the Gateway API protocol
 		var envoyProto corev3.SocketAddress_Protocol
@@ -217,9 +219,106 @@ func (c *Controller) syncGateway(key string) error {
 			}}},
 		})
 
+		// Process HTTP Routes
+		for _, route := range c.getHTTPRoutesForListener(gw, listener) {
+			klog.V(2).Infof("Processing http route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
+			conditions = append(conditions, metav1.Condition{})
+		}
+
+		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
+			klog.V(2).Infof("Processing grpc route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
+			conditions = append(conditions, metav1.Condition{})
+		}
+
+		// Process GRPC Routes
 	}
 	return c.UpdateXDSServer(context.Background(), containerName, resources)
+}
 
+// getHTTPRoutesForListener returns a slice of HTTPRoutes that reference the given Gateway and listener.
+func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.HTTPRoute {
+	var matchingRoutes []*gatewayv1.HTTPRoute
+
+	// TODO: optimize this
+	// List all HTTPRoutes in all namespaces
+	httpRoutes, err := c.httprouteLister.List(labels.Everything())
+	if err != nil {
+		klog.Infof("failed to list HTTPRoutes: %v", err)
+		return matchingRoutes
+	}
+
+	for _, route := range httpRoutes {
+		// Check 1: Does the route *want* to attach to this specific listener?
+		// This verifies the route's parentRefs target this gateway and listener section/port.
+		if !isRouteReferenced(gw, listener, route) {
+			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: not referenced in ParentRefs", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+			continue
+		}
+
+		// Check 2: Does the listener *allow* this route to attach?
+		// This verifies listener.spec.allowedRoutes (namespace and kind).
+		// Assumes c.namespaceLister is populated.
+		if !isRouteAllowed(gw, listener, route, c.namespaceLister) {
+			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: denied by AllowedRoutes", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+			continue
+		}
+
+		// Check 3: Is the route kind compatible with the listener protocol?
+		// For this function specifically getting HTTPRoutes, the listener must accept HTTP or HTTPS.
+		if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
+			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: incompatible listener protocol %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name, listener.Protocol)
+			continue // Skip route if listener protocol isn't HTTP/HTTPS
+		}
+
+		// If all checks pass, add the route
+		matchingRoutes = append(matchingRoutes, route)
+		klog.V(4).Infof("Route %s/%s matched for Gateway %s/%s Listener %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+	}
+
+	return matchingRoutes
+}
+
+// getGRPCRoutesForListener returns a slice of GRPCRoutes that reference the given Gateway and listener.
+func (c *Controller) getGRPCRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.GRPCRoute {
+	var matchingRoutes []*gatewayv1.GRPCRoute
+
+	// TODO: optimize this
+	// List all GRPCRoutes in all namespaces
+	grpcRoutes, err := c.grpcrouteLister.List(labels.Everything())
+	if err != nil {
+		klog.Infof("failed to list GRPCRoutes: %v", err)
+		return matchingRoutes
+	}
+
+	for _, route := range grpcRoutes {
+		// Check 1: Does the route *want* to attach to this specific listener?
+		// This verifies the route's parentRefs target this gateway and listener section/port.
+		if !isRouteReferenced(gw, listener, route) {
+			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: not referenced in ParentRefs", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+			continue
+		}
+
+		// Check 2: Does the listener *allow* this route to attach?
+		// This verifies listener.spec.allowedRoutes (namespace and kind).
+		// Assumes c.namespaceLister is populated.
+		if !isRouteAllowed(gw, listener, route, c.namespaceLister) {
+			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: denied by AllowedRoutes", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+			continue
+		}
+
+		// Check 3: Is the route kind compatible with the listener protocol?
+		// For this function specifically getting HTTPRoutes, the listener must accept HTTP or HTTPS.
+		if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
+			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: incompatible listener protocol %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name, listener.Protocol)
+			continue // Skip route if listener protocol isn't HTTP/HTTPS
+		}
+
+		// If all checks pass, add the route
+		matchingRoutes = append(matchingRoutes, route)
+		klog.V(4).Infof("Route %s/%s matched for Gateway %s/%s Listener %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+	}
+
+	return matchingRoutes
 }
 
 // handleErr checks if an error happened and makes sure we will retry later.

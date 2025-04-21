@@ -12,6 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	corev1informers "k8s.io/client-go/informers/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -59,6 +61,9 @@ type Controller struct {
 	clusterName string
 	gwClient    gatewayclient.Interface
 
+	namespaceLister       corev1listers.NamespaceLister
+	namespaceListerSynced cache.InformerSynced
+
 	gatewayLister       gatewaylisters.GatewayLister
 	gatewayListerSynced cache.InformerSynced
 	gatewayqueue        workqueue.TypedRateLimitingInterface[string]
@@ -84,15 +89,18 @@ type Controller struct {
 func New(
 	clusterName string,
 	gwClient *gatewayclient.Clientset,
+	namespaceInformer corev1informers.NamespaceInformer,
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
 ) (*Controller, error) {
 	c := &Controller{
-		clusterName:         clusterName,
-		gwClient:            gwClient,
-		gatewayLister:       gatewayInformer.Lister(),
-		gatewayListerSynced: gatewayInformer.Informer().HasSynced,
+		clusterName:           clusterName,
+		namespaceLister:       namespaceInformer.Lister(),
+		namespaceListerSynced: namespaceInformer.Informer().HasSynced,
+		gwClient:              gwClient,
+		gatewayLister:         gatewayInformer.Lister(),
+		gatewayListerSynced:   gatewayInformer.Informer().HasSynced,
 		gatewayqueue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "gateway"},
@@ -328,7 +336,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	klog.Info("Starting Gateway API controller")
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
-	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(), c.gatewayListerSynced, c.httprouteListerSynced, c.grpcrouteListerSynced) {
+	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(), c.gatewayListerSynced, c.httprouteListerSynced, c.grpcrouteListerSynced, c.namespaceListerSynced) {
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
 
