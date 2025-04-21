@@ -367,6 +367,47 @@ func (c *Controller) processGateways(references []gatewayv1.ParentReference, loc
 	}
 }
 
+func (c *Controller) processNextGatewayItem() bool {
+	// Wait until there is a new item in the working queue
+	key, quit := c.gatewayqueue.Get()
+	if quit {
+		return false
+	}
+	defer c.gatewayqueue.Done(key)
+
+	err := c.syncGateway(key)
+
+	c.handleGatewayErr(err, key)
+	return true
+}
+
+// handleErr checks if an error happened and makes sure we will retry later.
+func (c *Controller) handleGatewayErr(err error, key string) {
+	if err == nil {
+		c.gatewayqueue.Forget(key)
+		return
+	}
+
+	if c.gatewayqueue.NumRequeues(key) < maxRetries {
+		klog.Infof("Error syncing Gateway %v: %v", key, err)
+
+		// Re-enqueue the key rate limited. Based on the rate limiter on the
+		// queue and the re-enqueue history, the key will be processed later again.
+		c.gatewayqueue.AddRateLimited(key)
+		return
+	}
+
+	c.gatewayqueue.Forget(key)
+	// Report to an external entity that, even after several retries, we could not successfully process this key
+	runtime.HandleError(err)
+	klog.Infof("Dropping Gateway %q out of the queue: %v", key, err)
+}
+
+func (c *Controller) runGatewayWorker(ctx context.Context) {
+	for c.processNextGatewayItem() {
+	}
+}
+
 // UpdateConditionIfChanged updates or insert a condition if it has been changed.
 // Returns false if there are no changes
 func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Condition) ([]metav1.Condition, bool) {
