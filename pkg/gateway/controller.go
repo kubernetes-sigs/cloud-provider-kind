@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,15 +27,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
-	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
-	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
-	listenerservice "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
-	routeservice "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
-	runtimeservice "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
-	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
-	envoyproxycache "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	envoyproxyserver "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
+	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
+	secretv3 "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
+	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
 
 const (
@@ -69,10 +72,11 @@ type Controller struct {
 	grpcroutequeue        workqueue.TypedRateLimitingInterface[string]
 
 	// envoyproxy control plane
-	xdscache        envoyproxycache.SnapshotCache
-	xdsserver       envoyproxyserver.Server
+	xdscache        cachev3.SnapshotCache
+	xdsserver       serverv3.Server
 	xdsLocalAddress string
 	xdsLocalPort    int
+	xdsVersion      atomic.Uint64
 
 	tunnelManager *tunnels.TunnelManager
 }
@@ -146,33 +150,28 @@ func New(
 	_, err = httprouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			httproute := obj.(*gatewayv1.HTTPRoute)
-			if !c.isOwned(httproute.Spec.ParentRefs, httproute.Namespace) {
-				return
-			}
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				c.httproutequeue.Add(key)
-			}
+			c.processGateways(httproute.Spec.ParentRefs, httproute.Namespace)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			httproute := newObj.(*gatewayv1.HTTPRoute)
-			if !c.isOwned(httproute.Spec.ParentRefs, httproute.Namespace) {
-				return
-			}
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(newObj)
-			if err == nil {
-				c.httproutequeue.Add(key)
-			}
+			c.processGateways(httproute.Spec.ParentRefs, httproute.Namespace)
 		},
 		DeleteFunc: func(obj interface{}) {
-			httproute := obj.(*gatewayv1.HTTPRoute)
-			if !c.isOwned(httproute.Spec.ParentRefs, httproute.Namespace) {
-				return
+			httproute, ok := obj.(*gatewayv1.HTTPRoute)
+			if !ok {
+				// If we reached here it means the pod was deleted but its final state is unrecorded.
+				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+				if !ok {
+					runtime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", obj))
+					return
+				}
+				httproute, ok = tombstone.Obj.(*gatewayv1.HTTPRoute)
+				if !ok {
+					runtime.HandleError(fmt.Errorf("tombstone contained object that is not a GRPCRoute: %#v", obj))
+					return
+				}
 			}
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				c.httproutequeue.Add(key)
-			}
+			c.processGateways(httproute.Spec.ParentRefs, httproute.Namespace)
 		},
 	})
 	if err != nil {
@@ -182,33 +181,28 @@ func New(
 	_, err = grpcrouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			grpcroute := obj.(*gatewayv1.GRPCRoute)
-			if !c.isOwned(grpcroute.Spec.ParentRefs, grpcroute.Namespace) {
-				return
-			}
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				c.grpcroutequeue.Add(key)
-			}
+			c.processGateways(grpcroute.Spec.ParentRefs, grpcroute.Namespace)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			grpcroute := newObj.(*gatewayv1.GRPCRoute)
-			if !c.isOwned(grpcroute.Spec.ParentRefs, grpcroute.Namespace) {
-				return
-			}
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(newObj)
-			if err == nil {
-				c.grpcroutequeue.Add(key)
-			}
+			c.processGateways(grpcroute.Spec.ParentRefs, grpcroute.Namespace)
 		},
 		DeleteFunc: func(obj interface{}) {
-			grpcroute := obj.(*gatewayv1.GRPCRoute)
-			if !c.isOwned(grpcroute.Spec.ParentRefs, grpcroute.Namespace) {
-				return
+			grpcroute, ok := obj.(*gatewayv1.GRPCRoute)
+			if !ok {
+				// If we reached here it means the pod was deleted but its final state is unrecorded.
+				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+				if !ok {
+					runtime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", obj))
+					return
+				}
+				grpcroute, ok = tombstone.Obj.(*gatewayv1.GRPCRoute)
+				if !ok {
+					runtime.HandleError(fmt.Errorf("tombstone contained object that is not a GRPCRoute: %#v", obj))
+					return
+				}
 			}
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				c.grpcroutequeue.Add(key)
-			}
+			c.processGateways(grpcroute.Spec.ParentRefs, grpcroute.Namespace)
 		},
 	})
 	if err != nil {
@@ -272,8 +266,8 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	klog.Info("Starting Envoy proxy controller")
 	// Create a cache
-	c.xdscache = envoyproxycache.NewSnapshotCache(false, envoyproxycache.IDHash{}, nil)
-	c.xdsserver = envoyproxyserver.NewServer(ctx, c.xdscache, nil)
+	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
+	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, nil)
 
 	var grpcOptions []grpc.ServerOption
 	grpcOptions = append(grpcOptions,
@@ -289,13 +283,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	)
 	grpcServer := grpc.NewServer(grpcOptions...)
 
-	discoverygrpc.RegisterAggregatedDiscoveryServiceServer(grpcServer, c.xdsserver)
-	endpointservice.RegisterEndpointDiscoveryServiceServer(grpcServer, c.xdsserver)
-	clusterservice.RegisterClusterDiscoveryServiceServer(grpcServer, c.xdsserver)
-	routeservice.RegisterRouteDiscoveryServiceServer(grpcServer, c.xdsserver)
-	listenerservice.RegisterListenerDiscoveryServiceServer(grpcServer, c.xdsserver)
-	secretservice.RegisterSecretDiscoveryServiceServer(grpcServer, c.xdsserver)
-	runtimeservice.RegisterRuntimeDiscoveryServiceServer(grpcServer, c.xdsserver)
+	discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, c.xdsserver)
+	endpointv3.RegisterEndpointDiscoveryServiceServer(grpcServer, c.xdsserver)
+	clusterv3.RegisterClusterDiscoveryServiceServer(grpcServer, c.xdsserver)
+	routev3.RegisterRouteDiscoveryServiceServer(grpcServer, c.xdsserver)
+	listenerv3.RegisterListenerDiscoveryServiceServer(grpcServer, c.xdsserver)
+	secretv3.RegisterSecretDiscoveryServiceServer(grpcServer, c.xdsserver)
+	runtimev3.RegisterRuntimeDiscoveryServiceServer(grpcServer, c.xdsserver)
 
 	address, err := GetControlPlaneAddress()
 	if err != nil {
@@ -320,7 +314,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.xdsLocalAddress = address
 	c.xdsLocalPort = tcpAddr.Port
 	go func() {
-		klog.Infof("management server listening on %d\n", c.xdsLocalPort)
+		klog.Infof("XDS management server listening on %s %d\n", c.xdsLocalAddress, c.xdsLocalPort)
 		if err = grpcServer.Serve(listener); err != nil {
 			klog.Infoln(err)
 		}
@@ -340,8 +334,6 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runGatewayWorker, time.Second)
-		go wait.UntilWithContext(ctx, c.runHTTPRouteWorker, time.Second)
-		go wait.UntilWithContext(ctx, c.runGRPCrouteWorker, time.Second)
 	}
 
 	<-ctx.Done()
@@ -349,31 +341,32 @@ func (c *Controller) Run(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) isOwned(references []gatewayv1.ParentReference, localNamespace string) bool {
+// processGateways enqueues all referenced gateways from the Parent References
+func (c *Controller) processGateways(references []gatewayv1.ParentReference, localNamespace string) {
 	for _, ref := range references {
-		if ref.Group == nil || ref.Kind == nil {
-			continue
-		}
 		namespace := localNamespace
 		if ref.Namespace != nil {
 			namespace = string(*ref.Namespace)
 		}
-		if string(*ref.Group) != "gateway.networking.k8s.io" && string(*ref.Group) != "" {
+		if ref.Group != nil && string(*ref.Group) != "gateway.networking.k8s.io" {
 			continue
 		}
-		if string(*ref.Kind) != "Gateway" {
+
+		if ref.Kind != nil && string(*ref.Kind) != "Gateway" {
 			continue
 		}
 
 		gw, err := c.gatewayLister.Gateways(namespace).Get(string(ref.Name))
 		if err != nil {
+			klog.Infof("fail to obtain referenced gateway %s/%s : %v", namespace, ref.Name, err)
 			continue
 		}
-		if gw.Spec.GatewayClassName == GWClassName {
-			return true
+		if gw.Spec.GatewayClassName != GWClassName {
+			klog.V(2).Infof("gateway %s/%s not managed by this controller", namespace, ref.Name)
+			continue
 		}
+		c.gatewayqueue.Add(gw.Namespace + "/" + gw.Name)
 	}
-	return false
 }
 
 // UpdateConditionIfChanged updates or insert a condition if it has been changed.
@@ -452,4 +445,27 @@ func GetControlPlaneAddress() (string, error) {
 	}
 
 	return "", fmt.Errorf("no suitable global unicast IPv4 address found on any active non-loopback interface")
+}
+
+// UpdateXDSServer changes the resource snapshot held by the XDS server, which
+// updates connected clients as required.
+func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resources map[resourcev3.Type][]envoyproxytypes.Resource) error {
+	c.xdsVersion.Add(1)
+
+	// Create a snapshot with the passed in resources.
+	snapshot, err := cachev3.NewSnapshot(fmt.Sprintf("%d", c.xdsVersion.Load()), resources)
+	if err != nil {
+		return fmt.Errorf("failed to create new snapshot cache: %v", err)
+
+	}
+	if err := snapshot.Consistent(); err != nil {
+		return fmt.Errorf("failed to create new resource snapshot: %v", err)
+	}
+
+	// Update the cache with the new resource snapshot.
+	if err := c.xdscache.SetSnapshot(ctx, nodeid, snapshot); err != nil {
+		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
+	}
+	klog.V(4).Infof("Updated snapshot cache with resource snapshot...")
+	return nil
 }

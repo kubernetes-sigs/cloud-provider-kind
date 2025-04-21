@@ -8,6 +8,11 @@ import (
 	"os"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
@@ -29,7 +34,7 @@ func gatewayName(clusterName, namespace, name string) string {
 		panic(err)
 	}
 	hash := h.Sum(nil)
-	return fmt.Sprintf("%s-%x", constants.ContainerPrefix, hash[:6])
+	return fmt.Sprintf("%s-gw-%x", constants.ContainerPrefix, hash[:6])
 }
 
 func gatewaySimpleName(clusterName, namespace, name string) string {
@@ -41,8 +46,8 @@ func createGateway(clusterName string, localAddress string, localPort int, gatew
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfig := &configData{
-		Cluster:             simpleName,
 		ID:                  name,
+		Cluster:             simpleName,
 		AdminPort:           envoyAdminPort,
 		ControlPlaneAddress: localAddress,
 		ControlPlanePort:    localPort,
@@ -141,7 +146,7 @@ func (c *Controller) processNextGatewayItem() bool {
 func (c *Controller) syncGateway(key string) error {
 	startTime := time.Now()
 	defer func() {
-		klog.V(4).Infof("Finished syncing gateway %q (%v)", key, time.Since(startTime))
+		klog.V(2).Infof("Finished syncing gateway %q (%v)", key, time.Since(startTime))
 	}()
 
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -156,35 +161,65 @@ func (c *Controller) syncGateway(key string) error {
 	}
 	containerName := gatewayName(c.clusterName, namespace, name)
 
+	// Deleting
 	if apierrors.IsNotFound(err) {
 		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
 		klog.Infof("Gateway %s does not exist anymore, deleting \n", key)
+		c.xdscache.ClearSnapshot(containerName)
+
 		err := container.Delete(containerName)
 		if err != nil {
 			return fmt.Errorf("can not delete container %s for gateway %s/%s on cluster %s : %v", containerName, namespace, name, c.clusterName, err)
 		}
-	} else {
-		klog.Infof("Syncing Gateway %s\n", gw.GetName())
-		if !container.IsRunning(containerName) {
-			klog.Infof("container %s for gateway is not running", name)
-			if container.Exist(containerName) {
-				err := container.Delete(containerName)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		if !container.Exist(containerName) {
-			klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
-			enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
-			err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
+		return nil
+	}
+	// Create or Update
+	klog.Infof("Syncing Gateway %s\n", gw.GetName())
+	if !container.IsRunning(containerName) {
+		klog.Infof("container %s for gateway is not running", name)
+		if container.Exist(containerName) {
+			err := container.Delete(containerName)
 			if err != nil {
 				return err
 			}
 		}
+	}
+	if !container.Exist(containerName) {
+		klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
+		enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
+		err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Update configuration
+	resources := map[resourcev3.Type][]envoyproxytypes.Resource{}
+
+	for _, listener := range gw.Spec.Listeners {
+		// Determine the Envoy protocol based on the Gateway API protocol
+		var envoyProto corev3.SocketAddress_Protocol
+		switch listener.Protocol {
+		case gatewayv1.UDPProtocolType:
+			envoyProto = corev3.SocketAddress_UDP
+		default: // TCP, HTTP, HTTPS, TLS all use TCP at the transport layer
+			envoyProto = corev3.SocketAddress_TCP
+		}
+
+		resources[resourcev3.ListenerType] = append(resources[resourcev3.ListenerType], &listenerv3.Listener{
+			Name: string(listener.Name),
+			Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
+				Protocol: envoyProto,
+				Address:  "0.0.0.0", // Or "::" for IPv6, or specific IP if needed
+				PortSpecifier: &corev3.SocketAddress_PortValue{
+					PortValue: uint32(listener.Port),
+				},
+			}}},
+		})
 
 	}
-	return nil
+	return c.UpdateXDSServer(context.Background(), containerName, resources)
+
 }
 
 // handleErr checks if an error happened and makes sure we will retry later.
