@@ -250,10 +250,11 @@ func (c *Controller) Init(ctx context.Context) error {
 	}
 	// Update status
 	condition := metav1.Condition{
-		Type:    string(gatewayv1.GatewayClassConditionStatusAccepted),
-		Status:  metav1.ConditionTrue,
-		Reason:  string(gatewayv1.GatewayClassReasonAccepted),
-		Message: "Managed by Cloud Provider KIND controller",
+		Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.GatewayClassReasonAccepted),
+		Message:            "Managed by Cloud Provider KIND controller",
+		ObservedGeneration: gwClass.Generation,
 	}
 
 	// TODO server side apply
