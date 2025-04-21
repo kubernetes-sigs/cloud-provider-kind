@@ -368,7 +368,7 @@ func cleanupLoadBalancer(lbController cloudprovider.LoadBalancer, name string) {
 
 func cleanupGateway(name string) {
 	// create fake service to pass to the cloud provider method
-	v, err := container.GetLabelValue(name, constants.LoadBalancerNameLabelKey)
+	v, err := container.GetLabelValue(name, constants.GatewayNameLabelKey)
 	if err != nil || v == "" {
 		klog.Infof("could not get the label for the loadbalancer on container %s : %v", name, err)
 		return

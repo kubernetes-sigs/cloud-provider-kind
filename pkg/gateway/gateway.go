@@ -174,7 +174,7 @@ func (c *Controller) syncGateway(key string) error {
 				}
 			}
 		}
-		if !container.Exist(name) {
+		if !container.Exist(containerName) {
 			klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
 			enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
 			err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
