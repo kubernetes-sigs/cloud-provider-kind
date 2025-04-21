@@ -76,14 +76,15 @@ func (c *Controller) syncGateway(key string) error {
 	}
 
 	// Update configuration
+	newGw := gw.DeepCopy()
 	resources := map[resourcev3.Type][]envoyproxytypes.Resource{}
-	gwConditions := []metav1.Condition{{
+	newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
 		Status:             metav1.ConditionTrue,
 		Reason:             string(gatewayv1.GatewayReasonAccepted),
 		ObservedGeneration: gw.Generation,
 		LastTransitionTime: metav1.Now(),
-	}}
+	})
 
 	lisStatus := make([]gatewayv1.ListenerStatus, len(gw.Spec.Listeners))
 	for i, listener := range gw.Spec.Listeners {
@@ -111,16 +112,15 @@ func (c *Controller) syncGateway(key string) error {
 		var attachedRoutes int32
 		for _, route := range c.getHTTPRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing http route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
-			gwConditions = append(gwConditions, metav1.Condition{})
 		}
 
 		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing grpc route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
-			gwConditions = append(gwConditions, metav1.Condition{})
 		}
 
 		lisStatus[i] = gatewayv1.ListenerStatus{
 			Name:           listener.Name,
+			SupportedKinds: []gatewayv1.RouteGroupKind{{Kind: "HTTPRoute"}},
 			AttachedRoutes: attachedRoutes,
 			Conditions: []metav1.Condition{{
 				Type:               string(gatewayv1.ListenerConditionAccepted),
@@ -134,7 +134,7 @@ func (c *Controller) syncGateway(key string) error {
 
 	err = c.UpdateXDSServer(context.Background(), containerName, resources)
 	if err != nil {
-		gwConditions, _ = UpdateConditionIfChanged(gwConditions, metav1.Condition{
+		newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.GatewayConditionProgrammed),
 			Status:             metav1.ConditionFalse,
 			Reason:             string(gatewayv1.GatewayReasonProgrammed),
@@ -144,7 +144,7 @@ func (c *Controller) syncGateway(key string) error {
 		})
 
 	} else {
-		gwConditions, _ = UpdateConditionIfChanged(gwConditions, metav1.Condition{
+		newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.GatewayConditionProgrammed),
 			Status:             metav1.ConditionTrue,
 			Reason:             string(gatewayv1.GatewayReasonProgrammed),
@@ -153,10 +153,9 @@ func (c *Controller) syncGateway(key string) error {
 		})
 	}
 
-	gw.Status.Listeners = lisStatus
-	gw.Status.Conditions = gwConditions
+	newGw.Status.Listeners = lisStatus
 
-	_, err = c.gwClient.GatewayV1().Gateways(gw.Namespace).UpdateStatus(context.Background(), gw, metav1.UpdateOptions{})
+	_, err = c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(context.Background(), newGw, metav1.UpdateOptions{})
 	return err
 }
 
