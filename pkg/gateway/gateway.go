@@ -92,8 +92,16 @@ func (c *Controller) syncGateway(key string) error {
 
 	// Update configuration
 	resources := map[resourcev3.Type][]envoyproxytypes.Resource{}
-	conditions := []metav1.Condition{}
-	for _, listener := range gw.Spec.Listeners {
+	gwConditions := []metav1.Condition{{
+		Type:               string(gatewayv1.GatewayConditionAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.GatewayReasonAccepted),
+		ObservedGeneration: gw.Generation,
+		LastTransitionTime: metav1.Now(),
+	}}
+
+	lisStatus := make([]gatewayv1.ListenerStatus, len(gw.Spec.Listeners))
+	for i, listener := range gw.Spec.Listeners {
 		// Determine the Envoy protocol based on the Gateway API protocol
 		var envoyProto corev3.SocketAddress_Protocol
 		switch listener.Protocol {
@@ -115,19 +123,56 @@ func (c *Controller) syncGateway(key string) error {
 		})
 
 		// Process HTTP Routes
+		var attachedRoutes int32
 		for _, route := range c.getHTTPRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing http route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
-			conditions = append(conditions, metav1.Condition{})
+			gwConditions = append(gwConditions, metav1.Condition{})
 		}
 
 		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing grpc route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
-			conditions = append(conditions, metav1.Condition{})
+			gwConditions = append(gwConditions, metav1.Condition{})
 		}
 
-		// Process GRPC Routes
+		lisStatus[i] = gatewayv1.ListenerStatus{
+			Name:           listener.Name,
+			AttachedRoutes: attachedRoutes,
+			Conditions: []metav1.Condition{{
+				Type:               string(gatewayv1.ListenerConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonAccepted),
+				ObservedGeneration: gw.Generation,
+				LastTransitionTime: metav1.Now(),
+			}},
+		}
 	}
-	return c.UpdateXDSServer(context.Background(), containerName, resources)
+
+	err = c.UpdateXDSServer(context.Background(), containerName, resources)
+	if err != nil {
+		gwConditions, _ = UpdateConditionIfChanged(gwConditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.GatewayReasonProgrammed),
+			Message:            err.Error(),
+			ObservedGeneration: gw.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+
+	} else {
+		gwConditions, _ = UpdateConditionIfChanged(gwConditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.GatewayReasonProgrammed),
+			ObservedGeneration: gw.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+
+	gw.Status.Listeners = lisStatus
+	gw.Status.Conditions = gwConditions
+
+	_, err = c.gwClient.GatewayV1().Gateways(gw.Namespace).UpdateStatus(context.Background(), gw, metav1.UpdateOptions{})
+	return err
 }
 
 // getHTTPRoutesForListener returns a slice of HTTPRoutes that reference the given Gateway and listener.
