@@ -112,7 +112,7 @@ jobs:
       run: |
         /usr/local/bin/conformance.test -test.run TestConformance \
             --kubeconfig=_artifacts/kubeconfig.conf \
-            --organizaion=sigs.k8s.io \
+            --organization=sigs.k8s.io \
             --project=cloud-provider-kind \
             --gateway-class=cloud-provider-kind \
             --supported-features=Gateway,HTTPRoute \
