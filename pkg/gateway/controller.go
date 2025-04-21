@@ -146,7 +146,7 @@ func New(
 	_, err = httprouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			httproute := obj.(*gatewayv1.HTTPRoute)
-			if !c.isOwned(httproute.Spec.ParentRefs) {
+			if !c.isOwned(httproute.Spec.ParentRefs, httproute.Namespace) {
 				return
 			}
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -156,7 +156,7 @@ func New(
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			httproute := newObj.(*gatewayv1.HTTPRoute)
-			if !c.isOwned(httproute.Spec.ParentRefs) {
+			if !c.isOwned(httproute.Spec.ParentRefs, httproute.Namespace) {
 				return
 			}
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(newObj)
@@ -166,7 +166,7 @@ func New(
 		},
 		DeleteFunc: func(obj interface{}) {
 			httproute := obj.(*gatewayv1.HTTPRoute)
-			if !c.isOwned(httproute.Spec.ParentRefs) {
+			if !c.isOwned(httproute.Spec.ParentRefs, httproute.Namespace) {
 				return
 			}
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -182,7 +182,7 @@ func New(
 	_, err = grpcrouteInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			grpcroute := obj.(*gatewayv1.GRPCRoute)
-			if !c.isOwned(grpcroute.Spec.ParentRefs) {
+			if !c.isOwned(grpcroute.Spec.ParentRefs, grpcroute.Namespace) {
 				return
 			}
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -192,7 +192,7 @@ func New(
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			grpcroute := newObj.(*gatewayv1.GRPCRoute)
-			if !c.isOwned(grpcroute.Spec.ParentRefs) {
+			if !c.isOwned(grpcroute.Spec.ParentRefs, grpcroute.Namespace) {
 				return
 			}
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(newObj)
@@ -202,7 +202,7 @@ func New(
 		},
 		DeleteFunc: func(obj interface{}) {
 			grpcroute := obj.(*gatewayv1.GRPCRoute)
-			if !c.isOwned(grpcroute.Spec.ParentRefs) {
+			if !c.isOwned(grpcroute.Spec.ParentRefs, grpcroute.Namespace) {
 				return
 			}
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -349,8 +349,15 @@ func (c *Controller) Run(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) isOwned(references []gatewayv1.ParentReference) bool {
+func (c *Controller) isOwned(references []gatewayv1.ParentReference, localNamespace string) bool {
 	for _, ref := range references {
+		if ref.Group == nil || ref.Kind == nil {
+			continue
+		}
+		namespace := localNamespace
+		if ref.Namespace != nil {
+			namespace = string(*ref.Namespace)
+		}
 		if string(*ref.Group) != "gateway.networking.k8s.io" && string(*ref.Group) != "" {
 			continue
 		}
@@ -358,7 +365,7 @@ func (c *Controller) isOwned(references []gatewayv1.ParentReference) bool {
 			continue
 		}
 
-		gw, err := c.gatewayLister.Gateways(string(*ref.Namespace)).Get(string(ref.Name))
+		gw, err := c.gatewayLister.Gateways(namespace).Get(string(ref.Name))
 		if err != nil {
 			continue
 		}
