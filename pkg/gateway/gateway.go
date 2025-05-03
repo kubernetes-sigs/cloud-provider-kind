@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 
@@ -110,12 +113,43 @@ func (c *Controller) syncGateway(key string) error {
 
 		// Process HTTP Routes
 		var attachedRoutes int32
+		// getHTTPRoutesForListener processes parent references on routes
 		for _, route := range c.getHTTPRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing http route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
+			// Check hostnames between listener and route
+			for _, hostname := range route.Spec.Hostnames {
+				if hostname != *listener.Hostname {
+
+				}
+			}
+			// Process rules
+			for _, rule := range route.Spec.Rules {
+				for _, match := range rule.Matches {
+					klog.Infof("match %#v", match)
+				}
+				for _, filter := range rule.Filters {
+					klog.Infof("match %#v", filter)
+				}
+				for _, backend := range rule.BackendRefs {
+					klog.Infof("match %#v", backend)
+					for _, filter := range backend.Filters {
+						klog.Infof("match %#v", filter)
+					}
+				}
+
+				// TODO Timeouts
+				// TODO Retry
+				// TODO SessionPersistence
+			}
+
+			resources[resourcev3.RouteType] = append(resources[resourcev3.RouteType], &routev3.Route{})
+			resources[resourcev3.ClusterType] = append(resources[resourcev3.ClusterType], &clusterv3.Cluster{})
 		}
 
 		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing grpc route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
+			resources[resourcev3.RouteType] = append(resources[resourcev3.RouteType], &routev3.Route{})
+			resources[resourcev3.ClusterType] = append(resources[resourcev3.ClusterType], &clusterv3.Cluster{})
 		}
 
 		lisStatus[i] = gatewayv1.ListenerStatus{
@@ -142,7 +176,6 @@ func (c *Controller) syncGateway(key string) error {
 			ObservedGeneration: gw.Generation,
 			LastTransitionTime: metav1.Now(),
 		})
-
 	} else {
 		newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.GatewayConditionProgrammed),
