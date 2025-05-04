@@ -211,3 +211,21 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 	klog.V(4).Infof("Route %s/%s (Kind: %s/%s) denied by Kind restrictions for Gateway %s/%s, Listener %s", routeNamespace, route.GetName(), routeGroup, routeKind, gatewayNamespace, gateway.GetName(), listener.Name)
 	return false
 }
+
+// getFirstKey returns the first key from a map. Useful for simple cases.
+func getFirstKey[K comparable, V any](m map[K]V) K {
+	for k := range m {
+		return k
+	}
+	var zero K
+	return zero
+}
+
+// toInterfaceSlice converts a slice of a specific type to a slice of interface{}.
+func toInterfaceSlice[T any](s []*T) []interface{} {
+	result := make([]interface{}, len(s))
+	for i, v := range s {
+		result[i] = v
+	}
+	return result
+}

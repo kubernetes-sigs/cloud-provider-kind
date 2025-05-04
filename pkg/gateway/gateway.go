@@ -22,6 +22,8 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 
+	"strings"
+
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -117,33 +119,20 @@ func (c *Controller) syncGateway(key string) error {
 		for _, route := range c.getHTTPRoutesForListener(gw, listener) {
 			klog.V(2).Infof("Processing http route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
 			// Check hostnames between listener and route
-			for _, hostname := range route.Spec.Hostnames {
-				if hostname != *listener.Hostname {
-
-				}
-			}
-			// Process rules
-			for _, rule := range route.Spec.Rules {
-				for _, match := range rule.Matches {
-					klog.Infof("match %#v", match)
-				}
-				for _, filter := range rule.Filters {
-					klog.Infof("match %#v", filter)
-				}
-				for _, backend := range rule.BackendRefs {
-					klog.Infof("match %#v", backend)
-					for _, filter := range backend.Filters {
-						klog.Infof("match %#v", filter)
-					}
-				}
-
-				// TODO Timeouts
-				// TODO Retry
-				// TODO SessionPersistence
+			if !hostnamesIntersect(listener.Hostname, route.Spec.Hostnames) {
+				klog.V(4).Infof("HTTPRoute %s/%s hostnames do not intersect with Gateway %s/%s Listener %s hostname, skipping", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
+				continue // Skip this route for this listener if hostnames don't intersect
 			}
 
-			resources[resourcev3.RouteType] = append(resources[resourcev3.RouteType], &routev3.Route{})
-			resources[resourcev3.ClusterType] = append(resources[resourcev3.ClusterType], &clusterv3.Cluster{})
+			routeEnvoyResources, err := translateHTTPRouteToEnvoyResources(c.serviceLister, route)
+			if err != nil {
+				klog.Errorf("Error translating HTTPRoute %s/%s: %v", route.Namespace, route.Name, err)
+				continue // Skip this route if translation fails
+			}
+
+			// Merge the translated resources into the main map
+			mergeEnvoyResources(resources, routeEnvoyResources)
+
 		}
 
 		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
@@ -276,4 +265,78 @@ func (c *Controller) getGRPCRoutesForListener(gw *gatewayv1.Gateway, listener ga
 	}
 
 	return matchingRoutes
+}
+
+// mergeEnvoyResources merges resources generated for a specific route (source)
+// into the main resource map (target).
+func mergeEnvoyResources(target map[resourcev3.Type][]envoyproxytypes.Resource, source map[resourcev3.Type][]interface{}) {
+	for resType, resList := range source {
+		if _, ok := target[resType]; !ok {
+			target[resType] = []envoyproxytypes.Resource{}
+		}
+		// Convert []interface{} to []envoyproxytypes.Resource
+		for _, res := range resList {
+			if envoyRes, ok := res.(envoyproxytypes.Resource); ok {
+				target[resType] = append(target[resType], envoyRes)
+			} else {
+				klog.Warningf("Translated resource is not of type envoyproxytypes.Resource: %T", res)
+			}
+		}
+	}
+}
+
+// hostnameMatches checks if a route hostname matches a listener hostname according to Gateway API rules.
+func hostnameMatches(listenerHostname, routeHostname gatewayv1.Hostname) bool {
+	lh := string(listenerHostname)
+	rh := string(routeHostname)
+
+	// Exact match
+	if lh == rh {
+		return true
+	}
+
+	// Wildcard listener
+	if strings.HasPrefix(lh, "*.") {
+		listenerDomain := lh[1:] // .example.com
+		if strings.HasPrefix(rh, "*.") {
+			// Both are wildcards, check if domains suffix match each other
+			routeDomain := rh[1:]
+			return strings.HasSuffix(listenerDomain, routeDomain) || strings.HasSuffix(routeDomain, listenerDomain)
+		}
+		// Route is not wildcard, check if it's a suffix and not the domain itself (e.g., *.com does not match com)
+		return strings.HasSuffix(rh, listenerDomain) && rh != listenerDomain[1:]
+	}
+
+	// Wildcard route
+	if strings.HasPrefix(rh, "*.") {
+		// Listener is not wildcard, check if it's a suffix and not the domain itself
+		routeDomain := rh[1:] // .example.com
+		return strings.HasSuffix(lh, routeDomain) && lh != routeDomain[1:]
+	}
+
+	// No wildcards involved, and not an exact match
+	return false
+}
+
+// hostnamesIntersect checks if any route hostname intersects with the listener hostname.
+func hostnamesIntersect(listenerHostname *gatewayv1.Hostname, routeHostnames []gatewayv1.Hostname) bool {
+	// If the route specifies no hostnames, it implicitly matches any listener hostname.
+	if len(routeHostnames) == 0 {
+		return true
+	}
+
+	// If the listener specifies no hostname, it implicitly matches any route hostname.
+	if listenerHostname == nil || *listenerHostname == "" {
+		return true
+	}
+
+	lh := *listenerHostname
+	for _, rh := range routeHostnames {
+		if hostnameMatches(lh, rh) {
+			return true // Found an intersection
+		}
+	}
+
+	// No intersection found
+	return false
 }

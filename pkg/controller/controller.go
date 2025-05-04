@@ -280,6 +280,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		clusterName,
 		gwClient,
 		sharedInformers.Core().V1().Namespaces(),
+		sharedInformers.Core().V1().Services(),
 		sharedGwInformers.Gateway().V1().Gateways(),
 		sharedGwInformers.Gateway().V1().HTTPRoutes(),
 		sharedGwInformers.Gateway().V1().GRPCRoutes(),

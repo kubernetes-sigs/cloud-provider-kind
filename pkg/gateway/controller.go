@@ -64,6 +64,9 @@ type Controller struct {
 	namespaceLister       corev1listers.NamespaceLister
 	namespaceListerSynced cache.InformerSynced
 
+	serviceLister       corev1listers.ServiceLister
+	serviceListerSynced cache.InformerSynced
+
 	gatewayLister       gatewaylisters.GatewayLister
 	gatewayListerSynced cache.InformerSynced
 	gatewayqueue        workqueue.TypedRateLimitingInterface[string]
@@ -88,6 +91,7 @@ func New(
 	clusterName string,
 	gwClient *gatewayclient.Clientset,
 	namespaceInformer corev1informers.NamespaceInformer,
+	serviceInformer corev1informers.ServiceInformer,
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
@@ -96,6 +100,8 @@ func New(
 		clusterName:           clusterName,
 		namespaceLister:       namespaceInformer.Lister(),
 		namespaceListerSynced: namespaceInformer.Informer().HasSynced,
+		serviceLister:         serviceInformer.Lister(),
+		serviceListerSynced:   serviceInformer.Informer().HasSynced,
 		gwClient:              gwClient,
 		gatewayLister:         gatewayInformer.Lister(),
 		gatewayListerSynced:   gatewayInformer.Informer().HasSynced,
@@ -326,7 +332,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	klog.Info("Starting Gateway API controller")
 
 	// Wait for all involved caches to be synced, before processing items from the queue is started
-	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(), c.gatewayListerSynced, c.httprouteListerSynced, c.grpcrouteListerSynced, c.namespaceListerSynced) {
+	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(),
+		c.gatewayListerSynced,
+		c.httprouteListerSynced,
+		c.grpcrouteListerSynced,
+		c.namespaceListerSynced,
+		c.serviceListerSynced,
+	) {
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
 
