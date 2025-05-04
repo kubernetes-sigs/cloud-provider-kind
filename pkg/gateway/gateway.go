@@ -130,7 +130,7 @@ func (c *Controller) syncGateway(key string) error {
 			Name: string(listener.Name),
 			Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
 				Protocol: envoyProto,
-				Address:  "0.0.0.0", // Or "::" for IPv6, or specific IP if needed
+				Address:  "::",
 				PortSpecifier: &corev3.SocketAddress_PortValue{
 					PortValue: uint32(listener.Port),
 				},

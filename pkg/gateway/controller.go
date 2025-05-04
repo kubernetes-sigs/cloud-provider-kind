@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
@@ -273,7 +274,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	klog.Info("Starting Envoy proxy controller")
 	// Create a cache
 	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
-	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, nil)
+	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{})
 
 	var grpcOptions []grpc.ServerOption
 	grpcOptions = append(grpcOptions,
@@ -518,5 +519,63 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
 	}
 	klog.V(4).Infof("Updated snapshot cache with resource snapshot...")
+	return nil
+}
+
+var _ serverv3.Callbacks = xdsCallbacks{}
+
+// xdsCallbacks provides logging for Envoy connections.
+type xdsCallbacks struct{}
+
+// OnStreamOpen is called when a new stream is opened.
+func (cb xdsCallbacks) OnStreamOpen(ctx context.Context, id int64, typ string) error {
+	klog.V(2).Infof("xDS stream %d opened for type %s", id, typ)
+	return nil
+}
+
+// OnStreamClosed is called when a stream is closed.
+func (cb xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
+	nodeID := "unknown"
+	if node != nil {
+		nodeID = node.GetId()
+	}
+	klog.V(2).Infof("xDS stream %d closed for node %s", id, nodeID)
+}
+
+// OnStreamRequest is called when a request is received on a stream.
+func (cb xdsCallbacks) OnStreamRequest(id int64, req *discoveryv3.DiscoveryRequest) error {
+	klog.V(5).Infof("xDS stream %d received request for type %s from node %s", id, req.TypeUrl, req.Node.GetId())
+	return nil
+}
+
+// OnStreamResponse is called when a response is sent on a stream.
+func (cb xdsCallbacks) OnStreamResponse(ctx context.Context, id int64, req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
+	klog.V(5).Infof("xDS stream %d sent response for type %s to node %s", id, resp.TypeUrl, req.Node.GetId())
+}
+
+// OnFetchRequest is called when a fetch request is received.
+func (cb xdsCallbacks) OnFetchRequest(ctx context.Context, req *discoveryv3.DiscoveryRequest) error {
+	klog.V(5).Infof("xDS fetch request received for type %s from node %s", req.TypeUrl, req.Node.GetId())
+	return nil
+}
+
+// OnFetchResponse is called when a fetch response is sent.
+func (cb xdsCallbacks) OnFetchResponse(req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
+	klog.V(5).Infof("xDS fetch response sent for type %s to node %s", resp.TypeUrl, req.Node.GetId())
+}
+
+// OnStreamDeltaRequest is called when a delta stream is closed.
+func (cb xdsCallbacks) OnStreamDeltaRequest(id int64, req *discoveryv3.DeltaDiscoveryRequest) error {
+	return nil
+}
+
+// OnStreamDeltaResponse is called when a delta stream is closed.
+func (cb xdsCallbacks) OnStreamDeltaResponse(id int64, req *discoveryv3.DeltaDiscoveryRequest, resp *discoveryv3.DeltaDiscoveryResponse) {
+}
+
+func (cb xdsCallbacks) OnDeltaStreamClosed(int64, *corev3.Node) {
+
+}
+func (cb xdsCallbacks) OnDeltaStreamOpen(context.Context, int64, string) error {
 	return nil
 }
