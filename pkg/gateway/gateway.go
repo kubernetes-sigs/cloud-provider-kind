@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
@@ -79,9 +81,31 @@ func (c *Controller) syncGateway(key string) error {
 			return err
 		}
 	}
-
 	// Update configuration
 	newGw := gw.DeepCopy()
+	ipv4, ipv6, err := container.IPs(containerName)
+	if err != nil {
+		if strings.Contains(err.Error(), "failed to get container details") {
+			return err
+		}
+		return err
+	}
+	newGw.Status.Addresses = []gatewayv1.GatewayStatusAddress{}
+	if net.ParseIP(ipv4) != nil {
+		newGw.Status.Addresses = append(newGw.Status.Addresses,
+			gatewayv1.GatewayStatusAddress{
+				Type:  ptr.To(gatewayv1.IPAddressType),
+				Value: ipv4,
+			})
+	}
+	if net.ParseIP(ipv6) != nil {
+		newGw.Status.Addresses = append(newGw.Status.Addresses,
+			gatewayv1.GatewayStatusAddress{
+				Type:  ptr.To(gatewayv1.IPAddressType),
+				Value: ipv6,
+			})
+	}
+
 	resources := map[resourcev3.Type][]envoyproxytypes.Resource{}
 	newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
