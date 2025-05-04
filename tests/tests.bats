@@ -72,23 +72,52 @@
 }
 
 @test "Simple Gateway" {
+    # Apply the Gateway and HTTPRoute manifests
     kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
-    kubectl wait --for=condition=ready pods -l app=MyApp
-    for i in {1..5}
-    do
-        IP=$(kubectl get gateway multiprotocol --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
-        [[ ! -z "$IP" ]] && break || sleep 1
-    done
-    echo "IP: $IP"
-    POD=$(kubectl get pod -l app=MyApp -o jsonpath='{.items[0].metadata.name}')
-    echo "Pod $POD"
-    for i in {1..5}
-    do
-        HOSTNAME=$(curl -s http://${IP}:80/hostname || true)
-        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
-    done
-    echo "Hostname via TCP: $HOSTNAME"
-    [  "$HOSTNAME" = "$POD" ]
 
-    kubectl delete -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+    # Wait for the backend application pod to be ready
+    kubectl wait --for=condition=ready pods -l app=MyApp --timeout=60s
+
+    # Retry loop to get the Gateway's external IP address
+    for i in {1..10}
+    do
+        # Fetch the IP address assigned by the load balancer to the Gateway
+        IP=$(kubectl get gateway my-gateway --output jsonpath='{.status.addresses[0].value}' 2>/dev/null) # Assuming Gateway name is 'my-gateway' and uses .status.addresses
+        # Check if IP is not empty and break the loop if found
+        [[ ! -z "$IP" ]] && break || sleep 5
+    done
+    # Fail the test if IP is still empty after retries
+    if [[ -z "$IP" ]]; then
+      echo "Failed to get Gateway IP address"
+      kubectl logs -n kube-system -l control-plane=controller-manager # Example log command, adjust as needed
+      return 1
+    fi
+    echo "Gateway IP: $IP"
+
+    # Get the name of the backend pod
+    POD=$(kubectl get pod -l app=MyApp -o jsonpath='{.items[0].metadata.name}')
+    echo "Backend Pod: $POD"
+
+    # Retry loop to curl the backend service through the Gateway IP
+    for i in {1..10}
+    do
+        # Curl the /hostname endpoint via the Gateway IP, ignore failures temporarily
+        HOSTNAME=$(curl -s --connect-timeout 5 http://${IP}:80/hostname || true)
+        # Check if HOSTNAME is not empty and break the loop if successful
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 5
+    done
+     # Fail the test if HOSTNAME is still empty after retries
+    if [[ -z "$HOSTNAME" ]]; then
+      echo "Failed to get hostname via Gateway"
+      return 1
+    fi
+    echo "Hostname via Gateway (TCP): $HOSTNAME"
+
+    # Assert that the hostname returned by the service matches the actual pod name
+    [ "$HOSTNAME" = "$POD" ]
+
+    # Cleanup: Delete the applied manifests
+    # Use --ignore-not-found to avoid errors if cleanup runs multiple times or resources are already gone
+    kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
 }
+
