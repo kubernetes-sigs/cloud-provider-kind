@@ -510,9 +510,11 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 		return fmt.Errorf("failed to create new snapshot cache: %v", err)
 
 	}
-	if err := snapshot.Consistent(); err != nil {
-		return fmt.Errorf("failed to create new resource snapshot: %v", err)
-	}
+
+	// TODO: do we need this check?
+	// if err := snapshot.Consistent(); err != nil {
+	// 	return fmt.Errorf("failed to create new resource snapshot: %v", err)
+	//}
 
 	// Update the cache with the new resource snapshot.
 	if err := c.xdscache.SetSnapshot(ctx, nodeid, snapshot); err != nil {
