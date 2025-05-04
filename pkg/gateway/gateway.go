@@ -7,8 +7,6 @@ import (
 	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -117,25 +115,14 @@ func (c *Controller) syncGateway(key string) error {
 
 	lisStatus := make([]gatewayv1.ListenerStatus, len(gw.Spec.Listeners))
 	for i, listener := range gw.Spec.Listeners {
-		// Determine the Envoy protocol based on the Gateway API protocol
-		var envoyProto corev3.SocketAddress_Protocol
-		switch listener.Protocol {
-		case gatewayv1.UDPProtocolType:
-			envoyProto = corev3.SocketAddress_UDP
-		default: // TCP, HTTP, HTTPS, TLS all use TCP at the transport layer
-			envoyProto = corev3.SocketAddress_TCP
+		envoyListener, err := translateListenerToEnvoyListener(listener)
+		if err != nil {
+			klog.Errorf("Error translating listener %s: %v", listener.Name, err)
+			// TODO: Set appropriate listener condition
+			continue
 		}
 
-		resources[resourcev3.ListenerType] = append(resources[resourcev3.ListenerType], &listenerv3.Listener{
-			Name: string(listener.Name),
-			Address: &corev3.Address{Address: &corev3.Address_SocketAddress{SocketAddress: &corev3.SocketAddress{
-				Protocol: envoyProto,
-				Address:  "::",
-				PortSpecifier: &corev3.SocketAddress_PortValue{
-					PortValue: uint32(listener.Port),
-				},
-			}}},
-		})
+		mergeEnvoyResources(resources, envoyListener)
 
 		// Process HTTP Routes
 		var attachedRoutes int32
@@ -156,7 +143,6 @@ func (c *Controller) syncGateway(key string) error {
 
 			// Merge the translated resources into the main map
 			mergeEnvoyResources(resources, routeEnvoyResources)
-
 		}
 
 		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
