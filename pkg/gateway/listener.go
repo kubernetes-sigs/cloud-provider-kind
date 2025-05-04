@@ -72,12 +72,19 @@ func translateListenerToEnvoyListener(listener gatewayv1.Listener) (map[resource
 				},
 			},
 			HttpFilters: []*hcmv3.HttpFilter{
+				// The router filter must be the last in the chain
 				{
-					Name: wellknown.Router, // The router filter must be the last in the chain
+					Name: wellknown.Router,
+					ConfigType: &hcmv3.HttpFilter_TypedConfig{
+						TypedConfig: &anypb.Any{
+							// Empty config for the router filter
+							TypeUrl: "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+						},
+					},
 				},
 			},
 		}
-		pbst, err := anypb.New(httpConnectionManager)
+		hcmAny, err := anypb.New(httpConnectionManager)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +92,7 @@ func translateListenerToEnvoyListener(listener gatewayv1.Listener) (map[resource
 			Filters: []*listenerv3.Filter{{
 				Name: wellknown.HTTPConnectionManager,
 				ConfigType: &listenerv3.Filter_TypedConfig{
-					TypedConfig: pbst,
+					TypedConfig: hcmAny,
 				},
 			}},
 		}}
