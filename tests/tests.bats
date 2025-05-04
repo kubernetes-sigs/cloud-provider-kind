@@ -82,14 +82,13 @@
     for i in {1..10}
     do
         # Fetch the IP address assigned by the load balancer to the Gateway
-        IP=$(kubectl get gateway my-gateway --output jsonpath='{.status.addresses[0].value}' 2>/dev/null) # Assuming Gateway name is 'my-gateway' and uses .status.addresses
+        IP=$(kubectl get gateway prod-web --output jsonpath='{.status.addresses[0].value}' 2>/dev/null)
         # Check if IP is not empty and break the loop if found
-        [[ ! -z "$IP" ]] && break || sleep 5
+        [[ ! -z "$IP" ]] && break || sleep 1
     done
     # Fail the test if IP is still empty after retries
     if [[ -z "$IP" ]]; then
       echo "Failed to get Gateway IP address"
-      kubectl logs -n kube-system -l control-plane=controller-manager # Example log command, adjust as needed
       return 1
     fi
     echo "Gateway IP: $IP"
@@ -104,7 +103,7 @@
         # Curl the /hostname endpoint via the Gateway IP, ignore failures temporarily
         HOSTNAME=$(curl -s --connect-timeout 5 http://${IP}:80/hostname || true)
         # Check if HOSTNAME is not empty and break the loop if successful
-        [[ ! -z "$HOSTNAME" ]] && break || sleep 5
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
     done
      # Fail the test if HOSTNAME is still empty after retries
     if [[ -z "$HOSTNAME" ]]; then
@@ -117,7 +116,5 @@
     [ "$HOSTNAME" = "$POD" ]
 
     # Cleanup: Delete the applied manifests
-    # Use --ignore-not-found to avoid errors if cleanup runs multiple times or resources are already gone
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
 }
-
