@@ -9,6 +9,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -88,29 +89,37 @@ func translateListenerToEnvoyListener(listener gatewayv1.Listener) (map[resource
 		if err != nil {
 			return nil, err
 		}
-		envoyListener.FilterChains = []*listenerv3.FilterChain{{
+		filterChain := &listenerv3.FilterChain{
 			Filters: []*listenerv3.Filter{{
 				Name: wellknown.HTTPConnectionManager,
 				ConfigType: &listenerv3.Filter_TypedConfig{
 					TypedConfig: hcmAny,
 				},
 			}},
-		}}
+		}
+
+		// Add SNI matching if a hostname is specified
+		if listener.Hostname != nil && *listener.Hostname != "" {
+			filterChain.FilterChainMatch = &listenerv3.FilterChainMatch{
+				ServerNames: []string{string(*listener.Hostname)},
+			}
+		}
 
 		if listener.Protocol == gatewayv1.HTTPSProtocolType || listener.TLS != nil {
 			// Configure TLS if it's an HTTPS listener or TLS is explicitly configured
-			/*
-				tlsContext := buildDownstreamTLSContext(listener)
-					pbst, err := anypb.New(tlsContext)
-					if err != nil {
-						return nil, err
-					}
-						envoyListener.TransportSocket = &corev3.TransportSocket{
-							Name:   wellknown.TransportSocketTls,
-							Config: pbst, // Use Config instead of TypedConfig directly
-						}
-			*/
+			tlsContext := buildDownstreamTLSContext(listener)
+			pbst, err := anypb.New(tlsContext)
+			if err != nil {
+				return nil, err
+			}
+			filterChain.TransportSocket = &corev3.TransportSocket{
+				Name: wellknown.TransportSocketTls,
+				ConfigType: &corev3.TransportSocket_TypedConfig{
+					TypedConfig: pbst,
+				},
+			}
 		}
+		envoyListener.FilterChains = []*listenerv3.FilterChain{filterChain}
 
 	case gatewayv1.TCPProtocolType:
 		// TCP listener needs a pass-through filter
@@ -182,53 +191,42 @@ func translateListenerToEnvoyListener(listener gatewayv1.Listener) (map[resource
 }
 
 func buildDownstreamTLSContext(listener gatewayv1.Listener) *tlsv3.DownstreamTlsContext {
-	downstreamTLSContext := &tlsv3.DownstreamTlsContext{}
+	if listener.TLS == nil {
+		return &tlsv3.DownstreamTlsContext{}
+	}
 
-	/*
-		if listener.TLS != nil {
-			if listener.TLS.CertificateRefs != nil {
-				for _, certRef := range listener.TLS.CertificateRefs {
-					if certRef.Kind == "Secret" && *certRef.Group == "" { // Assuming corev1.Secret in the same namespace
-						downstreamTLSContext.CommonTlsContext = &corev3.CommonTlsContext{
-							TlsCertificates: []*corev3.TlsCertificate{{
-								CertificateChain: &corev3.DataSource{
-									Specifier: &corev3.DataSource_Secret{
-										Secret: &corev3.SecretDataSource{
-											Name: string(certRef.Name),
-										},
-									},
-								},
-								PrivateKey: &corev3.DataSource{
-									Specifier: &corev3.DataSource_Secret{
-										Secret: &corev3.SecretDataSource{
-											Name: string(certRef.Name),
-										},
-									},
-								},
-							}},
-						}
-						// Basic SNI configuration based on hostname in the listener
-						if len(listener.Hostname) > 0 {
-							downstreamTLSContext.CommonTlsContext.SniMatchers = []*corev3.StringMatcher{{
-								MatchPattern: &corev3.StringMatcher_Exact{Exact: string(listener.Hostname)},
-							}}
-						}
-						break // For now, just take the first valid certificate ref
-					}
-					// Handle other kinds and groups if needed
-				}
-			}
+	downstreamTLSContext := &tlsv3.DownstreamTlsContext{
+		CommonTlsContext: &tlsv3.CommonTlsContext{},
+	}
 
-			if listener.TLS.Mode != nil && *listener.TLS.Mode == gatewayv1.TLSModeTerminate {
-				downstreamTLSContext.RequireClientCertificate = false // Or true based on your requirements
+	if listener.TLS.CertificateRefs != nil {
+		for _, certRef := range listener.TLS.CertificateRefs {
+			// Check Kind: Default is "Secret"
+			refKind := gatewayv1.Kind("Secret")
+			if certRef.Kind != nil {
+				refKind = *certRef.Kind
 			}
-			// Add other TLS context configurations as needed (e.g., ALPN protocols)
-			if listener.Protocol == gatewayv1.HTTPSProtocolType {
-				downstreamTLSContext.CommonTlsContext.AlpnProtocols = []string{"h2", "http/1.1"}
-			} else if listener.TLS != nil && len(listener.TLS.AlpnProtocols) > 0 {
-				downstreamTLSContext.CommonTlsContext.AlpnProtocols = listener.TLS.AlpnProtocols
+			// Check Group: Default is "" (core group)
+			refGroup := gatewayv1.Group("")
+			if certRef.Group != nil {
+				refGroup = *certRef.Group
 			}
+			if refKind == "Secret" && refGroup == "" {
+				downstreamTLSContext.CommonTlsContext.TlsCertificates = []*tlsv3.TlsCertificate{{
+					CertificateChain: &corev3.DataSource{},
+					PrivateKey:       &corev3.DataSource{},
+				}}
+				break // For now, just take the first valid certificate ref
+			}
+			// Handle other kinds and groups if needed
 		}
-	*/
+	}
+
+	if listener.TLS.Mode != nil && *listener.TLS.Mode == gatewayv1.TLSModeTerminate {
+		downstreamTLSContext.RequireClientCertificate = &wrapperspb.BoolValue{
+			Value: true,
+		}
+	}
+
 	return downstreamTLSContext
 }
