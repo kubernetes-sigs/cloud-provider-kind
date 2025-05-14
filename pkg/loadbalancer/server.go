@@ -19,10 +19,11 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	"sigs.k8s.io/cloud-provider-kind/pkg/images"
+	"sigs.k8s.io/cloud-provider-kind/pkg/tunnels"
 )
 
 type Server struct {
-	tunnelManager *tunnelManager
+	tunnelManager *tunnels.TunnelManager
 }
 
 var _ cloudprovider.LoadBalancer = &Server{}
@@ -31,7 +32,7 @@ func NewServer() cloudprovider.LoadBalancer {
 	s := &Server{}
 
 	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel {
-		s.tunnelManager = NewTunnelManager()
+		s.tunnelManager = tunnels.NewTunnelManager()
 	}
 	return s
 }
@@ -119,7 +120,7 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 	// on some platforms that run containers in VMs forward from userspace
 	if s.tunnelManager != nil {
 		klog.V(2).Infof("updating loadbalancer tunnels on userspace")
-		err = s.tunnelManager.setupTunnels(loadBalancerName(clusterName, service))
+		err = s.tunnelManager.SetupTunnels(loadBalancerName(clusterName, service))
 		if err != nil {
 			klog.ErrorS(err, "error setting up tunnels")
 		}
@@ -145,7 +146,7 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 	containerName := loadBalancerName(clusterName, service)
 	var err1, err2 error
 	if s.tunnelManager != nil {
-		err1 = s.tunnelManager.removeTunnels(containerName)
+		err1 = s.tunnelManager.RemoveTunnels(containerName)
 	}
 	// Before deleting the load balancer store the logs if required
 	if config.DefaultConfig.EnableLogDump {

@@ -30,7 +30,6 @@ lint:
 update:
 	go mod tidy
 
-
 # get image name from directory we're building
 IMAGE_NAME?=cloud-provider-kind
 # docker image registry, default to upstream
