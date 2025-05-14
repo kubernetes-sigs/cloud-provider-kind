@@ -28,7 +28,7 @@ lint:
 	hack/lint.sh
 
 update:
-	go mod tidy && go mod vendor
+	go mod tidy
 
 
 # get image name from directory we're building
