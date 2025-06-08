@@ -239,8 +239,8 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 	// Publish all ports in the host in random ports
 	args = append(args, "--publish-all")
 
-	if ip, ok := service.Annotations["cloud-provider-kind.sigs.k8s.io/load-balancer-ip-address"]; ok && ip != "" {
-		args = append(args, "--ip", ip)
+	if service.Spec.LoadBalancerIP != "" {
+		args = append(args, "--ip", service.Spec.LoadBalancerIP)
 	}
 
 	args = append(args, image)
