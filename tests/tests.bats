@@ -72,8 +72,8 @@
 }
 
 @test "Static LoadBalancerIP" {
-    # the static IP must be part of the docker network 'kind' - calculate the .100 IP from the network
-    SUBNET=$(docker network inspect kind --format '{{(index .IPAM.Config 0).Subnet}}')
+    # the static IP must be part of the docker network 'kind' - calculate the .100 IP from the kind IPv4 network
+    SUBNET=$(docker network inspect kind --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
     STATIC_IP=$(echo "$SUBNET" | awk -F'[./]' '{printf "%s.%s.%s.100", $1, $2, $3}')
 
     echo "Using static IP: $STATIC_IP"
