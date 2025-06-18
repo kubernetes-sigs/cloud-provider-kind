@@ -5,4 +5,8 @@
 
 2. Install `kind` https://kind.sigs.k8s.io/
 
-3. Run `bats tests/`
+3. Run the tests:
+```
+bats tests/
+bats tests/custom-network
+```

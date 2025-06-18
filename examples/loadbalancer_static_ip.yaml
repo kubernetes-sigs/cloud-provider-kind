@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: static-ip
+spec:
+  selector:
+    matchLabels:
+      app: static-ip
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: static-ip
+    spec:
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - static-ip
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: static-ip
+          image: registry.k8s.io/e2e-test-images/agnhost:2.39
+          args:
+            - netexec
+            - --http-port=80
+          ports:
+            - name: tcp
+              containerPort: 80
+              protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: static-ip
+spec:
+  type: LoadBalancer
+  loadBalancerIP: REPLACE_WITH_STATIC_IP
+  selector:
+    app: static-ip
+  ports:
+    - name: tcp
+      port: 80
+      targetPort: 80
+      protocol: TCP

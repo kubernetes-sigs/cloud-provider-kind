@@ -25,19 +25,31 @@ jobs:
       - name: Setup Bats and bats libs
         id: setup-bats
         uses: bats-core/bats-action@3.0.0
+
       - name: Bats tests
         shell: bash
         env:
          BATS_LIB_PATH: ${{ steps.setup-bats.outputs.lib-path }}
          TERM: xterm
-        run: bats -o _artifacts tests/
+        run: |
+          bats -o _artifacts tests/
+
+      - name: Bats tests (custom network)
+        shell: bash
+        env:
+          BATS_LIB_PATH: ${{ steps.setup-bats.outputs.lib-path }}
+          TERM: xterm
+        run: |
+          bats -o _artifacts-custom-network tests/custom-network/
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
-          path: ./_artifacts
+          path: |
+            ./_artifacts
+            ./_artifacts-custom-network
  
   bats_mac_tests:
     runs-on: macos-13
