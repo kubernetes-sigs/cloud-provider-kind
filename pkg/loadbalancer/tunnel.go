@@ -120,7 +120,8 @@ func NewTunnel(localIP, localPort, protocol, remoteIP, remotePort string) *tunne
 
 func (t *tunnel) Start() error {
 	klog.Infof("Starting tunnel on %s %s", net.JoinHostPort(t.localIP, t.localPort), t.protocol)
-	if t.protocol == "udp" {
+	switch t.protocol {
+	case "udp":
 		localAddrStr := net.JoinHostPort(t.localIP, t.localPort)
 		udpAddr, err := net.ResolveUDPAddr("udp4", localAddrStr)
 		if err != nil {
@@ -136,8 +137,7 @@ func (t *tunnel) Start() error {
 				}
 			}
 		}()
-
-	} else if t.protocol == "tcp" || t.protocol == "tcp4" || t.protocol == "tcp6" {
+	case "tcp", "tcp4", "tcp6":
 		ln, err := net.Listen(t.protocol, net.JoinHostPort(t.localIP, t.localPort))
 		if err != nil {
 			return err
@@ -166,7 +166,7 @@ func (t *tunnel) Start() error {
 				}()
 			}
 		}()
-	} else {
+	default:
 		return fmt.Errorf("unsupported protocol %s", t.protocol)
 	}
 	return nil
