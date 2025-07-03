@@ -120,7 +120,8 @@ func NewTunnel(localIP, localPort, protocol, remoteIP, remotePort string) *tunne
 
 func (t *tunnel) Start() error {
 	klog.Infof("Starting tunnel on %s %s", net.JoinHostPort(t.localIP, t.localPort), t.protocol)
-	if t.protocol == "udp" {
+	switch t.protocol {
+	case "udp":
 		localAddrStr := net.JoinHostPort(t.localIP, t.localPort)
 		udpAddr, err := net.ResolveUDPAddr("udp4", localAddrStr)
 		if err != nil {
@@ -136,8 +137,7 @@ func (t *tunnel) Start() error {
 				}
 			}
 		}()
-
-	} else {
+	case "tcp", "tcp4", "tcp6":
 		ln, err := net.Listen(t.protocol, net.JoinHostPort(t.localIP, t.localPort))
 		if err != nil {
 			return err
@@ -151,16 +151,23 @@ func (t *tunnel) Start() error {
 				if err != nil {
 					klog.Infof("unexpected error listening: %v", err)
 					return
-				} else {
-					go func() {
-						err := t.handleConnection(conn)
-						if err != nil {
-							klog.Infof("unexpected error on connection: %v", err)
-						}
-					}()
 				}
+				tcpConn, ok := conn.(*net.TCPConn)
+				if !ok {
+					klog.Errorf("unexpected connection type %T, expected *net.TCPConn", conn)
+					conn.Close() // nolint: errcheck
+					continue
+				}
+				go func() {
+					err := t.handleTCPConnection(tcpConn)
+					if err != nil {
+						klog.Infof("unexpected error on connection: %v", err)
+					}
+				}()
 			}
 		}()
+	default:
+		return fmt.Errorf("unsupported protocol %s", t.protocol)
 	}
 	return nil
 }
@@ -175,23 +182,37 @@ func (t *tunnel) Stop() error {
 	return nil
 }
 
-func (t *tunnel) handleConnection(local net.Conn) error {
-	remote, err := net.Dial(t.protocol, net.JoinHostPort(t.remoteIP, t.remotePort))
+func (t *tunnel) handleTCPConnection(local *net.TCPConn) error {
+	tcpAddr, err := net.ResolveTCPAddr(t.protocol, net.JoinHostPort(t.remoteIP, t.remotePort))
+	if err != nil {
+		return fmt.Errorf("can't resolve remote address %q: %v", net.JoinHostPort(t.remoteIP, t.remotePort), err)
+	}
+	remote, err := net.DialTCP(t.protocol, nil, tcpAddr)
 	if err != nil {
 		return fmt.Errorf("can't connect to server %q: %v", net.JoinHostPort(t.remoteIP, t.remotePort), err)
 	}
+
+	// Fully close both connections on return.
 	defer remote.Close()
+	defer local.Close()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		io.Copy(local, remote) // nolint: errcheck
+		// Half-close the remote to local path.
+		local.CloseWrite() // nolint: errcheck
+		remote.CloseRead() // nolint: errcheck
 	}()
 	go func() {
 		defer wg.Done()
 		io.Copy(remote, local) // nolint: errcheck
+		// Half-close the local to remote path.
+		remote.CloseWrite() // nolint: errcheck
+		local.CloseRead()   // nolint: errcheck
 	}()
+
 	wg.Wait()
 	return nil
 }
