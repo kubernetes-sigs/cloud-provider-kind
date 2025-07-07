@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -15,6 +16,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	cloudprovider "k8s.io/cloud-provider"
+	cloudproviderapi "k8s.io/cloud-provider/api"
+
 	nodecontroller "k8s.io/cloud-provider/controllers/node"
 	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
@@ -228,22 +231,32 @@ func startCloudControllerManager(ctx context.Context, clusterName string, kubeCl
 	ctx, cancel := context.WithCancel(ctx)
 	go serviceController.Run(ctx, 5, ccmMetrics)
 
-	// Start the node controller
-	nodeController, err := nodecontroller.NewCloudNodeController(
-		sharedInformers.Core().V1().Nodes(),
-		kubeClient,
-		cloud,
-		30*time.Second,
-		5, // workers
-	)
+	nodeController := &nodecontroller.CloudNodeController{}
+
+	hasCloudProviderTaint, err := getCloudProviderTaint(ctx, clusterName, kubeClient)
 	if err != nil {
-		// This error shouldn't fail. It lives like this as a legacy.
-		klog.Errorf("Failed to start node controller: %v", err)
+		klog.Errorf("Failed get cluster nodes: %v", err)
 		cancel()
 		return nil, err
 	}
-	go nodeController.Run(ctx.Done(), ccmMetrics)
 
+	if hasCloudProviderTaint {
+		// Start the node controller
+		nodeController, err = nodecontroller.NewCloudNodeController(
+			sharedInformers.Core().V1().Nodes(),
+			kubeClient,
+			cloud,
+			30*time.Second,
+			5, // workers
+		)
+		if err != nil {
+			// This error shouldn't fail. It lives like this as a legacy.
+			klog.Errorf("Failed to start node controller: %v", err)
+			cancel()
+			return nil, err
+		}
+		go nodeController.Run(ctx.Done(), ccmMetrics)
+	}
 	sharedInformers.Start(ctx.Done())
 
 	// This has to cleanup all the resources allocated by the cloud provider in this cluster
@@ -300,4 +313,19 @@ func (c *Controller) cleanup() {
 		ccm.cancelFn()
 		delete(c.clusters, cluster)
 	}
+}
+
+func getCloudProviderTaint(ctx context.Context, clusterName string, kubeClient kubernetes.Interface) (bool, error) {
+	nodes, err := kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, fmt.Errorf("failed to list nodes for cluster %s: %w", clusterName, err)
+	}
+	for _, node := range nodes.Items {
+		for _, taint := range node.Spec.Taints {
+			if taint.Key == cloudproviderapi.TaintExternalCloudProvider {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
