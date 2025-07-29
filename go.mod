@@ -8,7 +8,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/lithammer/dedent v1.1.0
 	github.com/pkg/errors v0.9.1
-	k8s.io/api v0.33.2
+	k8s.io/api v0.33.3
 	k8s.io/apimachinery v0.33.3
 	k8s.io/apiserver v0.33.2
 	k8s.io/client-go v0.33.2
