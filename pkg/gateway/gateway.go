@@ -1,17 +1,23 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/durationpb"
+
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -21,16 +27,10 @@ import (
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
-
-	"strings"
-
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// syncToStdout is the business logic of the controller. In this controller it simply prints
-// information about the pod to stdout. In case an error happened, it has to simply return the error.
-// The retry logic should not be part of the business logic.
-func (c *Controller) syncGateway(key string) error {
+func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	startTime := time.Now()
 	defer func() {
 		klog.V(2).Infof("Finished syncing gateway %q (%v)", key, time.Since(startTime))
@@ -42,31 +42,26 @@ func (c *Controller) syncGateway(key string) error {
 	}
 
 	gw, err := c.gatewayLister.Gateways(namespace).Get(name)
-	if err != nil && !apierrors.IsNotFound(err) {
-		klog.Errorf("Fetching object with key %s from store failed with %v", key, err)
-		return err
-	}
-	containerName := gatewayName(c.clusterName, namespace, name)
-
-	// Deleting
 	if apierrors.IsNotFound(err) {
-		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
-		klog.Infof("Gateway %s does not exist anymore, deleting \n", key)
-		c.xdscache.ClearSnapshot(containerName)
+		klog.V(2).Infof("Gateway %s has been deleted, cleaning up resources", key)
+		return c.deleteGatewayResources(ctx, name, namespace)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get gateway %s: %w", key, err)
+	}
 
-		err := container.Delete(containerName)
-		if err != nil {
-			return fmt.Errorf("can not delete container %s for gateway %s/%s on cluster %s : %v", containerName, namespace, name, c.clusterName, err)
-		}
+	if gw.Spec.GatewayClassName != GWClassName {
+		klog.V(2).Infof("Gateway %s is not for this controller, ignoring", key)
 		return nil
 	}
-	// Create or Update
-	klog.Infof("Syncing Gateway %s\n", gw.GetName())
+
+	containerName := gatewayName(c.clusterName, namespace, name)
+	klog.Infof("Syncing Gateway %s, container %s", key, containerName)
+
 	if !container.IsRunning(containerName) {
 		klog.Infof("container %s for gateway is not running", name)
 		if container.Exist(containerName) {
-			err := container.Delete(containerName)
-			if err != nil {
+			if err := container.Delete(containerName); err != nil {
 				return err
 			}
 		}
@@ -78,8 +73,17 @@ func (c *Controller) syncGateway(key string) error {
 		if err != nil {
 			return err
 		}
+
+		time.Sleep(2 * time.Second)
+
+		if err := c.configureContainerNetworking(ctx, containerName); err != nil {
+			if delErr := container.Delete(containerName); delErr != nil {
+				klog.Errorf("failed to delete container %s after networking setup failed: %v", containerName, delErr)
+			}
+			return fmt.Errorf("failed to configure networking for new gateway container %s: %w", containerName, err)
+		}
 	}
-	// Update configuration
+
 	newGw := gw.DeepCopy()
 	ipv4, ipv6, err := container.IPs(containerName)
 	if err != nil {
@@ -88,6 +92,7 @@ func (c *Controller) syncGateway(key string) error {
 		}
 		return err
 	}
+
 	newGw.Status.Addresses = []gatewayv1.GatewayStatusAddress{}
 	if net.ParseIP(ipv4) != nil {
 		newGw.Status.Addresses = append(newGw.Status.Addresses,
@@ -104,100 +109,132 @@ func (c *Controller) syncGateway(key string) error {
 			})
 	}
 
-	resources := map[resourcev3.Type][]envoyproxytypes.Resource{}
-	newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
+	acceptedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
 		Status:             metav1.ConditionTrue,
 		Reason:             string(gatewayv1.GatewayReasonAccepted),
+		Message:            "Gateway is accepted",
 		ObservedGeneration: gw.Generation,
-		LastTransitionTime: metav1.Now(),
-	})
-
-	lisStatus := make([]gatewayv1.ListenerStatus, len(gw.Spec.Listeners))
-	for i, listener := range gw.Spec.Listeners {
-		envoyListener, err := translateListenerToEnvoyListener(listener)
-		if err != nil {
-			klog.Errorf("Error translating listener %s: %v", listener.Name, err)
-			// TODO: Set appropriate listener condition
-			continue
-		}
-
-		mergeEnvoyResources(resources, envoyListener)
-
-		// Process HTTP Routes
-		var attachedRoutes int32
-		// getHTTPRoutesForListener processes parent references on routes
-		for _, route := range c.getHTTPRoutesForListener(gw, listener) {
-			klog.V(2).Infof("Processing http route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
-			// Check hostnames between listener and route
-			if !hostnamesIntersect(listener.Hostname, route.Spec.Hostnames) {
-				klog.V(4).Infof("HTTPRoute %s/%s hostnames do not intersect with Gateway %s/%s Listener %s hostname, skipping", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
-				continue // Skip this route for this listener if hostnames don't intersect
-			}
-
-			routeEnvoyResources, err := translateHTTPRouteToEnvoyResources(c.serviceLister, route)
-			if err != nil {
-				klog.Errorf("Error translating HTTPRoute %s/%s: %v", route.Namespace, route.Name, err)
-				continue // Skip this route if translation fails
-			}
-
-			// Merge the translated resources into the main map
-			mergeEnvoyResources(resources, routeEnvoyResources)
-		}
-
-		for _, route := range c.getGRPCRoutesForListener(gw, listener) {
-			klog.V(2).Infof("Processing grpc route %s/%s for gw %s/%s", route.Namespace, route.Name, gw.Namespace, gw.Name)
-			resources[resourcev3.RouteType] = append(resources[resourcev3.RouteType], &routev3.Route{})
-			resources[resourcev3.ClusterType] = append(resources[resourcev3.ClusterType], &clusterv3.Cluster{})
-		}
-
-		lisStatus[i] = gatewayv1.ListenerStatus{
-			Name:           listener.Name,
-			SupportedKinds: []gatewayv1.RouteGroupKind{{Kind: "HTTPRoute"}},
-			AttachedRoutes: attachedRoutes,
-			Conditions: []metav1.Condition{{
-				Type:               string(gatewayv1.ListenerConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(gatewayv1.ListenerReasonAccepted),
-				ObservedGeneration: gw.Generation,
-				LastTransitionTime: metav1.Now(),
-			}},
-		}
+	}
+	if conditions, ok := UpdateConditionIfChanged(newGw.Status.Conditions, acceptedCondition); ok {
+		newGw.Status.Conditions = conditions
 	}
 
-	err = c.UpdateXDSServer(context.Background(), containerName, resources)
+	envoyResources, listenerStatuses := c.buildEnvoyResourcesForGateway(gw)
+	newGw.Status.Listeners = listenerStatuses
+
+	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
+	programmedCondition := metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionProgrammed),
+		ObservedGeneration: gw.Generation,
+	}
 	if err != nil {
-		newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.GatewayConditionProgrammed),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(gatewayv1.GatewayReasonProgrammed),
-			Message:            err.Error(),
-			ObservedGeneration: gw.Generation,
-			LastTransitionTime: metav1.Now(),
-		})
+		programmedCondition.Status = metav1.ConditionFalse
+		programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
+		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", err.Error())
 	} else {
-		newGw.Status.Conditions, _ = UpdateConditionIfChanged(newGw.Status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.GatewayConditionProgrammed),
-			Status:             metav1.ConditionTrue,
-			Reason:             string(gatewayv1.GatewayReasonProgrammed),
-			ObservedGeneration: gw.Generation,
-			LastTransitionTime: metav1.Now(),
-		})
+		programmedCondition.Status = metav1.ConditionTrue
+		programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
+		programmedCondition.Message = "Envoy configuration updated successfully"
 	}
 
-	newGw.Status.Listeners = lisStatus
+	if conditions, ok := UpdateConditionIfChanged(newGw.Status.Conditions, programmedCondition); ok {
+		newGw.Status.Conditions = conditions
+	}
 
-	_, err = c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(context.Background(), newGw, metav1.UpdateOptions{})
-
+	_, err = c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
 	return err
 }
 
-// getHTTPRoutesForListener returns a slice of HTTPRoutes that reference the given Gateway and listener.
+func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (map[resourcev3.Type][]envoyproxytypes.Resource, []gatewayv1.ListenerStatus) {
+	envoyListeners := []envoyproxytypes.Resource{}
+	envoyRoutes := []envoyproxytypes.Resource{}
+	envoyClusters := make(map[string]envoyproxytypes.Resource)
+	listenerStatuses := make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
+
+	for i, listener := range gateway.Spec.Listeners {
+		var attachedRoutes int32
+		listenerStatus := gatewayv1.ListenerStatus{
+			Name:           listener.Name,
+			SupportedKinds: []gatewayv1.RouteGroupKind{},
+			Conditions:     []metav1.Condition{},
+		}
+
+		virtualHost := &routev3.VirtualHost{
+			Name:    fmt.Sprintf("%s-%s", gateway.Name, listener.Name),
+			Domains: []string{"*"},
+		}
+		if listener.Hostname != nil && *listener.Hostname != "" {
+			virtualHost.Domains = []string{string(*listener.Hostname)}
+		}
+
+		switch listener.Protocol {
+		case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
+			listenerStatus.SupportedKinds = append(listenerStatus.SupportedKinds, gatewayv1.RouteGroupKind{Kind: "HTTPRoute"}, gatewayv1.RouteGroupKind{Kind: "GRPCRoute"})
+			for _, httpRoute := range c.getHTTPRoutesForListener(gateway, listener) {
+				if err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, virtualHost); err == nil {
+					attachedRoutes++
+					for _, rule := range httpRoute.Spec.Rules {
+						for _, backendRef := range rule.BackendRefs {
+							cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef.BackendRef)
+							if err == nil {
+								envoyClusters[cluster.Name] = cluster
+							}
+						}
+					}
+				}
+			}
+			for _, grpcRoute := range c.getGRPCRoutesForListener(gateway, listener) {
+				if err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, virtualHost); err == nil {
+					attachedRoutes++
+					for _, rule := range grpcRoute.Spec.Rules {
+						for _, backendRef := range rule.BackendRefs {
+							cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef.BackendRef)
+							if err == nil {
+								envoyClusters[cluster.Name] = cluster
+							}
+						}
+					}
+				}
+			}
+		default:
+			klog.Warningf("Unsupported listener protocol: %s", listener.Protocol)
+		}
+
+		envoyListener, routeConfig := c.translateListener(gateway, listener, virtualHost)
+		if envoyListener != nil && routeConfig != nil {
+			envoyListeners = append(envoyListeners, envoyListener)
+			envoyRoutes = append(envoyRoutes, routeConfig)
+		}
+
+		listenerStatus.AttachedRoutes = attachedRoutes
+		acceptedCondition := metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.ListenerReasonAccepted),
+			Message:            "Listener is valid",
+			ObservedGeneration: gateway.Generation,
+		}
+		if conditions, ok := UpdateConditionIfChanged(listenerStatus.Conditions, acceptedCondition); ok {
+			listenerStatus.Conditions = conditions
+		}
+		listenerStatuses[i] = listenerStatus
+	}
+
+	clustersSlice := make([]envoyproxytypes.Resource, 0, len(envoyClusters))
+	for _, cluster := range envoyClusters {
+		clustersSlice = append(clustersSlice, cluster)
+	}
+
+	return map[resourcev3.Type][]envoyproxytypes.Resource{
+		resourcev3.ListenerType: envoyListeners,
+		resourcev3.RouteType:    envoyRoutes,
+		resourcev3.ClusterType:  clustersSlice,
+	}, listenerStatuses
+}
+
 func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.HTTPRoute {
 	var matchingRoutes []*gatewayv1.HTTPRoute
-
-	// TODO: optimize this
-	// List all HTTPRoutes in all namespaces
 	httpRoutes, err := c.httprouteLister.List(labels.Everything())
 	if err != nil {
 		klog.Infof("failed to list HTTPRoutes: %v", err)
@@ -205,149 +242,196 @@ func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener ga
 	}
 
 	for _, route := range httpRoutes {
-		// Check 1: Does the route *want* to attach to this specific listener?
-		// This verifies the route's parentRefs target this gateway and listener section/port.
-		if !isRouteReferenced(gw, listener, route) {
-			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: not referenced in ParentRefs", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
-			continue
+		if isRouteReferenced(gw, listener, route) && isRouteAllowed(gw, listener, route, c.namespaceLister) {
+			matchingRoutes = append(matchingRoutes, route)
 		}
-
-		// Check 2: Does the listener *allow* this route to attach?
-		// This verifies listener.spec.allowedRoutes (namespace and kind).
-		// Assumes c.namespaceLister is populated.
-		if !isRouteAllowed(gw, listener, route, c.namespaceLister) {
-			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: denied by AllowedRoutes", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
-			continue
-		}
-
-		// Check 3: Is the route kind compatible with the listener protocol?
-		// For this function specifically getting HTTPRoutes, the listener must accept HTTP or HTTPS.
-		if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
-			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: incompatible listener protocol %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name, listener.Protocol)
-			continue // Skip route if listener protocol isn't HTTP/HTTPS
-		}
-
-		// If all checks pass, add the route
-		matchingRoutes = append(matchingRoutes, route)
-		klog.V(4).Infof("Route %s/%s matched for Gateway %s/%s Listener %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
 	}
-
 	return matchingRoutes
 }
 
-// getGRPCRoutesForListener returns a slice of GRPCRoutes that reference the given Gateway and listener.
 func (c *Controller) getGRPCRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.GRPCRoute {
 	var matchingRoutes []*gatewayv1.GRPCRoute
-
-	// TODO: optimize this
-	// List all GRPCRoutes in all namespaces
 	grpcRoutes, err := c.grpcrouteLister.List(labels.Everything())
 	if err != nil {
 		klog.Infof("failed to list GRPCRoutes: %v", err)
 		return matchingRoutes
 	}
-
 	for _, route := range grpcRoutes {
-		// Check 1: Does the route *want* to attach to this specific listener?
-		// This verifies the route's parentRefs target this gateway and listener section/port.
-		if !isRouteReferenced(gw, listener, route) {
-			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: not referenced in ParentRefs", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
-			continue
+		if isRouteReferenced(gw, listener, route) && isRouteAllowed(gw, listener, route, c.namespaceLister) {
+			matchingRoutes = append(matchingRoutes, route)
 		}
-
-		// Check 2: Does the listener *allow* this route to attach?
-		// This verifies listener.spec.allowedRoutes (namespace and kind).
-		// Assumes c.namespaceLister is populated.
-		if !isRouteAllowed(gw, listener, route, c.namespaceLister) {
-			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: denied by AllowedRoutes", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
-			continue
-		}
-
-		// Check 3: Is the route kind compatible with the listener protocol?
-		// For this function specifically getting HTTPRoutes, the listener must accept HTTP or HTTPS.
-		if listener.Protocol != gatewayv1.HTTPProtocolType && listener.Protocol != gatewayv1.HTTPSProtocolType {
-			klog.V(5).Infof("Route %s/%s skipped for Gateway %s/%s Listener %s: incompatible listener protocol %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name, listener.Protocol)
-			continue // Skip route if listener protocol isn't HTTP/HTTPS
-		}
-
-		// If all checks pass, add the route
-		matchingRoutes = append(matchingRoutes, route)
-		klog.V(4).Infof("Route %s/%s matched for Gateway %s/%s Listener %s", route.Namespace, route.Name, gw.Namespace, gw.Name, listener.Name)
 	}
-
 	return matchingRoutes
 }
 
-// mergeEnvoyResources merges resources generated for a specific route (source)
-// into the main resource map (target).
-func mergeEnvoyResources(target map[resourcev3.Type][]envoyproxytypes.Resource, source map[resourcev3.Type][]interface{}) {
-	for resType, resList := range source {
-		if _, ok := target[resType]; !ok {
-			target[resType] = []envoyproxytypes.Resource{}
+func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backendRef gatewayv1.BackendRef) (*clusterv3.Cluster, error) {
+	ns := defaultNamespace
+	if backendRef.Namespace != nil {
+		ns = string(*backendRef.Namespace)
+	}
+	service, err := c.serviceLister.Services(ns).Get(string(backendRef.Name))
+	if err != nil {
+		return nil, fmt.Errorf("could not find service %s/%s: %w", ns, backendRef.Name, err)
+	}
+
+	clusterName, err := backendRefToClusterName(defaultNamespace, backendRef)
+	if err != nil {
+		return nil, err
+	}
+	return &clusterv3.Cluster{
+		Name:                 clusterName,
+		ConnectTimeout:       durationpb.New(5 * time.Second),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+		LoadAssignment:       createClusterLoadAssignment(clusterName, service.Spec.ClusterIP, uint32(*backendRef.Port)),
+	}, nil
+}
+
+func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace string) error {
+	klog.Infof("Deleting resources for Gateway: %s/%s", namespace, name)
+	containerName := gatewayName(c.clusterName, namespace, name)
+
+	c.xdsVersion.Add(1)
+	version := fmt.Sprintf("%d", c.xdsVersion.Load())
+
+	snapshot, err := cachev3.NewSnapshot(version, map[resourcev3.Type][]envoyproxytypes.Resource{
+		resourcev3.ListenerType: {},
+		resourcev3.RouteType:    {},
+		resourcev3.ClusterType:  {},
+		resourcev3.EndpointType: {},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create empty snapshot for deleted gateway %s: %w", name, err)
+	}
+	if err := c.xdscache.SetSnapshot(ctx, containerName, snapshot); err != nil {
+		return fmt.Errorf("failed to set empty snapshot for deleted gateway %s: %w", name, err)
+	}
+
+	if err := container.Delete(containerName); err != nil {
+		return fmt.Errorf("failed to delete container for gateway %s: %v", name, err)
+	}
+
+	klog.Infof("Successfully cleared resources for deleted Gateway: %s", name)
+	return nil
+}
+
+func createClusterLoadAssignment(clusterName, serviceHost string, servicePort uint32) *endpointv3.ClusterLoadAssignment {
+	return &endpointv3.ClusterLoadAssignment{
+		ClusterName: clusterName,
+		Endpoints: []*endpointv3.LocalityLbEndpoints{
+			{
+				LbEndpoints: []*endpointv3.LbEndpoint{
+					{
+						HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+							Endpoint: &endpointv3.Endpoint{
+								Address: &corev3.Address{
+									Address: &corev3.Address_SocketAddress{
+										SocketAddress: &corev3.SocketAddress{
+											Address: serviceHost,
+											PortSpecifier: &corev3.SocketAddress_PortValue{
+												PortValue: servicePort,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (c *Controller) getClusterNodeIP(ctx context.Context) (string, error) {
+	nodes, err := c.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil || len(nodes.Items) == 0 {
+		return "", fmt.Errorf("failed to list kubernetes nodes: %w", err)
+	}
+
+	var nodeIP string
+	for _, node := range nodes.Items {
+		if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
+			for _, addr := range node.Status.Addresses {
+				if addr.Type == corev1.NodeInternalIP {
+					nodeIP = addr.Address
+					break
+				}
+			}
 		}
-		// Convert []interface{} to []envoyproxytypes.Resource
-		for _, res := range resList {
-			if envoyRes, ok := res.(envoyproxytypes.Resource); ok {
-				target[resType] = append(target[resType], envoyRes)
-			} else {
-				klog.Warningf("Translated resource is not of type envoyproxytypes.Resource: %T", res)
+		if nodeIP != "" {
+			break
+		}
+	}
+	if nodeIP == "" {
+		for _, addr := range nodes.Items[0].Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
+				nodeIP = addr.Address
+				break
 			}
 		}
 	}
+	if nodeIP == "" {
+		return "", fmt.Errorf("no internal IP found for any node to use as a gateway")
+	}
+	return nodeIP, nil
 }
 
-// hostnameMatches checks if a route hostname matches a listener hostname according to Gateway API rules.
-func hostnameMatches(listenerHostname, routeHostname gatewayv1.Hostname) bool {
-	lh := string(listenerHostname)
-	rh := string(routeHostname)
-
-	// Exact match
-	if lh == rh {
-		return true
+func (c *Controller) getServiceCIDRs(ctx context.Context) ([]string, error) {
+	serviceCIDRs, err := c.client.NetworkingV1().ServiceCIDRs().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list servicecidrs: %w. Is the ServiceCIDR feature gate enabled?", err)
+	}
+	if len(serviceCIDRs.Items) == 0 {
+		return nil, fmt.Errorf("no servicecidrs found in the cluster")
 	}
 
-	// Wildcard listener
-	if strings.HasPrefix(lh, "*.") {
-		listenerDomain := lh[1:] // .example.com
-		if strings.HasPrefix(rh, "*.") {
-			// Both are wildcards, check if domains suffix match each other
-			routeDomain := rh[1:]
-			return strings.HasSuffix(listenerDomain, routeDomain) || strings.HasSuffix(routeDomain, listenerDomain)
-		}
-		// Route is not wildcard, check if it's a suffix and not the domain itself (e.g., *.com does not match com)
-		return strings.HasSuffix(rh, listenerDomain) && rh != listenerDomain[1:]
+	var cidrs []string
+	for _, serviceCIDRObject := range serviceCIDRs.Items {
+		cidrs = append(cidrs, serviceCIDRObject.Spec.CIDRs...)
 	}
-
-	// Wildcard route
-	if strings.HasPrefix(rh, "*.") {
-		// Listener is not wildcard, check if it's a suffix and not the domain itself
-		routeDomain := rh[1:] // .example.com
-		return strings.HasSuffix(lh, routeDomain) && lh != routeDomain[1:]
+	if len(cidrs) == 0 {
+		return nil, fmt.Errorf("no CIDRs found in any ServiceCIDR object")
 	}
-
-	// No wildcards involved, and not an exact match
-	return false
+	return cidrs, nil
 }
 
-// hostnamesIntersect checks if any route hostname intersects with the listener hostname.
-func hostnamesIntersect(listenerHostname *gatewayv1.Hostname, routeHostnames []gatewayv1.Hostname) bool {
-	// If the route specifies no hostnames, it implicitly matches any listener hostname.
-	if len(routeHostnames) == 0 {
-		return true
+func (c *Controller) configureContainerNetworking(ctx context.Context, containerName string) error {
+	var stdout, stderr bytes.Buffer
+
+	installCmd := []string{"sh", "-c", "apt-get update && apt-get install -y iproute2"}
+	klog.Infof("Installing iproute2 in container %s", containerName)
+	if err := container.Exec(containerName, installCmd, nil, &stdout, &stderr); err != nil {
+		klog.Warningf("Failed to install iproute2 in container %s, proceeding anyway: %v", containerName, err)
 	}
 
-	// If the listener specifies no hostname, it implicitly matches any route hostname.
-	if listenerHostname == nil || *listenerHostname == "" {
-		return true
+	nodeIP, err := c.getClusterNodeIP(ctx)
+	if err != nil {
+		return err
 	}
 
-	lh := *listenerHostname
-	for _, rh := range routeHostnames {
-		if hostnameMatches(lh, rh) {
-			return true // Found an intersection
+	serviceCIDRs, err := c.client.NetworkingV1().ServiceCIDRs().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list servicecidrs: %w", err)
+	}
+	if len(serviceCIDRs.Items) == 0 {
+		return fmt.Errorf("no servicecidrs found in the cluster")
+	}
+
+	var routesAdded int
+	for _, serviceCIDRObject := range serviceCIDRs.Items {
+		for _, cidr := range serviceCIDRObject.Spec.CIDRs {
+			cmd := []string{"ip", "route", "replace", cidr, "via", nodeIP}
+			klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
+			if err := container.Exec(containerName, cmd, nil, &stdout, &stderr); err != nil {
+				return fmt.Errorf("failed to add route '%s' to container %s: %w", strings.Join(cmd, " "), containerName, err)
+			}
+			routesAdded++
 		}
 	}
 
-	// No intersection found
-	return false
+	if routesAdded == 0 {
+		return fmt.Errorf("no valid service CIDRs found to configure routing")
+	}
+
+	return nil
 }

@@ -1,232 +1,238 @@
 package gateway
 
 import (
+	"fmt"
+
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	udpproxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/udp/udp_proxy/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
-	"google.golang.org/protobuf/types/known/wrapperspb"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// translateListenerToEnvoyListener translates a Gateway API Listener
-// into a map of Envoy resources. Currently, it focuses on creating
-// an Envoy Listener resource.
-func translateListenerToEnvoyListener(listener gatewayv1.Listener) (map[resourcev3.Type][]interface{}, error) {
-	resources := make(map[resourcev3.Type][]interface{})
-
-	// Determine the Envoy protocol based on the Gateway API protocol
-	var envoyProto corev3.SocketAddress_Protocol
-	switch listener.Protocol {
-	case gatewayv1.UDPProtocolType:
-		envoyProto = corev3.SocketAddress_UDP
-	default: // TCP, HTTP, HTTPS, TLS all use TCP at the transport layer
-		envoyProto = corev3.SocketAddress_TCP
+// translateListener translates a Gateway API Listener and its associated routes into an Envoy Listener and RouteConfiguration.
+func (c *Controller) translateListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, virtualHost *routev3.VirtualHost) (*listenerv3.Listener, *routev3.RouteConfiguration) {
+	routeConfigName := fmt.Sprintf("%s-%s", gateway.Name, listener.Name)
+	routeConfiguration := &routev3.RouteConfiguration{
+		Name:         routeConfigName,
+		VirtualHosts: []*routev3.VirtualHost{virtualHost},
 	}
 
 	envoyListener := &listenerv3.Listener{
-		Name: string(listener.Name),
-		Address: &corev3.Address{
-			Address: &corev3.Address_SocketAddress{
-				SocketAddress: &corev3.SocketAddress{
-					Protocol: envoyProto,
-					Address:  "::", // Listen on all interfaces (IPv6 and IPv4)
-					PortSpecifier: &corev3.SocketAddress_PortValue{
-						PortValue: uint32(listener.Port),
-					},
+		Name:    routeConfigName,
+		Address: &corev3.Address{},
+	}
+
+	var protocol corev3.SocketAddress_Protocol
+	switch listener.Protocol {
+	case gatewayv1.UDPProtocolType:
+		protocol = corev3.SocketAddress_UDP
+	default:
+		protocol = corev3.SocketAddress_TCP
+	}
+
+	envoyListener.Address = &corev3.Address{
+		Address: &corev3.Address_SocketAddress{
+			SocketAddress: &corev3.SocketAddress{
+				Protocol: protocol,
+				Address:  "0.0.0.0",
+				PortSpecifier: &corev3.SocketAddress_PortValue{
+					PortValue: uint32(listener.Port),
 				},
 			},
 		},
 	}
 
-	// Configure filters based on the Listener protocol
 	switch listener.Protocol {
 	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-		// HTTP/HTTPS listener needs an HTTP connection manager filter
+		routerProto := &routerv3.Router{}
+		routerAny, err := anypb.New(routerProto)
+		if err != nil {
+			klog.Errorf("Failed to marshal router config: %v", err)
+			return nil, nil
+		}
+
 		httpConnectionManager := &hcmv3.HttpConnectionManager{
-			StatPrefix: string(listener.Name),
-			// The RouteConfig will be dynamically discovered via RDS
+			StatPrefix: routeConfigName,
 			RouteSpecifier: &hcmv3.HttpConnectionManager_Rds{
 				Rds: &hcmv3.Rds{
 					ConfigSource: &corev3.ConfigSource{
-						ConfigSourceSpecifier: &corev3.ConfigSource_ApiConfigSource{
-							ApiConfigSource: &corev3.ApiConfigSource{
-								ApiType: corev3.ApiConfigSource_GRPC,
-								GrpcServices: []*corev3.GrpcService{
-									{
-										TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-											EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-												ClusterName: "xds_cluster", // This should be the name of your xDS cluster
-											},
-										},
-									},
-								},
-							},
+						ResourceApiVersion: corev3.ApiVersion_V3,
+						ConfigSourceSpecifier: &corev3.ConfigSource_Ads{
+							Ads: &corev3.AggregatedConfigSource{},
 						},
-						InitialFetchTimeout: nil, // Rely on defaults or configure as needed
 					},
-					RouteConfigName: string(listener.Name), // Use the listener name as the RDS config name
+					RouteConfigName: routeConfigName,
 				},
 			},
 			HttpFilters: []*hcmv3.HttpFilter{
-				// The router filter must be the last in the chain
 				{
-					Name: wellknown.Router,
+					Name: "envoy.filters.http.router",
 					ConfigType: &hcmv3.HttpFilter_TypedConfig{
-						TypedConfig: &anypb.Any{
-							// Empty config for the router filter
-							TypeUrl: "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
-						},
+						TypedConfig: routerAny,
 					},
 				},
 			},
 		}
+
 		hcmAny, err := anypb.New(httpConnectionManager)
 		if err != nil {
-			return nil, err
+			klog.Errorf("Failed to marshal HttpConnectionManager: %v", err)
+			return nil, nil
 		}
+
 		filterChain := &listenerv3.FilterChain{
 			Filters: []*listenerv3.Filter{{
-				Name: wellknown.HTTPConnectionManager,
+				Name: "envoy.filters.network.http_connection_manager",
 				ConfigType: &listenerv3.Filter_TypedConfig{
 					TypedConfig: hcmAny,
 				},
 			}},
 		}
 
-		// Add SNI matching if a hostname is specified
-		if listener.Hostname != nil && *listener.Hostname != "" {
-			filterChain.FilterChainMatch = &listenerv3.FilterChainMatch{
-				ServerNames: []string{string(*listener.Hostname)},
-			}
-		}
-
-		if listener.Protocol == gatewayv1.HTTPSProtocolType || listener.TLS != nil {
-			// Configure TLS if it's an HTTPS listener or TLS is explicitly configured
-			tlsContext := buildDownstreamTLSContext(listener)
-			pbst, err := anypb.New(tlsContext)
+		if listener.Protocol == gatewayv1.HTTPSProtocolType && listener.TLS != nil {
+			tlsAny, err := c.buildDownstreamTLSContext(gateway, &listener)
 			if err != nil {
-				return nil, err
-			}
-			filterChain.TransportSocket = &corev3.TransportSocket{
-				Name: wellknown.TransportSocketTls,
-				ConfigType: &corev3.TransportSocket_TypedConfig{
-					TypedConfig: pbst,
-				},
+				klog.Errorf("Failed to build DownstreamTlsContext: %v", err)
+			} else {
+				filterChain.TransportSocket = &corev3.TransportSocket{
+					Name: "envoy.transport_sockets.tls",
+					ConfigType: &corev3.TransportSocket_TypedConfig{
+						TypedConfig: tlsAny,
+					},
+				}
 			}
 		}
 		envoyListener.FilterChains = []*listenerv3.FilterChain{filterChain}
 
-	case gatewayv1.TCPProtocolType:
-		// TCP listener needs a pass-through filter
+	case gatewayv1.TCPProtocolType, gatewayv1.TLSProtocolType:
 		tcpProxy := &tcpproxyv3.TcpProxy{
-			StatPrefix: string(listener.Name),
-			ClusterSpecifier: &tcpproxyv3.TcpProxy_Cluster{
-				Cluster: string(listener.Name), // The cluster name will be the listener name for now
+			StatPrefix: routeConfigName,
+			ClusterSpecifier: &tcpproxyv3.TcpProxy_WeightedClusters{
+				WeightedClusters: &tcpproxyv3.TcpProxy_WeightedCluster{
+					Clusters: []*tcpproxyv3.TcpProxy_WeightedCluster_ClusterWeight{
+						// TODO: This needs to be populated from TCPRoute/TLSRoute
+					},
+				},
 			},
 		}
-		pbst, err := anypb.New(tcpProxy)
+		tcpProxyAny, err := anypb.New(tcpProxy)
 		if err != nil {
-			return nil, err
+			klog.Errorf("Failed to marshal TcpProxy: %v", err)
+			return nil, nil
 		}
-		envoyListener.FilterChains = []*listenerv3.FilterChain{{
+
+		filterChain := &listenerv3.FilterChain{
 			Filters: []*listenerv3.Filter{{
-				Name: wellknown.TCPProxy,
+				Name: "envoy.filters.network.tcp_proxy",
 				ConfigType: &listenerv3.Filter_TypedConfig{
-					TypedConfig: pbst,
+					TypedConfig: tcpProxyAny,
 				},
 			}},
-		}}
+		}
 
-		// For TCP, we also need to create a corresponding cluster
-		/*
-			resources[resourcev3.ClusterType] = append(resources[resourcev3.ClusterType], &clusterv3.Cluster{
-				Name: string(listener.Name),
-				// You'll likely need to configure the connect timeout and other cluster parameters
-				ConnectTimeout: nil, // Set an appropriate timeout
-				ClusterDiscoveryType: &clusterv3.Cluster_Type{
-					Type: clusterv3.Cluster_EDS, // Or STATIC if you have fixed endpoints
-				},
-				EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
-					ConfigSource: &clusterv3.ConfigSource{
-						ConfigSourceSpecifier: &clusterv3.ConfigSource_ApiConfigSource{
-							ApiConfigSource: &clusterv3.ApiConfigSource{
-								ApiType: corev3.ApiConfigSource_GRPC,
-								GrpcServices: []*corev3.GrpcService{
-									{
-										TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-											EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-												ClusterName: "xds_cluster", // This should be the name of your xDS cluster
-											},
-										},
-									},
-								},
-							},
-						},
-						InitialFetchTimeout: nil, // Rely on defaults or configure as needed
+		if listener.Protocol == gatewayv1.TLSProtocolType && listener.TLS != nil {
+			tlsAny, err := c.buildDownstreamTLSContext(gateway, &listener)
+			if err != nil {
+				klog.Errorf("Failed to build DownstreamTlsContext for TLS Listener: %v", err)
+			} else {
+				filterChain.TransportSocket = &corev3.TransportSocket{
+					Name: "envoy.transport_sockets.tls",
+					ConfigType: &corev3.TransportSocket_TypedConfig{
+						TypedConfig: tlsAny,
 					},
-					ServiceName: string(listener.Name), // Use the listener name as the EDS service name
-				},
-			})
-		*/
+				}
+			}
+		}
+		envoyListener.FilterChains = []*listenerv3.FilterChain{filterChain}
 
 	case gatewayv1.UDPProtocolType:
-		// For UDP, we primarily set the correct socket address protocol.
-		// Specific UDP proxying or handling might require network filters,
-		// which would be configured in the FilterChains. If no specific
-		// UDP proxy is needed, an empty FilterChains might be sufficient
-		// for just opening the UDP port.
-		envoyListener.FilterChains = []*listenerv3.FilterChain{}
-		// You might need to add network filters here if you require specific
-		// UDP processing (e.g., a custom UDP proxy).
+		udpProxy := &udpproxyv3.UdpProxyConfig{
+			StatPrefix:     routeConfigName,
+			RouteSpecifier: &udpproxyv3.UdpProxyConfig_Matcher{
+				// TODO: This needs to be populated from UDPRoute
+			},
+		}
+		udpProxyAny, err := anypb.New(udpProxy)
+		if err != nil {
+			klog.Errorf("Failed to marshal UdpProxyConfig: %v", err)
+			return nil, nil
+		}
+		envoyListener.ListenerFilters = []*listenerv3.ListenerFilter{
+			{
+				Name: "envoy.filters.udp_listener.udp_proxy",
+				ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+					TypedConfig: udpProxyAny,
+				},
+			},
+		}
 	}
 
-	resources[resourcev3.ListenerType] = append(resources[resourcev3.ListenerType], envoyListener)
-
-	return resources, nil
+	return envoyListener, routeConfiguration
 }
 
-func buildDownstreamTLSContext(listener gatewayv1.Listener) *tlsv3.DownstreamTlsContext {
-	if listener.TLS == nil {
-		return &tlsv3.DownstreamTlsContext{}
+// buildDownstreamTLSContext builds the DownstreamTlsContext for a listener.
+func (c *Controller) buildDownstreamTLSContext(gateway *gatewayv1.Gateway, listener *gatewayv1.Listener) (*anypb.Any, error) {
+	if listener.TLS == nil || len(listener.TLS.CertificateRefs) == 0 {
+		return nil, fmt.Errorf("TLS is configured, but no certificate refs are provided")
 	}
 
-	downstreamTLSContext := &tlsv3.DownstreamTlsContext{
-		CommonTlsContext: &tlsv3.CommonTlsContext{},
+	// TODO: Support multiple certificate refs
+	certRef := listener.TLS.CertificateRefs[0]
+	if certRef.Kind != nil && *certRef.Kind != "Secret" {
+		return nil, fmt.Errorf("unsupported certificate ref kind: %s", *certRef.Kind)
+	}
+	namespace := gateway.Namespace
+	if certRef.Namespace != nil {
+		namespace = string(*certRef.Namespace)
 	}
 
-	if listener.TLS.CertificateRefs != nil {
-		for _, certRef := range listener.TLS.CertificateRefs {
-			// Check Kind: Default is "Secret"
-			refKind := gatewayv1.Kind("Secret")
-			if certRef.Kind != nil {
-				refKind = *certRef.Kind
-			}
-			// Check Group: Default is "" (core group)
-			refGroup := gatewayv1.Group("")
-			if certRef.Group != nil {
-				refGroup = *certRef.Group
-			}
-			if refKind == "Secret" && refGroup == "" {
-				downstreamTLSContext.CommonTlsContext.TlsCertificates = []*tlsv3.TlsCertificate{{
-					CertificateChain: &corev3.DataSource{},
-					PrivateKey:       &corev3.DataSource{},
-				}}
-				break // For now, just take the first valid certificate ref
-			}
-			// Handle other kinds and groups if needed
-		}
+	secret, err := c.secretLister.Secrets(namespace).Get(string(certRef.Name))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get secret %s/%s: %w", namespace, certRef.Name, err)
 	}
 
-	if listener.TLS.Mode != nil && *listener.TLS.Mode == gatewayv1.TLSModeTerminate {
-		downstreamTLSContext.RequireClientCertificate = &wrapperspb.BoolValue{
-			Value: true,
-		}
+	tlsCert, err := toEnvoyTlsCertificate(secret)
+	if err != nil {
+		return nil, err
 	}
 
-	return downstreamTLSContext
+	tlsContext := &tlsv3.DownstreamTlsContext{
+		CommonTlsContext: &tlsv3.CommonTlsContext{
+			TlsCertificates: []*tlsv3.TlsCertificate{tlsCert},
+		},
+	}
+	return anypb.New(tlsContext)
+}
+
+// toEnvoyTlsCertificate converts a Kubernetes secret to an Envoy TlsCertificate.
+func toEnvoyTlsCertificate(secret *corev1.Secret) (*tlsv3.TlsCertificate, error) {
+	privateKey, ok := secret.Data[corev1.TLSPrivateKeyKey]
+	if !ok {
+		return nil, fmt.Errorf("secret %s/%s does not contain key %s", secret.Namespace, secret.Name, corev1.TLSPrivateKeyKey)
+	}
+	certChain, ok := secret.Data[corev1.TLSCertKey]
+	if !ok {
+		return nil, fmt.Errorf("secret %s/%s does not contain key %s", secret.Namespace, secret.Name, corev1.TLSCertKey)
+	}
+
+	return &tlsv3.TlsCertificate{
+		CertificateChain: &corev3.DataSource{
+			Specifier: &corev3.DataSource_InlineBytes{
+				InlineBytes: certChain,
+			},
+		},
+		PrivateKey: &corev3.DataSource{
+			Specifier: &corev3.DataSource_InlineBytes{
+				InlineBytes: privateKey,
+			},
+		},
+	}, nil
 }

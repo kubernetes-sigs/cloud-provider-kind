@@ -1,3 +1,19 @@
+/*
+Copyright 2024 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package gateway
 
 import (
@@ -8,11 +24,27 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	clusterv3service "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
+	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
+	listenerv3service "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
+	routev3service "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
+	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
+	secretv3 "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
+	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1informers "k8s.io/client-go/informers/core/v1"
+	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -25,22 +57,6 @@ import (
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
-
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
-	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
-	routev3 "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
-	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
-	secretv3 "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
-	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
-	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 )
 
 const (
@@ -50,7 +66,6 @@ const (
 	workers        = 5
 )
 
-// from https://github.com/envoyproxy/go-control-plane/blob/main/internal/example/server.go#L110
 const (
 	grpcKeepaliveTime        = 30 * time.Second
 	grpcKeepaliveTimeout     = 5 * time.Second
@@ -60,6 +75,7 @@ const (
 
 type Controller struct {
 	clusterName string
+	client      kubernetes.Interface
 	gwClient    gatewayclient.Interface
 
 	namespaceLister       corev1listers.NamespaceLister
@@ -67,6 +83,9 @@ type Controller struct {
 
 	serviceLister       corev1listers.ServiceLister
 	serviceListerSynced cache.InformerSynced
+
+	secretLister       corev1listers.SecretLister
+	secretListerSynced cache.InformerSynced
 
 	gatewayLister       gatewaylisters.GatewayLister
 	gatewayListerSynced cache.InformerSynced
@@ -78,7 +97,6 @@ type Controller struct {
 	grpcrouteLister       gatewaylisters.GRPCRouteLister
 	grpcrouteListerSynced cache.InformerSynced
 
-	// envoyproxy control plane
 	xdscache        cachev3.SnapshotCache
 	xdsserver       serverv3.Server
 	xdsLocalAddress string
@@ -90,19 +108,24 @@ type Controller struct {
 
 func New(
 	clusterName string,
+	client *kubernetes.Clientset,
 	gwClient *gatewayclient.Clientset,
 	namespaceInformer corev1informers.NamespaceInformer,
 	serviceInformer corev1informers.ServiceInformer,
+	secretInformer corev1informers.SecretInformer,
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
 ) (*Controller, error) {
 	c := &Controller{
 		clusterName:           clusterName,
+		client:                client,
 		namespaceLister:       namespaceInformer.Lister(),
 		namespaceListerSynced: namespaceInformer.Informer().HasSynced,
 		serviceLister:         serviceInformer.Lister(),
 		serviceListerSynced:   serviceInformer.Informer().HasSynced,
+		secretLister:          secretInformer.Lister(),
+		secretListerSynced:    secretInformer.Informer().HasSynced,
 		gwClient:              gwClient,
 		gatewayLister:         gatewayInformer.Lister(),
 		gatewayListerSynced:   gatewayInformer.Informer().HasSynced,
@@ -112,7 +135,6 @@ func New(
 		),
 		httprouteLister:       httprouteInformer.Lister(),
 		httprouteListerSynced: httprouteInformer.Informer().HasSynced,
-
 		grpcrouteLister:       grpcrouteInformer.Lister(),
 		grpcrouteListerSynced: grpcrouteInformer.Informer().HasSynced,
 	}
@@ -159,13 +181,13 @@ func New(
 			c.processGateways(httproute.Spec.ParentRefs, httproute.Namespace)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			httproute := newObj.(*gatewayv1.HTTPRoute)
-			c.processGateways(httproute.Spec.ParentRefs, httproute.Namespace)
+			oldHTTPRoute := oldObj.(*gatewayv1.HTTPRoute)
+			newHTTPRoute := newObj.(*gatewayv1.HTTPRoute)
+			c.processGateways(append(oldHTTPRoute.Spec.ParentRefs, newHTTPRoute.Spec.ParentRefs...), newHTTPRoute.Namespace)
 		},
 		DeleteFunc: func(obj interface{}) {
 			httproute, ok := obj.(*gatewayv1.HTTPRoute)
 			if !ok {
-				// If we reached here it means the pod was deleted but its final state is unrecorded.
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
 					runtime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", obj))
@@ -173,7 +195,7 @@ func New(
 				}
 				httproute, ok = tombstone.Obj.(*gatewayv1.HTTPRoute)
 				if !ok {
-					runtime.HandleError(fmt.Errorf("tombstone contained object that is not a GRPCRoute: %#v", obj))
+					runtime.HandleError(fmt.Errorf("tombstone contained object that is not a HTTPRoute: %#v", obj))
 					return
 				}
 			}
@@ -190,13 +212,13 @@ func New(
 			c.processGateways(grpcroute.Spec.ParentRefs, grpcroute.Namespace)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			grpcroute := newObj.(*gatewayv1.GRPCRoute)
-			c.processGateways(grpcroute.Spec.ParentRefs, grpcroute.Namespace)
+			oldGRPCRoute := oldObj.(*gatewayv1.GRPCRoute)
+			newGRPCRoute := newObj.(*gatewayv1.GRPCRoute)
+			c.processGateways(append(oldGRPCRoute.Spec.ParentRefs, newGRPCRoute.Spec.ParentRefs...), newGRPCRoute.Namespace)
 		},
 		DeleteFunc: func(obj interface{}) {
 			grpcroute, ok := obj.(*gatewayv1.GRPCRoute)
 			if !ok {
-				// If we reached here it means the pod was deleted but its final state is unrecorded.
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
 					runtime.HandleError(fmt.Errorf("couldn't get object from tombstone %#v", obj))
@@ -222,12 +244,9 @@ func New(
 	return c, nil
 }
 
-// Init install CRDs and creates GatewayClass
 func (c *Controller) Init(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
-	// Install GatewayAPI CRDs if do not exist
 
-	// Create GatewayClass if it does not exist
 	kindGwClass := gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: GWClassName,
@@ -242,11 +261,12 @@ func (c *Controller) Init(ctx context.Context) error {
 	if apierrors.IsNotFound(err) {
 		gwClass, err = c.gwClient.GatewayV1().GatewayClasses().Create(ctx, &kindGwClass, metav1.CreateOptions{})
 		if err != nil {
-			klog.Infof("failed to create cloud-provider-kind GatewayClass: %v", err)
-			return err
+			return fmt.Errorf("failed to create cloud-provider-kind GatewayClass: %w", err)
 		}
+	} else if err != nil {
+		return fmt.Errorf("failed to get cloud-provider-kind GatewayClass: %w", err)
 	}
-	// Update status
+
 	condition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
 		Status:             metav1.ConditionTrue,
@@ -255,7 +275,6 @@ func (c *Controller) Init(ctx context.Context) error {
 		ObservedGeneration: gwClass.Generation,
 	}
 
-	// TODO server side apply
 	if conditions, ok := UpdateConditionIfChanged(gwClass.Status.Conditions, condition); ok {
 		gwClass.Status.Conditions = conditions
 		_, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(ctx, gwClass, metav1.UpdateOptions{})
@@ -267,12 +286,10 @@ func (c *Controller) Init(ctx context.Context) error {
 	return nil
 }
 
-// Run begins watching and syncing.
 func (c *Controller) Run(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
 
 	klog.Info("Starting Envoy proxy controller")
-	// Create a cache
 	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{})
 
@@ -292,9 +309,9 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	discoveryv3.RegisterAggregatedDiscoveryServiceServer(grpcServer, c.xdsserver)
 	endpointv3.RegisterEndpointDiscoveryServiceServer(grpcServer, c.xdsserver)
-	clusterv3.RegisterClusterDiscoveryServiceServer(grpcServer, c.xdsserver)
-	routev3.RegisterRouteDiscoveryServiceServer(grpcServer, c.xdsserver)
-	listenerv3.RegisterListenerDiscoveryServiceServer(grpcServer, c.xdsserver)
+	clusterv3service.RegisterClusterDiscoveryServiceServer(grpcServer, c.xdsserver)
+	routev3service.RegisterRouteDiscoveryServiceServer(grpcServer, c.xdsserver)
+	listenerv3service.RegisterListenerDiscoveryServiceServer(grpcServer, c.xdsserver)
 	secretv3.RegisterSecretDiscoveryServiceServer(grpcServer, c.xdsserver)
 	runtimev3.RegisterRuntimeDiscoveryServiceServer(grpcServer, c.xdsserver)
 
@@ -302,43 +319,38 @@ func (c *Controller) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// open a listener on the control plane using a random port
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", address))
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
-	// Get the address of the listener
-	addr := listener.Addr()
 
-	// Assert the address to a net.TCPAddr to access the Port field
+	addr := listener.Addr()
 	tcpAddr, ok := addr.(*net.TCPAddr)
 	if !ok {
 		return fmt.Errorf("could not assert listener address to TCPAddr: %s", addr.String())
 	}
 
-	// Access the Port field
 	c.xdsLocalAddress = address
 	c.xdsLocalPort = tcpAddr.Port
 	go func() {
 		klog.Infof("XDS management server listening on %s %d\n", c.xdsLocalAddress, c.xdsLocalPort)
 		if err = grpcServer.Serve(listener); err != nil {
-			klog.Infoln(err)
+			klog.Errorln("gRPC server error:", err)
 		}
 		grpcServer.Stop()
 	}()
 
-	// Let the workers stop when we are done
 	defer c.gatewayqueue.ShutDown()
 	klog.Info("Starting Gateway API controller")
 
-	// Wait for all involved caches to be synced, before processing items from the queue is started
 	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(),
 		c.gatewayListerSynced,
 		c.httprouteListerSynced,
 		c.grpcrouteListerSynced,
 		c.namespaceListerSynced,
 		c.serviceListerSynced,
+		c.secretListerSynced,
 	) {
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
@@ -352,49 +364,43 @@ func (c *Controller) Run(ctx context.Context) error {
 	return nil
 }
 
-// processGateways enqueues all referenced gateways from the Parent References
 func (c *Controller) processGateways(references []gatewayv1.ParentReference, localNamespace string) {
+	gatewaysToEnqueue := make(map[string]struct{})
 	for _, ref := range references {
+		if (ref.Group != nil && string(*ref.Group) != gatewayv1.GroupName) ||
+			(ref.Kind != nil && string(*ref.Kind) != "Gateway") {
+			continue
+		}
 		namespace := localNamespace
 		if ref.Namespace != nil {
 			namespace = string(*ref.Namespace)
 		}
-		if ref.Group != nil && string(*ref.Group) != "gateway.networking.k8s.io" {
-			continue
-		}
+		key := namespace + "/" + string(ref.Name)
+		gatewaysToEnqueue[key] = struct{}{}
+	}
 
-		if ref.Kind != nil && string(*ref.Kind) != "Gateway" {
-			continue
-		}
-
-		gw, err := c.gatewayLister.Gateways(namespace).Get(string(ref.Name))
-		if err != nil {
-			klog.Infof("fail to obtain referenced gateway %s/%s : %v", namespace, ref.Name, err)
-			continue
-		}
-		if gw.Spec.GatewayClassName != GWClassName {
-			klog.V(2).Infof("gateway %s/%s not managed by this controller", namespace, ref.Name)
-			continue
-		}
-		c.gatewayqueue.Add(gw.Namespace + "/" + gw.Name)
+	for key := range gatewaysToEnqueue {
+		c.gatewayqueue.Add(key)
 	}
 }
 
-func (c *Controller) processNextGatewayItem() bool {
-	// Wait until there is a new item in the working queue
+func (c *Controller) runGatewayWorker(ctx context.Context) {
+	for c.processNextGatewayItem(ctx) {
+	}
+}
+
+func (c *Controller) processNextGatewayItem(ctx context.Context) bool {
 	key, quit := c.gatewayqueue.Get()
 	if quit {
 		return false
 	}
 	defer c.gatewayqueue.Done(key)
 
-	err := c.syncGateway(key)
-
+	err := c.syncGateway(ctx, key)
 	c.handleGatewayErr(err, key)
 	return true
 }
 
-// handleErr checks if an error happened and makes sure we will retry later.
 func (c *Controller) handleGatewayErr(err error, key string) {
 	if err == nil {
 		c.gatewayqueue.Forget(key)
@@ -403,26 +409,15 @@ func (c *Controller) handleGatewayErr(err error, key string) {
 
 	if c.gatewayqueue.NumRequeues(key) < maxRetries {
 		klog.Infof("Error syncing Gateway %v: %v", key, err)
-
-		// Re-enqueue the key rate limited. Based on the rate limiter on the
-		// queue and the re-enqueue history, the key will be processed later again.
 		c.gatewayqueue.AddRateLimited(key)
 		return
 	}
 
 	c.gatewayqueue.Forget(key)
-	// Report to an external entity that, even after several retries, we could not successfully process this key
 	runtime.HandleError(err)
 	klog.Infof("Dropping Gateway %q out of the queue: %v", key, err)
 }
 
-func (c *Controller) runGatewayWorker(ctx context.Context) {
-	for c.processNextGatewayItem() {
-	}
-}
-
-// UpdateConditionIfChanged updates or insert a condition if it has been changed.
-// Returns false if there are no changes
 func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Condition) ([]metav1.Condition, bool) {
 	exist := false
 	newConditions := make([]metav1.Condition, 0, len(conditions))
@@ -433,7 +428,6 @@ func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Co
 				condition.LastTransitionTime = metav1.Now()
 				newConditions = append(newConditions, condition)
 			} else {
-				// there are no changes
 				return conditions, false
 			}
 		} else {
@@ -441,7 +435,6 @@ func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Co
 		}
 	}
 
-	// it is a new condition
 	if !exist {
 		condition.LastTransitionTime = metav1.Now()
 		newConditions = append(newConditions, condition)
@@ -460,7 +453,6 @@ func GetControlPlaneAddress() (string, error) {
 		nameI := interfaces[i].Name
 		nameJ := interfaces[j].Name
 
-		// Prefer docker0
 		if nameI == "docker0" {
 			return true
 		}
@@ -469,18 +461,18 @@ func GetControlPlaneAddress() (string, error) {
 		}
 
 		if nameI == "eth0" {
-			return nameJ != "docker0" // "eth0" comes before anything else except "docker0"
+			return nameJ != "docker0"
 		}
 		if nameJ == "eth0" {
 			return false
 		}
 
-		return nameI < nameJ // Sort the rest alphabetically
+		return nameI < nameJ
 	})
 
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue // Skip down interfaces and loopback interfaces
+			continue
 		}
 
 		addrs, err := iface.Addrs()
@@ -499,24 +491,15 @@ func GetControlPlaneAddress() (string, error) {
 	return "", fmt.Errorf("no suitable global unicast IPv4 address found on any active non-loopback interface")
 }
 
-// UpdateXDSServer changes the resource snapshot held by the XDS server, which
-// updates connected clients as required.
 func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resources map[resourcev3.Type][]envoyproxytypes.Resource) error {
 	c.xdsVersion.Add(1)
 
-	// Create a snapshot with the passed in resources.
 	snapshot, err := cachev3.NewSnapshot(fmt.Sprintf("%d", c.xdsVersion.Load()), resources)
 	if err != nil {
 		return fmt.Errorf("failed to create new snapshot cache: %v", err)
 
 	}
 
-	// TODO: do we need this check?
-	// if err := snapshot.Consistent(); err != nil {
-	// 	return fmt.Errorf("failed to create new resource snapshot: %v", err)
-	//}
-
-	// Update the cache with the new resource snapshot.
 	if err := c.xdscache.SetSnapshot(ctx, nodeid, snapshot); err != nil {
 		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
 	}
@@ -524,60 +507,41 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 	return nil
 }
 
-var _ serverv3.Callbacks = xdsCallbacks{}
+var _ serverv3.Callbacks = &xdsCallbacks{}
 
-// xdsCallbacks provides logging for Envoy connections.
 type xdsCallbacks struct{}
 
-// OnStreamOpen is called when a new stream is opened.
-func (cb xdsCallbacks) OnStreamOpen(ctx context.Context, id int64, typ string) error {
+func (cb *xdsCallbacks) OnStreamOpen(ctx context.Context, id int64, typ string) error {
 	klog.V(2).Infof("xDS stream %d opened for type %s", id, typ)
 	return nil
 }
-
-// OnStreamClosed is called when a stream is closed.
-func (cb xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
+func (cb *xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
 	nodeID := "unknown"
 	if node != nil {
 		nodeID = node.GetId()
 	}
 	klog.V(2).Infof("xDS stream %d closed for node %s", id, nodeID)
 }
-
-// OnStreamRequest is called when a request is received on a stream.
-func (cb xdsCallbacks) OnStreamRequest(id int64, req *discoveryv3.DiscoveryRequest) error {
+func (cb *xdsCallbacks) OnStreamRequest(id int64, req *discoveryv3.DiscoveryRequest) error {
 	klog.V(5).Infof("xDS stream %d received request for type %s from node %s", id, req.TypeUrl, req.Node.GetId())
 	return nil
 }
-
-// OnStreamResponse is called when a response is sent on a stream.
-func (cb xdsCallbacks) OnStreamResponse(ctx context.Context, id int64, req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
+func (cb *xdsCallbacks) OnStreamResponse(ctx context.Context, id int64, req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
 	klog.V(5).Infof("xDS stream %d sent response for type %s to node %s", id, resp.TypeUrl, req.Node.GetId())
 }
-
-// OnFetchRequest is called when a fetch request is received.
-func (cb xdsCallbacks) OnFetchRequest(ctx context.Context, req *discoveryv3.DiscoveryRequest) error {
+func (cb *xdsCallbacks) OnFetchRequest(ctx context.Context, req *discoveryv3.DiscoveryRequest) error {
 	klog.V(5).Infof("xDS fetch request received for type %s from node %s", req.TypeUrl, req.Node.GetId())
 	return nil
 }
-
-// OnFetchResponse is called when a fetch response is sent.
-func (cb xdsCallbacks) OnFetchResponse(req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
+func (cb *xdsCallbacks) OnFetchResponse(req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
 	klog.V(5).Infof("xDS fetch response sent for type %s to node %s", resp.TypeUrl, req.Node.GetId())
 }
-
-// OnStreamDeltaRequest is called when a delta stream is closed.
-func (cb xdsCallbacks) OnStreamDeltaRequest(id int64, req *discoveryv3.DeltaDiscoveryRequest) error {
+func (cb *xdsCallbacks) OnStreamDeltaRequest(id int64, req *discoveryv3.DeltaDiscoveryRequest) error {
 	return nil
 }
-
-// OnStreamDeltaResponse is called when a delta stream is closed.
-func (cb xdsCallbacks) OnStreamDeltaResponse(id int64, req *discoveryv3.DeltaDiscoveryRequest, resp *discoveryv3.DeltaDiscoveryResponse) {
+func (cb *xdsCallbacks) OnStreamDeltaResponse(id int64, req *discoveryv3.DeltaDiscoveryRequest, resp *discoveryv3.DeltaDiscoveryResponse) {
 }
-
-func (cb xdsCallbacks) OnDeltaStreamClosed(int64, *corev3.Node) {
-
-}
-func (cb xdsCallbacks) OnDeltaStreamOpen(context.Context, int64, string) error {
+func (cb *xdsCallbacks) OnDeltaStreamClosed(int64, *corev3.Node) {}
+func (cb *xdsCallbacks) OnDeltaStreamOpen(context.Context, int64, string) error {
 	return nil
 }
