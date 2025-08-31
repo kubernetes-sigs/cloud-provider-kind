@@ -10,7 +10,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/lithammer/dedent v1.1.0
 	github.com/pkg/errors v0.9.1
-	google.golang.org/grpc v1.70.0
+	google.golang.org/grpc v1.71.1
 	google.golang.org/protobuf v1.36.6
 	k8s.io/api v0.33.4
 	k8s.io/apimachinery v0.33.4
@@ -21,7 +21,7 @@ require (
 	k8s.io/controller-manager v0.33.4
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
-	sigs.k8s.io/gateway-api v1.2.1
+	sigs.k8s.io/gateway-api v1.3.0
 	sigs.k8s.io/kind v0.29.0
 )
 
