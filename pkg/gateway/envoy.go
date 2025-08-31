@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/template"
 
 	"k8s.io/klog/v2"
@@ -88,7 +89,7 @@ type configData struct {
 }
 
 // generateEnvoyConfig returns an envoy config generated from config data
-func generateEnvoyConfig(data *configData) (config string, err error) {
+func generateEnvoyConfig(data *configData) (string, error) {
 	if data.Cluster == "" ||
 		data.ID == "" ||
 		data.AdminPort == 0 ||
@@ -129,14 +130,14 @@ func gatewaySimpleName(clusterName, namespace, name string) string {
 func createGateway(clusterName string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
-	envoyConfig := &configData{
+	envoyConfigData := &configData{
 		ID:                  name,
 		Cluster:             simpleName,
 		AdminPort:           envoyAdminPort,
 		ControlPlaneAddress: localAddress,
 		ControlPlanePort:    localPort,
 	}
-	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfig)
+	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfigData)
 	if err != nil {
 		return err
 	}
@@ -146,37 +147,27 @@ func createGateway(clusterName string, localAddress string, localPort int, gatew
 	}
 
 	args := []string{
-		"--detach", // run the container detached
-		"--tty",    // allocate a tty for entrypoint logs
-		// label the node with the cluster ID
+		"--detach",
+		"--tty",
+		"--user=0",
 		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
-		// label the node with the load balancer name
 		"--label", fmt.Sprintf("%s=%s", constants.GatewayNameLabelKey, simpleName),
-		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",
-		"--hostname", name, // make hostname match container name
-		// label the node with the role ID
-		// running containers in a container requires privileged
-		// NOTE: we could try to replicate this with --cap-add, and use less
-		// privileges, but this flag also changes some mounts that are necessary
-		// including some ones docker would otherwise do by default.
-		// for now this is what we want. in the future we may revisit this.
+		"--hostname", name,
 		"--privileged",
-		"--restart=on-failure",                           // to deal with the crash casued by https://github.com/envoyproxy/envoy/issues/34195
-		"--sysctl=net.ipv4.ip_forward=1",                 // allow ip forwarding
-		"--sysctl=net.ipv4.conf.all.rp_filter=0",         // disable rp filter
-		"--sysctl=net.ipv4.ip_unprivileged_port_start=1", // Allow lower port numbers for podman (see https://github.com/containers/podman/blob/main/rootless.md for more info)
+		"--restart=on-failure",
+		"--sysctl=net.ipv4.ip_forward=1",
+		"--sysctl=net.ipv4.conf.all.rp_filter=0",
+		"--sysctl=net.ipv4.ip_unprivileged_port_start=1",
 	}
 
-	// allow IPv6 always
 	args = append(args, []string{
-		"--sysctl=net.ipv6.conf.all.disable_ipv6=0", // enable IPv6
-		"--sysctl=net.ipv6.conf.all.forwarding=1",   // allow ipv6 forwarding})
+		"--sysctl=net.ipv6.conf.all.disable_ipv6=0",
+		"--sysctl=net.ipv6.conf.all.forwarding=1",
 	}...)
 
 	if enableTunnel {
-		// Forward the Service Ports to the host so they are accessible on Mac and Windows
 		for _, listener := range gateway.Spec.Listeners {
 			if listener.Protocol == gatewayv1.UDPProtocolType {
 				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, "udp"))
@@ -185,26 +176,22 @@ func createGateway(clusterName string, localAddress string, localPort int, gatew
 			}
 		}
 	}
-	// publish the admin endpoint
 	args = append(args, fmt.Sprintf("--publish=%d/tcp", envoyAdminPort))
-	// Publish all ports in the host in random ports
 	args = append(args, "--publish-all")
 
+	// Construct the multi-step command
+	var startupCmd strings.Builder
+	startupCmd.WriteString(fmt.Sprintf("echo -en '%s' > %s && ", dynamicFilesystemConfig, proxyConfigPath))
+	startupCmd.WriteString(fmt.Sprintf("while true; do envoy -c %s && break; sleep 1; done", proxyConfigPath))
+
 	args = append(args, images.Images["proxy"])
-	// we need to override the default envoy configuration
-	// https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/configuration-dynamic-filesystem
-	// envoy crashes in some circumstances, causing the container to restart, the problem is that the container
-	// may come with a different IP and we don't update the status, we may do it, but applications does not use
-	// to handle that the assigned LoadBalancerIP changes.
-	// https://github.com/envoyproxy/envoy/issues/34195
-	cmd := []string{"bash", "-c",
-		fmt.Sprintf(`echo -en '%s' > %s && while true; do envoy -c %s && break; sleep 1; done`,
-			dynamicFilesystemConfig, proxyConfigPath, proxyConfigPath)}
+	cmd := []string{"bash", "-c", startupCmd.String()}
 	args = append(args, cmd...)
+
 	klog.V(2).Infof("creating gateway with parameters: %v", args)
 	err = container.Create(name, args)
 	if err != nil {
-		return fmt.Errorf("failed to create continers %s %v: %w", name, args, err)
+		return fmt.Errorf("failed to create containers %s %v: %w", name, args, err)
 	}
 
 	return nil
