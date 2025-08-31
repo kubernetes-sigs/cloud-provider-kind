@@ -188,6 +188,7 @@ func (c *Controller) syncGateway(key string) error {
 	newGw.Status.Listeners = lisStatus
 
 	_, err = c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(context.Background(), newGw, metav1.UpdateOptions{})
+
 	return err
 }
 
