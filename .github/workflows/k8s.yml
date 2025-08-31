@@ -86,7 +86,6 @@ jobs:
             kind: ClusterConfiguration
             apiServer:
               extraArgs:
-                cloud-provider: "external"
                 v: "5"
             controllerManager:
               extraArgs:
