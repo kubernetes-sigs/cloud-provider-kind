@@ -7,8 +7,9 @@ on:
 
 env:
   GO_VERSION: "1.24"
-  K8S_VERSION: "v1.32.0"
-  KIND_VERSION: "v0.27.0"
+  GATEWAY_VERSION: "v1.2.1"
+  K8S_VERSION: "v1.34.0"
+  KIND_VERSION: "v0.30.0"
   KIND_CLUSTER_NAME: "kind-cloud"
 
 jobs:
@@ -37,7 +38,7 @@ jobs:
       run: |
         TMP_DIR=$(mktemp -d)
         # Test binaries
-        git clone --depth 1 https://github.com/kubernetes-sigs/gateway-api.git ${TMP_DIR}
+        git clone --branch ${{ env.GATEWAY_VERSION }} --depth 1 https://github.com/kubernetes-sigs/gateway-api.git ${TMP_DIR}
         cd ${TMP_DIR}
         go test ./conformance/ -c
         cd -
