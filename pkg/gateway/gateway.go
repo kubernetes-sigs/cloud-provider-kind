@@ -79,7 +79,8 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			return err
 		}
 
-		time.Sleep(2 * time.Second)
+		// TODO fix this hack
+		time.Sleep(1 * time.Second)
 
 		if err := c.configureContainerNetworking(ctx, containerName); err != nil {
 			if delErr := container.Delete(containerName); delErr != nil {
@@ -243,14 +244,30 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 			filterChain, routeConfig, err := c.translateListenerToFilterChain(gateway, listener, virtualHost)
 			if err != nil {
+				// If translation fails, set the listener's conditions to reflect the error
+				// but do not skip the listener entirely.
 				klog.Errorf("Error translating listener %s to filter chain: %v", listener.Name, err)
-				continue
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionProgrammed),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(gatewayv1.ListenerReasonInvalid),
+					Message:            fmt.Sprintf("Failed to translate listener: %v", err),
+					ObservedGeneration: gateway.Generation,
+				})
+			} else {
+				// If translation is successful, set the listener's conditions to Programmed=True.
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionProgrammed),
+					Status:             metav1.ConditionTrue,
+					Reason:             string(gatewayv1.ListenerReasonProgrammed),
+					Message:            "Listener is programmed",
+					ObservedGeneration: gateway.Generation,
+				})
+				if routeConfig != nil {
+					envoyRoutes = append(envoyRoutes, routeConfig)
+				}
+				filterChains = append(filterChains, filterChain)
 			}
-
-			if routeConfig != nil {
-				envoyRoutes = append(envoyRoutes, routeConfig)
-			}
-			filterChains = append(filterChains, filterChain)
 
 			listenerStatus.AttachedRoutes = attachedRoutes
 			meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
