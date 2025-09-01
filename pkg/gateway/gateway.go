@@ -351,18 +351,16 @@ func getSupportedKinds(listener gatewayv1.Listener) ([]gatewayv1.RouteGroupKind,
 				allKindsValid = false
 			}
 		}
-	} else {
-		if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType {
-			supportedKinds = append(supportedKinds,
-				gatewayv1.RouteGroupKind{
-					Group: &groupName,
-					Kind:  "HTTPRoute",
-				},
-				gatewayv1.RouteGroupKind{
-					Group: &groupName,
-					Kind:  "GRPCRoute",
-				})
-		}
+	} else if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType {
+		supportedKinds = append(supportedKinds,
+			gatewayv1.RouteGroupKind{
+				Group: &groupName,
+				Kind:  "HTTPRoute",
+			},
+			gatewayv1.RouteGroupKind{
+				Group: &groupName,
+				Kind:  "GRPCRoute",
+			})
 	}
 
 	return supportedKinds, allKindsValid
