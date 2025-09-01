@@ -13,6 +13,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -147,78 +148,103 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 }
 
 func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (map[resourcev3.Type][]envoyproxytypes.Resource, []gatewayv1.ListenerStatus) {
-	envoyListeners := []envoyproxytypes.Resource{}
 	envoyRoutes := []envoyproxytypes.Resource{}
 	envoyClusters := make(map[string]envoyproxytypes.Resource)
-	listenerStatuses := make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
+	allListenerStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 
-	for i, listener := range gateway.Spec.Listeners {
-		var attachedRoutes int32
-		listenerStatus := gatewayv1.ListenerStatus{
-			Name:           listener.Name,
-			SupportedKinds: []gatewayv1.RouteGroupKind{},
-			Conditions:     []metav1.Condition{},
-		}
+	listenersByPort := make(map[gatewayv1.PortNumber][]gatewayv1.Listener)
+	for _, listener := range gateway.Spec.Listeners {
+		listenersByPort[listener.Port] = append(listenersByPort[listener.Port], listener)
+	}
 
-		virtualHost := &routev3.VirtualHost{
-			Name:    fmt.Sprintf("%s-%s", gateway.Name, listener.Name),
-			Domains: []string{"*"},
-		}
-		if listener.Hostname != nil && *listener.Hostname != "" {
-			virtualHost.Domains = []string{string(*listener.Hostname)}
-		}
+	finalEnvoyListeners := []envoyproxytypes.Resource{}
+	for port, listeners := range listenersByPort {
+		var filterChains []*listenerv3.FilterChain
+		var envoyListener *listenerv3.Listener
 
-		switch listener.Protocol {
-		case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-			listenerStatus.SupportedKinds = append(listenerStatus.SupportedKinds, gatewayv1.RouteGroupKind{Kind: "HTTPRoute"}, gatewayv1.RouteGroupKind{Kind: "GRPCRoute"})
-			for _, httpRoute := range c.getHTTPRoutesForListener(gateway, listener) {
-				if err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, virtualHost); err == nil {
-					attachedRoutes++
-					for _, rule := range httpRoute.Spec.Rules {
-						for _, backendRef := range rule.BackendRefs {
-							cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef.BackendRef)
-							if err == nil {
-								envoyClusters[cluster.Name] = cluster
+		for _, listener := range listeners {
+			var attachedRoutes int32
+			listenerStatus := gatewayv1.ListenerStatus{
+				Name:           listener.Name,
+				SupportedKinds: []gatewayv1.RouteGroupKind{},
+				Conditions:     []metav1.Condition{},
+			}
+
+			virtualHost := &routev3.VirtualHost{
+				Name:    fmt.Sprintf("%s-%s", gateway.Name, listener.Name),
+				Domains: []string{"*"},
+			}
+			if listener.Hostname != nil && *listener.Hostname != "" {
+				virtualHost.Domains = []string{string(*listener.Hostname)}
+			}
+
+			switch listener.Protocol {
+			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
+				listenerStatus.SupportedKinds = append(listenerStatus.SupportedKinds, gatewayv1.RouteGroupKind{Kind: "HTTPRoute"}, gatewayv1.RouteGroupKind{Kind: "GRPCRoute"})
+				for _, httpRoute := range c.getHTTPRoutesForListener(gateway, listener) {
+					if err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, virtualHost); err == nil {
+						attachedRoutes++
+						for _, rule := range httpRoute.Spec.Rules {
+							for _, backendRef := range rule.BackendRefs {
+								cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef.BackendRef)
+								if err == nil {
+									envoyClusters[cluster.Name] = cluster
+								}
 							}
 						}
 					}
 				}
-			}
-			for _, grpcRoute := range c.getGRPCRoutesForListener(gateway, listener) {
-				if err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, virtualHost); err == nil {
-					attachedRoutes++
-					for _, rule := range grpcRoute.Spec.Rules {
-						for _, backendRef := range rule.BackendRefs {
-							cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef.BackendRef)
-							if err == nil {
-								envoyClusters[cluster.Name] = cluster
+				for _, grpcRoute := range c.getGRPCRoutesForListener(gateway, listener) {
+					if err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, virtualHost); err == nil {
+						attachedRoutes++
+						for _, rule := range grpcRoute.Spec.Rules {
+							for _, backendRef := range rule.BackendRefs {
+								cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef.BackendRef)
+								if err == nil {
+									envoyClusters[cluster.Name] = cluster
+								}
 							}
 						}
 					}
 				}
+			default:
+				klog.Warningf("Unsupported listener protocol: %s", listener.Protocol)
 			}
-		default:
-			klog.Warningf("Unsupported listener protocol: %s", listener.Protocol)
+
+			filterChain, routeConfig, err := c.translateListenerToFilterChain(gateway, listener, virtualHost)
+			if err != nil {
+				klog.Errorf("Error translating listener %s to filter chain: %v", listener.Name, err)
+				continue
+			}
+
+			if routeConfig != nil {
+				envoyRoutes = append(envoyRoutes, routeConfig)
+			}
+			filterChains = append(filterChains, filterChain)
+
+			listenerStatus.AttachedRoutes = attachedRoutes
+			acceptedCondition := metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonAccepted),
+				Message:            "Listener is valid",
+				ObservedGeneration: gateway.Generation,
+			}
+			if conditions, ok := UpdateConditionIfChanged(listenerStatus.Conditions, acceptedCondition); ok {
+				listenerStatus.Conditions = conditions
+			}
+			allListenerStatuses[listener.Name] = listenerStatus
 		}
 
-		envoyListener, routeConfig := c.translateListener(gateway, listener, virtualHost)
-		if envoyListener != nil && routeConfig != nil {
-			envoyListeners = append(envoyListeners, envoyListener)
-			envoyRoutes = append(envoyRoutes, routeConfig)
+		if len(filterChains) > 0 {
+			envoyListener = &listenerv3.Listener{
+				Name:            fmt.Sprintf("listener-%d", port),
+				Address:         createEnvoyAddress(uint32(port)),
+				FilterChains:    filterChains,
+				ListenerFilters: createListenerFilters(),
+			}
+			finalEnvoyListeners = append(finalEnvoyListeners, envoyListener)
 		}
-
-		listenerStatus.AttachedRoutes = attachedRoutes
-		acceptedCondition := metav1.Condition{
-			Type:               string(gatewayv1.ListenerConditionAccepted),
-			Status:             metav1.ConditionTrue,
-			Reason:             string(gatewayv1.ListenerReasonAccepted),
-			Message:            "Listener is valid",
-			ObservedGeneration: gateway.Generation,
-		}
-		if conditions, ok := UpdateConditionIfChanged(listenerStatus.Conditions, acceptedCondition); ok {
-			listenerStatus.Conditions = conditions
-		}
-		listenerStatuses[i] = listenerStatus
 	}
 
 	clustersSlice := make([]envoyproxytypes.Resource, 0, len(envoyClusters))
@@ -226,11 +252,16 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 		clustersSlice = append(clustersSlice, cluster)
 	}
 
+	orderedStatuses := make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
+	for i, listener := range gateway.Spec.Listeners {
+		orderedStatuses[i] = allListenerStatuses[listener.Name]
+	}
+
 	return map[resourcev3.Type][]envoyproxytypes.Resource{
-		resourcev3.ListenerType: envoyListeners,
+		resourcev3.ListenerType: finalEnvoyListeners,
 		resourcev3.RouteType:    envoyRoutes,
 		resourcev3.ClusterType:  clustersSlice,
-	}, listenerStatuses
+	}, orderedStatuses
 }
 
 func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.HTTPRoute {
