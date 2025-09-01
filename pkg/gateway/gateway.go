@@ -124,13 +124,30 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 		ObservedGeneration: newGw.Generation,
 	}
 	if err != nil {
+		// If the Envoy update fails, the Gateway is not programmed.
 		programmedCondition.Status = metav1.ConditionFalse
 		programmedCondition.Reason = "ReconciliationError"
 		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", err.Error())
 	} else {
-		programmedCondition.Status = metav1.ConditionTrue
-		programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
-		programmedCondition.Message = "Envoy configuration updated successfully"
+		// If the Envoy update succeeds, check if all individual listeners were programmed.
+		listenersProgrammed := 0
+		for _, listenerStatus := range listenerStatuses {
+			if meta.IsStatusConditionTrue(listenerStatus.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
+				listenersProgrammed++
+			}
+		}
+
+		if listenersProgrammed == len(listenerStatuses) {
+			// The Gateway is only fully programmed if all listeners are programmed.
+			programmedCondition.Status = metav1.ConditionTrue
+			programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
+			programmedCondition.Message = "Envoy configuration updated successfully"
+		} else {
+			// If any listener failed, the Gateway as a whole is not fully programmed.
+			programmedCondition.Status = metav1.ConditionFalse
+			programmedCondition.Reason = "ListenersNotProgrammed"
+			programmedCondition.Message = fmt.Sprintf("%d out of %d listeners failed to be programmed", listenersProgrammed, len(listenerStatuses))
+		}
 	}
 	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
 
