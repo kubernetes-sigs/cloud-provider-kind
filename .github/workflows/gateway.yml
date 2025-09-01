@@ -119,7 +119,7 @@ jobs:
             --contact=antonio.ojea.garcia@gmail.com \
             --gateway-class=cloud-provider-kind \
             --supported-features=Gateway,HTTPRoute \
-            --report-output=./_artifacts
+            --report-output=./_artifacts/conformance.yaml
 
     - name: Export logs
       if: always()
