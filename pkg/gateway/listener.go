@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/pem"
 	"fmt"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -155,9 +156,11 @@ func (c *Controller) buildDownstreamTLSContext(ctx context.Context, gateway *gat
 	}
 
 	for _, certRef := range lis.TLS.CertificateRefs {
+		if certRef.Group != nil && *certRef.Group != "" {
+			return nil, fmt.Errorf("unsupported certificate ref group: %s", *certRef.Group)
+		}
 		if certRef.Kind != nil && *certRef.Kind != "Secret" {
-			klog.Warningf("unsupported certificate ref kind: %s", *certRef.Kind)
-			continue
+			return nil, fmt.Errorf("unsupported certificate ref kind: %s", *certRef.Kind)
 		}
 		namespace := gateway.Namespace
 		if certRef.Namespace != nil {
@@ -172,8 +175,7 @@ func (c *Controller) buildDownstreamTLSContext(ctx context.Context, gateway *gat
 
 		tlsCert, err := toEnvoyTlsCertificate(secret)
 		if err != nil {
-			klog.Warningf("failed to convert secret to tls certificate: %v", err)
-			continue
+			return nil, fmt.Errorf("failed to convert secret to tls certificate: %v", err)
 		}
 		tlsContext.CommonTlsContext.TlsCertificates = append(tlsContext.CommonTlsContext.TlsCertificates, tlsCert)
 	}
@@ -190,10 +192,18 @@ func toEnvoyTlsCertificate(secret *corev1.Secret) (*tlsv3.TlsCertificate, error)
 	if !ok {
 		return nil, fmt.Errorf("secret %s/%s does not contain key %s", secret.Namespace, secret.Name, corev1.TLSPrivateKeyKey)
 	}
+	block, _ := pem.Decode(privateKey)
+	if block == nil {
+		return nil, fmt.Errorf("secret %s/%s key %s does not contain a valid PEM-encoded private key", secret.Namespace, secret.Name, corev1.TLSPrivateKeyKey)
+	}
 
 	certChain, ok := secret.Data[corev1.TLSCertKey]
 	if !ok {
 		return nil, fmt.Errorf("secret %s/%s does not contain key %s", secret.Namespace, secret.Name, corev1.TLSCertKey)
+	}
+	block, _ = pem.Decode(certChain)
+	if block == nil {
+		return nil, fmt.Errorf("secret %s/%s key %s does not contain a valid PEM-encoded certificate chain", secret.Namespace, secret.Name, corev1.TLSCertKey)
 	}
 
 	return &tlsv3.TlsCertificate{
