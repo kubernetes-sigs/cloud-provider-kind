@@ -377,6 +377,8 @@ func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1
 		Conditions:     []metav1.Condition{},
 	}
 
+	// If the parent Gateway was successfully programmed, then the route is considered
+	// Accepted and its references are Resolved.
 	if programmed.Status == metav1.ConditionTrue {
 		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.RouteConditionAccepted),
@@ -385,7 +387,16 @@ func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1
 			Message:            "Route is accepted",
 			ObservedGeneration: route.Generation,
 		})
+		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionResolvedRefs),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+			Message:            "All references resolved",
+			ObservedGeneration: route.Generation,
+		})
 	} else {
+		// If the parent Gateway was NOT successfully programmed, the route is not
+		// considered Accepted and its references are not Resolved.
 		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.RouteConditionAccepted),
 			Status:             metav1.ConditionFalse,
@@ -393,15 +404,14 @@ func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1
 			Message:            "Gateway failed to be programmed",
 			ObservedGeneration: route.Generation,
 		})
+		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionResolvedRefs),
+			Status:             metav1.ConditionFalse,
+			Reason:             "GatewayNotReady",
+			Message:            "Gateway is not ready, so references cannot be resolved",
+			ObservedGeneration: route.Generation,
+		})
 	}
-
-	meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
-		Type:               string(gatewayv1.RouteConditionResolvedRefs),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(gatewayv1.RouteReasonResolvedRefs),
-		Message:            "All references resolved",
-		ObservedGeneration: route.Generation,
-	})
 
 	newRoute := route.DeepCopy()
 	found := false
