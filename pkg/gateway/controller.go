@@ -299,7 +299,7 @@ func (c *Controller) Init(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) syncGatewayClass(key string) error {
+func (c *Controller) syncGatewayClass(key string) {
 	startTime := time.Now()
 	klog.V(2).Infof("Started syncing gatewayclass %q (%v)", key, time.Since(startTime))
 	defer func() {
@@ -310,14 +310,13 @@ func (c *Controller) syncGatewayClass(key string) error {
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.V(2).Infof("GatewayClass %q has been deleted", key)
-			return nil
 		}
-		return err
+		return
 	}
 
 	// We only care about the GatewayClass that matches our controller name.
 	if gwc.Spec.ControllerName != controllerName {
-		return nil
+		return
 	}
 
 	newGwc := gwc.DeepCopy()
@@ -332,9 +331,9 @@ func (c *Controller) syncGatewayClass(key string) error {
 
 	// Update the status on the API server.
 	if _, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(context.Background(), newGwc, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("failed to update gatewayclass status: %w", err)
+		klog.Errorf("failed to update gatewayclass status: %w", err)
 	}
-	return nil
+	return
 }
 
 func (c *Controller) Run(ctx context.Context) error {
