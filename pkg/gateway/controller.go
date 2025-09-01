@@ -331,7 +331,7 @@ func (c *Controller) syncGatewayClass(key string) {
 
 	// Update the status on the API server.
 	if _, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(context.Background(), newGwc, metav1.UpdateOptions{}); err != nil {
-		klog.Errorf("failed to update gatewayclass status: %w", err)
+		klog.Errorf("failed to update gatewayclass status: %v", err)
 	}
 	return
 }
