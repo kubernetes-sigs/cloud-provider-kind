@@ -113,14 +113,10 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			})
 	}
 
-	// Build Envoy resources and get the list of routes that are attached to this gateway.
 	envoyResources, listenerStatuses, httpRoutes, grpcRoutes := c.buildEnvoyResourcesForGateway(newGw)
 	newGw.Status.Listeners = listenerStatuses
-
-	// Attempt to update the Envoy configuration.
 	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
 
-	// Set the Programmed condition based on the result of the XDS update.
 	programmedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
 		ObservedGeneration: newGw.Generation,
@@ -136,7 +132,6 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	}
 	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
 
-	// Set the Accepted condition.
 	meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
 		Status:             metav1.ConditionTrue,
@@ -145,16 +140,12 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 		ObservedGeneration: newGw.Generation,
 	})
 
-	// Update the Gateway status if it has changed.
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
 		_, updateErr := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
 		if updateErr != nil {
 			klog.Errorf("Failed to update gateway status: %v", updateErr)
-			// Don't return here, still attempt to update route statuses.
 		}
 	}
-
-	// After processing the Gateway, update the status of all related routes.
 	c.updateRouteStatuses(ctx, newGw, programmedCondition, httpRoutes, grpcRoutes)
 
 	return err
@@ -183,6 +174,26 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				SupportedKinds: []gatewayv1.RouteGroupKind{},
 				Conditions:     []metav1.Condition{},
 			}
+			supportedKinds, allKindsValid := getSupportedKinds(listener)
+			listenerStatus.SupportedKinds = supportedKinds
+
+			if !allKindsValid {
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
+					Message:            "Invalid route kinds specified in allowedRoutes",
+					ObservedGeneration: gateway.Generation,
+				})
+			} else {
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionTrue,
+					Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+					Message:            "All references resolved",
+					ObservedGeneration: gateway.Generation,
+				})
+			}
 
 			virtualHost := &routev3.VirtualHost{
 				Name:    fmt.Sprintf("%s-%s", gateway.Name, listener.Name),
@@ -194,7 +205,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-				listenerStatus.SupportedKinds = append(listenerStatus.SupportedKinds, gatewayv1.RouteGroupKind{Kind: "HTTPRoute"}, gatewayv1.RouteGroupKind{Kind: "GRPCRoute"})
 				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
 				processedHTTPRoutes = append(processedHTTPRoutes, httpRoutes...)
 				for _, httpRoute := range httpRoutes {
@@ -249,13 +259,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				Message:            "Listener is valid",
 				ObservedGeneration: gateway.Generation,
 			})
-			meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
-				Message:            "All references resolved",
-				ObservedGeneration: gateway.Generation,
-			})
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
 
@@ -287,6 +290,39 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 		}, orderedStatuses,
 		processedHTTPRoutes,
 		processedGRPCRoutes
+}
+
+func getSupportedKinds(listener gatewayv1.Listener) ([]gatewayv1.RouteGroupKind, bool) {
+	supportedKinds := []gatewayv1.RouteGroupKind{}
+	allKindsValid := true
+	groupName := gatewayv1.Group(gatewayv1.GroupName)
+
+	if listener.AllowedRoutes != nil && len(listener.AllowedRoutes.Kinds) > 0 {
+		for _, kind := range listener.AllowedRoutes.Kinds {
+			if (kind.Group == nil || *kind.Group == groupName) && (kind.Kind == "HTTPRoute" || kind.Kind == "GRPCRoute") {
+				supportedKinds = append(supportedKinds, gatewayv1.RouteGroupKind{
+					Group: &groupName,
+					Kind:  kind.Kind,
+				})
+			} else {
+				allKindsValid = false
+			}
+		}
+	} else {
+		if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType {
+			supportedKinds = append(supportedKinds,
+				gatewayv1.RouteGroupKind{
+					Group: &groupName,
+					Kind:  "HTTPRoute",
+				},
+				gatewayv1.RouteGroupKind{
+					Group: &groupName,
+					Kind:  "GRPCRoute",
+				})
+		}
+	}
+
+	return supportedKinds, allKindsValid
 }
 
 func (c *Controller) updateRouteStatuses(ctx context.Context, gw *gatewayv1.Gateway, programmedCondition metav1.Condition, httpRoutes []*gatewayv1.HTTPRoute, grpcRoutes []*gatewayv1.GRPCRoute) {
