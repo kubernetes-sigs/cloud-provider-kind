@@ -249,6 +249,13 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				Message:            "Listener is valid",
 				ObservedGeneration: gateway.Generation,
 			})
+			meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+				Message:            "All references resolved",
+				ObservedGeneration: gateway.Generation,
+			})
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
 
