@@ -88,6 +88,9 @@ type Controller struct {
 	secretLister       corev1listers.SecretLister
 	secretListerSynced cache.InformerSynced
 
+	gatewayClassLister       gatewaylisters.GatewayClassLister
+	gatewayClassListerSynced cache.InformerSynced
+
 	gatewayLister       gatewaylisters.GatewayLister
 	gatewayListerSynced cache.InformerSynced
 	gatewayqueue        workqueue.TypedRateLimitingInterface[string]
@@ -114,22 +117,25 @@ func New(
 	namespaceInformer corev1informers.NamespaceInformer,
 	serviceInformer corev1informers.ServiceInformer,
 	secretInformer corev1informers.SecretInformer,
+	gatewayClassInformer gatewayinformers.GatewayClassInformer,
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
 ) (*Controller, error) {
 	c := &Controller{
-		clusterName:           clusterName,
-		client:                client,
-		namespaceLister:       namespaceInformer.Lister(),
-		namespaceListerSynced: namespaceInformer.Informer().HasSynced,
-		serviceLister:         serviceInformer.Lister(),
-		serviceListerSynced:   serviceInformer.Informer().HasSynced,
-		secretLister:          secretInformer.Lister(),
-		secretListerSynced:    secretInformer.Informer().HasSynced,
-		gwClient:              gwClient,
-		gatewayLister:         gatewayInformer.Lister(),
-		gatewayListerSynced:   gatewayInformer.Informer().HasSynced,
+		clusterName:              clusterName,
+		client:                   client,
+		namespaceLister:          namespaceInformer.Lister(),
+		namespaceListerSynced:    namespaceInformer.Informer().HasSynced,
+		serviceLister:            serviceInformer.Lister(),
+		serviceListerSynced:      serviceInformer.Informer().HasSynced,
+		secretLister:             secretInformer.Lister(),
+		secretListerSynced:       secretInformer.Informer().HasSynced,
+		gwClient:                 gwClient,
+		gatewayClassLister:       gatewayClassInformer.Lister(),
+		gatewayClassListerSynced: gatewayClassInformer.Informer().HasSynced,
+		gatewayLister:            gatewayInformer.Lister(),
+		gatewayListerSynced:      gatewayInformer.Informer().HasSynced,
 		gatewayqueue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "gateway"},
@@ -139,8 +145,31 @@ func New(
 		grpcrouteLister:       grpcrouteInformer.Lister(),
 		grpcrouteListerSynced: grpcrouteInformer.Informer().HasSynced,
 	}
+	_, err := gatewayClassInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			if err == nil {
+				c.syncGatewayClass(key)
+			}
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(newObj)
+			if err == nil {
+				c.syncGatewayClass(key)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			if err == nil {
+				c.syncGatewayClass(key)
+			}
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 
-	_, err := gatewayInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err = gatewayInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			gw := obj.(*gatewayv1.Gateway)
 			if gw.Spec.GatewayClassName != GWClassName {
@@ -258,31 +287,53 @@ func (c *Controller) Init(ctx context.Context) error {
 		},
 	}
 
-	gwClass, err := c.gwClient.GatewayV1().GatewayClasses().Get(ctx, GWClassName, metav1.GetOptions{})
+	_, err := c.gwClient.GatewayV1().GatewayClasses().Get(ctx, GWClassName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		gwClass, err = c.gwClient.GatewayV1().GatewayClasses().Create(ctx, &kindGwClass, metav1.CreateOptions{})
+		_, err = c.gwClient.GatewayV1().GatewayClasses().Create(ctx, &kindGwClass, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create cloud-provider-kind GatewayClass: %w", err)
 		}
 	} else if err != nil {
 		return fmt.Errorf("failed to get cloud-provider-kind GatewayClass: %w", err)
 	}
+	return nil
+}
 
-	condition := metav1.Condition{
+func (c *Controller) syncGatewayClass(key string) error {
+	startTime := time.Now()
+	klog.V(2).Infof("Started syncing gatewayclass %q (%v)", key, time.Since(startTime))
+	defer func() {
+		klog.V(2).Infof("Finished syncing gatewayclass %q (%v)", key, time.Since(startTime))
+	}()
+
+	gwc, err := c.gatewayClassLister.Get(key)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			klog.V(2).Infof("GatewayClass %q has been deleted", key)
+			return nil
+		}
+		return err
+	}
+
+	// We only care about the GatewayClass that matches our controller name.
+	if gwc.Spec.ControllerName != controllerName {
+		return nil
+	}
+
+	newGwc := gwc.DeepCopy()
+	// Set the "Accepted" condition to True and update the observedGeneration.
+	meta.SetStatusCondition(&newGwc.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
 		Status:             metav1.ConditionTrue,
 		Reason:             string(gatewayv1.GatewayClassReasonAccepted),
-		Message:            "Managed by Cloud Provider KIND controller",
-		ObservedGeneration: gwClass.Generation,
-	}
+		Message:            "GatewayClass is accepted by this controller.",
+		ObservedGeneration: gwc.Generation,
+	})
 
-	if meta.SetStatusCondition(&gwClass.Status.Conditions, condition) {
-		_, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(ctx, gwClass, metav1.UpdateOptions{})
-		if err != nil {
-			return err
-		}
+	// Update the status on the API server.
+	if _, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(context.Background(), newGwc, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("failed to update gatewayclass status: %w", err)
 	}
-
 	return nil
 }
 
