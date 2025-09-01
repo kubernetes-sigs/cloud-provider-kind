@@ -333,7 +333,6 @@ func (c *Controller) syncGatewayClass(key string) {
 	if _, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(context.Background(), newGwc, metav1.UpdateOptions{}); err != nil {
 		klog.Errorf("failed to update gatewayclass status: %v", err)
 	}
-	return
 }
 
 func (c *Controller) Run(ctx context.Context) error {
