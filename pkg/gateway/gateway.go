@@ -247,11 +247,21 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// If translation fails, set the listener's conditions to reflect the error
 				// but do not skip the listener entirely.
 				klog.Errorf("Error translating listener %s to filter chain: %v", listener.Name, err)
+				// Set ResolvedRefs to False because a reference is missing.
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(gatewayv1.ListenerReasonRefNotPermitted), // Or a more specific reason.
+					Message:            fmt.Sprintf("Failed to resolve references: %v", err),
+					ObservedGeneration: gateway.Generation,
+				})
+
+				// Set Programmed to False because the listener cannot be configured.
 				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
 					Type:               string(gatewayv1.ListenerConditionProgrammed),
 					Status:             metav1.ConditionFalse,
 					Reason:             string(gatewayv1.ListenerReasonInvalid),
-					Message:            fmt.Sprintf("Failed to translate listener: %v", err),
+					Message:            fmt.Sprintf("Failed to program listener: %v", err),
 					ObservedGeneration: gateway.Generation,
 				})
 			} else {
