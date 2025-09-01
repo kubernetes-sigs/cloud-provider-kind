@@ -111,6 +111,7 @@ jobs:
     - name: Run tests
       run: |
         /usr/local/bin/conformance.test -test.run TestConformance \
+            --debug=true \
             --kubeconfig=_artifacts/kubeconfig.conf \
             --organization=sigs.k8s.io \
             --project=cloud-provider-kind \
