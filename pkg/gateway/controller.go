@@ -40,6 +40,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -275,8 +276,7 @@ func (c *Controller) Init(ctx context.Context) error {
 		ObservedGeneration: gwClass.Generation,
 	}
 
-	if conditions, ok := UpdateConditionIfChanged(gwClass.Status.Conditions, condition); ok {
-		gwClass.Status.Conditions = conditions
+	if meta.SetStatusCondition(&gwClass.Status.Conditions, condition) {
 		_, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(ctx, gwClass, metav1.UpdateOptions{})
 		if err != nil {
 			return err
@@ -416,31 +416,6 @@ func (c *Controller) handleGatewayErr(err error, key string) {
 	c.gatewayqueue.Forget(key)
 	runtime.HandleError(err)
 	klog.Infof("Dropping Gateway %q out of the queue: %v", key, err)
-}
-
-func UpdateConditionIfChanged(conditions []metav1.Condition, condition metav1.Condition) ([]metav1.Condition, bool) {
-	exist := false
-	newConditions := make([]metav1.Condition, 0, len(conditions))
-	for _, existing := range conditions {
-		if existing.Type == condition.Type {
-			exist = true
-			if existing.Status != condition.Status || existing.Reason != condition.Reason || existing.Message != condition.Message {
-				condition.LastTransitionTime = metav1.Now()
-				newConditions = append(newConditions, condition)
-			} else {
-				return conditions, false
-			}
-		} else {
-			newConditions = append(newConditions, existing)
-		}
-	}
-
-	if !exist {
-		condition.LastTransitionTime = metav1.Now()
-		newConditions = append(newConditions, condition)
-	}
-
-	return newConditions, true
 }
 
 func GetControlPlaneAddress() (string, error) {

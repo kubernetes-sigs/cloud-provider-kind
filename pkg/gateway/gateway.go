@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
+	"reflect"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
@@ -110,47 +113,59 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			})
 	}
 
-	acceptedCondition := metav1.Condition{
-		Type:               string(gatewayv1.GatewayConditionAccepted),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(gatewayv1.GatewayReasonAccepted),
-		Message:            "Gateway is accepted",
-		ObservedGeneration: gw.Generation,
-	}
-	if conditions, ok := UpdateConditionIfChanged(newGw.Status.Conditions, acceptedCondition); ok {
-		newGw.Status.Conditions = conditions
-	}
-
-	envoyResources, listenerStatuses := c.buildEnvoyResourcesForGateway(gw)
+	// Build Envoy resources and get the list of routes that are attached to this gateway.
+	envoyResources, listenerStatuses, httpRoutes, grpcRoutes := c.buildEnvoyResourcesForGateway(newGw)
 	newGw.Status.Listeners = listenerStatuses
 
+	// Attempt to update the Envoy configuration.
 	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
+
+	// Set the Programmed condition based on the result of the XDS update.
 	programmedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
-		ObservedGeneration: gw.Generation,
+		ObservedGeneration: newGw.Generation,
 	}
 	if err != nil {
 		programmedCondition.Status = metav1.ConditionFalse
-		programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
+		programmedCondition.Reason = "ReconciliationError"
 		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", err.Error())
 	} else {
 		programmedCondition.Status = metav1.ConditionTrue
 		programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
 		programmedCondition.Message = "Envoy configuration updated successfully"
 	}
+	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
 
-	if conditions, ok := UpdateConditionIfChanged(newGw.Status.Conditions, programmedCondition); ok {
-		newGw.Status.Conditions = conditions
+	// Set the Accepted condition.
+	meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.GatewayReasonAccepted),
+		Message:            "Gateway is accepted",
+		ObservedGeneration: newGw.Generation,
+	})
+
+	// Update the Gateway status if it has changed.
+	if !reflect.DeepEqual(gw.Status, newGw.Status) {
+		_, updateErr := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
+		if updateErr != nil {
+			klog.Errorf("Failed to update gateway status: %v", updateErr)
+			// Don't return here, still attempt to update route statuses.
+		}
 	}
 
-	_, err = c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
+	// After processing the Gateway, update the status of all related routes.
+	c.updateRouteStatuses(ctx, newGw, programmedCondition, httpRoutes, grpcRoutes)
+
 	return err
 }
 
-func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (map[resourcev3.Type][]envoyproxytypes.Resource, []gatewayv1.ListenerStatus) {
+func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (map[resourcev3.Type][]envoyproxytypes.Resource, []gatewayv1.ListenerStatus, []*gatewayv1.HTTPRoute, []*gatewayv1.GRPCRoute) {
 	envoyRoutes := []envoyproxytypes.Resource{}
 	envoyClusters := make(map[string]envoyproxytypes.Resource)
 	allListenerStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
+	var processedHTTPRoutes []*gatewayv1.HTTPRoute
+	var processedGRPCRoutes []*gatewayv1.GRPCRoute
 
 	listenersByPort := make(map[gatewayv1.PortNumber][]gatewayv1.Listener)
 	for _, listener := range gateway.Spec.Listeners {
@@ -160,7 +175,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	finalEnvoyListeners := []envoyproxytypes.Resource{}
 	for port, listeners := range listenersByPort {
 		var filterChains []*listenerv3.FilterChain
-		var envoyListener *listenerv3.Listener
 
 		for _, listener := range listeners {
 			var attachedRoutes int32
@@ -181,7 +195,9 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
 				listenerStatus.SupportedKinds = append(listenerStatus.SupportedKinds, gatewayv1.RouteGroupKind{Kind: "HTTPRoute"}, gatewayv1.RouteGroupKind{Kind: "GRPCRoute"})
-				for _, httpRoute := range c.getHTTPRoutesForListener(gateway, listener) {
+				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
+				processedHTTPRoutes = append(processedHTTPRoutes, httpRoutes...)
+				for _, httpRoute := range httpRoutes {
 					if err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, virtualHost); err == nil {
 						attachedRoutes++
 						for _, rule := range httpRoute.Spec.Rules {
@@ -194,7 +210,10 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 						}
 					}
 				}
-				for _, grpcRoute := range c.getGRPCRoutesForListener(gateway, listener) {
+
+				grpcRoutes := c.getGRPCRoutesForListener(gateway, listener)
+				processedGRPCRoutes = append(processedGRPCRoutes, grpcRoutes...)
+				for _, grpcRoute := range grpcRoutes {
 					if err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, virtualHost); err == nil {
 						attachedRoutes++
 						for _, rule := range grpcRoute.Spec.Rules {
@@ -223,21 +242,18 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			filterChains = append(filterChains, filterChain)
 
 			listenerStatus.AttachedRoutes = attachedRoutes
-			acceptedCondition := metav1.Condition{
+			meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
 				Type:               string(gatewayv1.ListenerConditionAccepted),
 				Status:             metav1.ConditionTrue,
 				Reason:             string(gatewayv1.ListenerReasonAccepted),
 				Message:            "Listener is valid",
 				ObservedGeneration: gateway.Generation,
-			}
-			if conditions, ok := UpdateConditionIfChanged(listenerStatus.Conditions, acceptedCondition); ok {
-				listenerStatus.Conditions = conditions
-			}
+			})
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
 
 		if len(filterChains) > 0 {
-			envoyListener = &listenerv3.Listener{
+			envoyListener := &listenerv3.Listener{
 				Name:            fmt.Sprintf("listener-%d", port),
 				Address:         createEnvoyAddress(uint32(port)),
 				FilterChains:    filterChains,
@@ -258,10 +274,127 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	}
 
 	return map[resourcev3.Type][]envoyproxytypes.Resource{
-		resourcev3.ListenerType: finalEnvoyListeners,
-		resourcev3.RouteType:    envoyRoutes,
-		resourcev3.ClusterType:  clustersSlice,
-	}, orderedStatuses
+			resourcev3.ListenerType: finalEnvoyListeners,
+			resourcev3.RouteType:    envoyRoutes,
+			resourcev3.ClusterType:  clustersSlice,
+		}, orderedStatuses,
+		processedHTTPRoutes,
+		processedGRPCRoutes
+}
+
+func (c *Controller) updateRouteStatuses(ctx context.Context, gw *gatewayv1.Gateway, programmedCondition metav1.Condition, httpRoutes []*gatewayv1.HTTPRoute, grpcRoutes []*gatewayv1.GRPCRoute) {
+	for _, httpRoute := range httpRoutes {
+		c.updateHTTPRouteStatus(ctx, httpRoute, gw, programmedCondition)
+	}
+	for _, grpcRoute := range grpcRoutes {
+		c.updateGRPCRouteStatus(ctx, grpcRoute, gw, programmedCondition)
+	}
+}
+
+func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1.HTTPRoute, gw *gatewayv1.Gateway, programmed metav1.Condition) {
+	newParentStatus := gatewayv1.RouteParentStatus{
+		ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gw.Name), Namespace: ptr.To(gatewayv1.Namespace(gw.Namespace))},
+		ControllerName: controllerName,
+		Conditions:     []metav1.Condition{},
+	}
+
+	if programmed.Status == metav1.ConditionTrue {
+		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.RouteReasonAccepted),
+			Message:            "Route is accepted",
+			ObservedGeneration: route.Generation,
+		})
+	} else {
+		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			Status:             metav1.ConditionFalse,
+			Reason:             "GatewayNotProgrammed",
+			Message:            "Gateway failed to be programmed",
+			ObservedGeneration: route.Generation,
+		})
+	}
+
+	meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionResolvedRefs),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+		Message:            "All references resolved",
+		ObservedGeneration: route.Generation,
+	})
+
+	newRoute := route.DeepCopy()
+	found := false
+	for i, parent := range newRoute.Status.Parents {
+		if parent.ParentRef.Name == gatewayv1.ObjectName(gw.Name) && parent.ParentRef.Namespace != nil && *parent.ParentRef.Namespace == gatewayv1.Namespace(gw.Namespace) {
+			newRoute.Status.Parents[i] = newParentStatus
+			found = true
+			break
+		}
+	}
+	if !found {
+		newRoute.Status.Parents = append(newRoute.Status.Parents, newParentStatus)
+	}
+
+	if !reflect.DeepEqual(route.Status, newRoute.Status) {
+		if _, err := c.gwClient.GatewayV1().HTTPRoutes(route.Namespace).UpdateStatus(ctx, newRoute, metav1.UpdateOptions{}); err != nil {
+			klog.Errorf("Failed to update HTTPRoute %s/%s status: %v", route.Namespace, route.Name, err)
+		}
+	}
+}
+
+func (c *Controller) updateGRPCRouteStatus(ctx context.Context, route *gatewayv1.GRPCRoute, gw *gatewayv1.Gateway, programmed metav1.Condition) {
+	newParentStatus := gatewayv1.RouteParentStatus{
+		ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gw.Name), Namespace: ptr.To(gatewayv1.Namespace(gw.Namespace))},
+		ControllerName: controllerName,
+		Conditions:     []metav1.Condition{},
+	}
+
+	if programmed.Status == metav1.ConditionTrue {
+		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.RouteReasonAccepted),
+			Message:            "Route is accepted",
+			ObservedGeneration: route.Generation,
+		})
+	} else {
+		meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			Status:             metav1.ConditionFalse,
+			Reason:             "GatewayNotProgrammed",
+			Message:            "Gateway failed to be programmed",
+			ObservedGeneration: route.Generation,
+		})
+	}
+
+	meta.SetStatusCondition(&newParentStatus.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionResolvedRefs),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+		Message:            "All references resolved",
+		ObservedGeneration: route.Generation,
+	})
+
+	newRoute := route.DeepCopy()
+	found := false
+	for i, parent := range newRoute.Status.Parents {
+		if parent.ParentRef.Name == gatewayv1.ObjectName(gw.Name) && parent.ParentRef.Namespace != nil && *parent.ParentRef.Namespace == gatewayv1.Namespace(gw.Namespace) {
+			newRoute.Status.Parents[i] = newParentStatus
+			found = true
+			break
+		}
+	}
+	if !found {
+		newRoute.Status.Parents = append(newRoute.Status.Parents, newParentStatus)
+	}
+
+	if !reflect.DeepEqual(route.Status, newRoute.Status) {
+		if _, err := c.gwClient.GatewayV1().GRPCRoutes(route.Namespace).UpdateStatus(ctx, newRoute, metav1.UpdateOptions{}); err != nil {
+			klog.Errorf("Failed to update GRPCRoute %s/%s status: %v", route.Namespace, route.Name, err)
+		}
+	}
 }
 
 func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.HTTPRoute {
@@ -439,6 +572,10 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 	if err != nil {
 		return err
 	}
+	nodeAddr, err := netip.ParseAddr(nodeIP)
+	if err != nil {
+		return err
+	}
 
 	serviceCIDRs, err := c.client.NetworkingV1().ServiceCIDRs().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -451,6 +588,14 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 	var routesAdded int
 	for _, serviceCIDRObject := range serviceCIDRs.Items {
 		for _, cidr := range serviceCIDRObject.Spec.CIDRs {
+			prefix, err := netip.ParsePrefix(cidr)
+			if err != nil {
+				return fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
+			}
+			if prefix.Addr().Is4() != nodeAddr.Is4() {
+				continue
+			}
+
 			cmd := []string{"ip", "route", "replace", cidr, "via", nodeIP}
 			klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
 			if err := container.Exec(containerName, cmd, nil, &stdout, &stderr); err != nil {
