@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -141,14 +142,13 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	})
 
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
-		_, updateErr := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
-		if updateErr != nil {
-			klog.Errorf("Failed to update gateway status: %v", updateErr)
+		_, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
+		if err != nil {
+			klog.Errorf("Failed to update gateway status: %v", err)
+			return err
 		}
 	}
-	c.updateRouteStatuses(ctx, newGw, programmedCondition, httpRoutes, grpcRoutes)
-
-	return err
+	return c.updateRouteStatuses(ctx, newGw, programmedCondition, httpRoutes, grpcRoutes)
 }
 
 func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (map[resourcev3.Type][]envoyproxytypes.Resource, []gatewayv1.ListenerStatus, []*gatewayv1.HTTPRoute, []*gatewayv1.GRPCRoute) {
@@ -170,9 +170,10 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 		for _, listener := range listeners {
 			var attachedRoutes int32
 			listenerStatus := gatewayv1.ListenerStatus{
-				Name:           listener.Name,
+				Name:           gatewayv1.SectionName(listener.Name),
 				SupportedKinds: []gatewayv1.RouteGroupKind{},
 				Conditions:     []metav1.Condition{},
+				AttachedRoutes: 0,
 			}
 			supportedKinds, allKindsValid := getSupportedKinds(listener)
 			listenerStatus.SupportedKinds = supportedKinds
@@ -325,16 +326,24 @@ func getSupportedKinds(listener gatewayv1.Listener) ([]gatewayv1.RouteGroupKind,
 	return supportedKinds, allKindsValid
 }
 
-func (c *Controller) updateRouteStatuses(ctx context.Context, gw *gatewayv1.Gateway, programmedCondition metav1.Condition, httpRoutes []*gatewayv1.HTTPRoute, grpcRoutes []*gatewayv1.GRPCRoute) {
+func (c *Controller) updateRouteStatuses(ctx context.Context, gw *gatewayv1.Gateway, programmedCondition metav1.Condition, httpRoutes []*gatewayv1.HTTPRoute, grpcRoutes []*gatewayv1.GRPCRoute) error {
+	var errGroup []error
 	for _, httpRoute := range httpRoutes {
-		c.updateHTTPRouteStatus(ctx, httpRoute, gw, programmedCondition)
+		err := c.updateHTTPRouteStatus(ctx, httpRoute, gw, programmedCondition)
+		if err != nil {
+			errGroup = append(errGroup, err)
+		}
 	}
 	for _, grpcRoute := range grpcRoutes {
-		c.updateGRPCRouteStatus(ctx, grpcRoute, gw, programmedCondition)
+		err := c.updateGRPCRouteStatus(ctx, grpcRoute, gw, programmedCondition)
+		if err != nil {
+			errGroup = append(errGroup, err)
+		}
 	}
+	return errors.Join(errGroup...)
 }
 
-func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1.HTTPRoute, gw *gatewayv1.Gateway, programmed metav1.Condition) {
+func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1.HTTPRoute, gw *gatewayv1.Gateway, programmed metav1.Condition) error {
 	newParentStatus := gatewayv1.RouteParentStatus{
 		ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gw.Name), Namespace: ptr.To(gatewayv1.Namespace(gw.Namespace))},
 		ControllerName: controllerName,
@@ -383,11 +392,13 @@ func (c *Controller) updateHTTPRouteStatus(ctx context.Context, route *gatewayv1
 	if !reflect.DeepEqual(route.Status, newRoute.Status) {
 		if _, err := c.gwClient.GatewayV1().HTTPRoutes(route.Namespace).UpdateStatus(ctx, newRoute, metav1.UpdateOptions{}); err != nil {
 			klog.Errorf("Failed to update HTTPRoute %s/%s status: %v", route.Namespace, route.Name, err)
+			return err
 		}
 	}
+	return nil
 }
 
-func (c *Controller) updateGRPCRouteStatus(ctx context.Context, route *gatewayv1.GRPCRoute, gw *gatewayv1.Gateway, programmed metav1.Condition) {
+func (c *Controller) updateGRPCRouteStatus(ctx context.Context, route *gatewayv1.GRPCRoute, gw *gatewayv1.Gateway, programmed metav1.Condition) error {
 	newParentStatus := gatewayv1.RouteParentStatus{
 		ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gw.Name), Namespace: ptr.To(gatewayv1.Namespace(gw.Namespace))},
 		ControllerName: controllerName,
@@ -436,8 +447,10 @@ func (c *Controller) updateGRPCRouteStatus(ctx context.Context, route *gatewayv1
 	if !reflect.DeepEqual(route.Status, newRoute.Status) {
 		if _, err := c.gwClient.GatewayV1().GRPCRoutes(route.Namespace).UpdateStatus(ctx, newRoute, metav1.UpdateOptions{}); err != nil {
 			klog.Errorf("Failed to update GRPCRoute %s/%s status: %v", route.Namespace, route.Name, err)
+			return err
 		}
 	}
+	return nil
 }
 
 func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.HTTPRoute {
