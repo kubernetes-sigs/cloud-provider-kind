@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
 	"text/template"
@@ -160,6 +161,30 @@ func createGateway(clusterName string, localAddress string, localPort int, gatew
 		"--sysctl=net.ipv4.ip_forward=1",
 		"--sysctl=net.ipv4.conf.all.rp_filter=0",
 		"--sysctl=net.ipv4.ip_unprivileged_port_start=1",
+	}
+
+	// support to specify addresses
+	// only the first of each IP family will be used
+	var ipv4, ipv6 string
+	for _, address := range gateway.Spec.Addresses {
+		if address.Type != nil && *address.Type != gatewayv1.IPAddressType {
+			continue
+		}
+		ip, err := netip.ParseAddr(address.Value)
+		if err != nil {
+			continue
+		}
+		if ip.Is4() {
+			if ipv4 == "" {
+				ipv4 = address.Value
+				args = append(args, "--ip", ip.String())
+			}
+		} else if ip.Is6() {
+			if ipv6 == "" {
+				ipv6 = address.Value
+				args = append(args, "--ip6", ip.String())
+			}
+		}
 	}
 
 	args = append(args, []string{
