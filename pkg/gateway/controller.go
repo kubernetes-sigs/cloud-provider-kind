@@ -74,6 +74,16 @@ const (
 	grpcMaxConcurrentStreams = 1000000
 )
 
+type ControllerError struct {
+	Reason  string
+	Message string
+}
+
+// Error implements the error interface.
+func (e *ControllerError) Error() string {
+	return e.Message
+}
+
 type Controller struct {
 	clusterName       string
 	clusterNameserver string
