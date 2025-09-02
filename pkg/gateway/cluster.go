@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"net/netip"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,6 +18,25 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+//go:embed routeadder/route-adder-amd64
+var routeAdderAmd64 []byte
+
+//go:embed routeadder/route-adder-arm64
+var routeAdderArm64 []byte
+
+func getRouteAdderBinaryForArch() ([]byte, error) {
+	arch := runtime.GOARCH
+
+	switch arch {
+	case "amd64":
+		return routeAdderAmd64, nil
+	case "arm64":
+		return routeAdderArm64, nil
+	default:
+		return nil, fmt.Errorf("unsupported architecture: %s", arch)
+	}
+}
 
 func (c *Controller) getClusterNodeIP(ctx context.Context) (string, error) {
 	nodes, err := c.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -71,13 +92,23 @@ func (c *Controller) getServiceCIDRs(ctx context.Context) ([]string, error) {
 }
 
 func (c *Controller) configureContainerNetworking(ctx context.Context, containerName string) error {
-	var stdout, stderr bytes.Buffer
-
-	installCmd := []string{"sh", "-c", "apt-get update && apt-get install -y iproute2"}
-	klog.Infof("Installing iproute2 in container %s", containerName)
-	if err := container.Exec(containerName, installCmd, nil, &stdout, &stderr); err != nil {
-		klog.Warningf("Failed to install iproute2 in container %s, proceeding anyway: %v", containerName, err)
+	binaryData, err := getRouteAdderBinaryForArch()
+	if err != nil {
+		return err
 	}
+
+	containerBinaryPath := "/tmp/route-adder"
+
+	// 2. Combine copy and chmod into a single Exec call.
+	// The shell command 'cat > file && chmod +x file' does both steps sequentially.
+	setupCmd := []string{"sh", "-c", fmt.Sprintf("cat > %s && chmod +x %s", containerBinaryPath, containerBinaryPath)}
+	stdinReader := bytes.NewReader(binaryData)
+
+	klog.Infof("Streaming and setting up route-adder utility in %s", containerName)
+	if err := container.Exec(containerName, setupCmd, stdinReader, nil, nil); err != nil {
+		return fmt.Errorf("failed to setup route-adder binary in container %s: %w", containerName, err)
+	}
+	klog.Infof("Successfully installed route-adder utility in container %s", containerName)
 
 	nodeIP, err := c.getClusterNodeIP(ctx)
 	if err != nil {
@@ -97,6 +128,7 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 	}
 
 	var routesAdded int
+	var stdout, stderr bytes.Buffer
 	for _, cidr := range serviceCIDRs {
 		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil {
@@ -105,11 +137,15 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 		if prefix.Addr().Is4() != nodeAddr.Is4() {
 			continue
 		}
-
-		cmd := []string{"ip", "route", "replace", cidr, "via", nodeIP}
+		cmd := []string{containerBinaryPath, cidr, nodeIP}
 		klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
+
+		stdout.Reset()
+		stderr.Reset()
+
 		if err := container.Exec(containerName, cmd, nil, &stdout, &stderr); err != nil {
-			return fmt.Errorf("failed to add route '%s' to container %s: %w", strings.Join(cmd, " "), containerName, err)
+			return fmt.Errorf("failed to add route '%s' via %s to container %s: %w, stderr: %s",
+				cidr, nodeIP, containerName, err, stderr.String())
 		}
 		routesAdded++
 	}
@@ -143,7 +179,7 @@ func (c *Controller) ensureGatewayContainer(ctx context.Context, gw *gatewayv1.G
 		}
 
 		// TODO fix this hack
-		time.Sleep(750 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 
 		if err := c.configureContainerNetworking(ctx, containerName); err != nil {
 			if delErr := container.Delete(containerName); delErr != nil {
