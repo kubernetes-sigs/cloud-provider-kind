@@ -196,7 +196,7 @@ func (c *Controller) ensureGatewayContainer(ctx context.Context, gw *gatewayv1.G
 	if !container.Exist(containerName) {
 		klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
 		enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
-		err := createGateway(c.clusterName, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
+		err := createGateway(c.clusterName, c.clusterNameserver, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
 		if err != nil {
 			return err
 		}

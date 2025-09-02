@@ -75,9 +75,11 @@ const (
 )
 
 type Controller struct {
-	clusterName string
-	client      kubernetes.Interface
-	gwClient    gatewayclient.Interface
+	clusterName       string
+	clusterNameserver string
+
+	client   kubernetes.Interface
+	gwClient gatewayclient.Interface
 
 	namespaceLister       corev1listers.NamespaceLister
 	namespaceListerSynced cache.InformerSynced
@@ -295,6 +297,23 @@ func (c *Controller) Init(ctx context.Context) error {
 		}
 	} else if err != nil {
 		return fmt.Errorf("failed to get cloud-provider-kind GatewayClass: %w", err)
+	}
+
+	// This is kind/kubeadm specific as it uses kube-system/kube-dns as the nameserver
+	err = wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
+		svc, err := c.serviceLister.Services(metav1.NamespaceSystem).Get("kube-dns")
+		if err != nil {
+			return false, nil
+		}
+		if svc.Spec.ClusterIP == "" {
+			return false, nil
+		}
+		c.clusterNameserver = svc.Spec.ClusterIP
+		return true, nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to get kube-dns service: %w", err)
 	}
 	return nil
 }

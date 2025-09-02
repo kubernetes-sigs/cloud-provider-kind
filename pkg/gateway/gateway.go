@@ -19,6 +19,8 @@ import (
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -569,12 +571,37 @@ func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backe
 	if err != nil {
 		return nil, err
 	}
-	return &clusterv3.Cluster{
-		Name:                 clusterName,
-		ConnectTimeout:       durationpb.New(5 * time.Second),
-		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
-		LoadAssignment:       createClusterLoadAssignment(clusterName, service.Spec.ClusterIP, uint32(*backendRef.Port)),
-	}, nil
+
+	// Create the base cluster configuration.
+	cluster := &clusterv3.Cluster{
+		Name:           clusterName,
+		ConnectTimeout: durationpb.New(5 * time.Second),
+	}
+
+	if service.Spec.ClusterIP == corev1.ClusterIPNone {
+		// Use STRICT_DNS discovery and the service's FQDN.
+		cluster.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STRICT_DNS}
+		// Construct the FQDN for the service.
+		fqdn := fmt.Sprintf("%s.%s.svc.cluster.local", service.Name, service.Namespace)
+		// Get the port of the endpoints.
+		targetPort := 0
+		for _, port := range service.Spec.Ports {
+			if port.Port == int32(*backendRef.Port) {
+				targetPort = int(port.TargetPort.IntVal)
+				break
+			}
+		}
+		if targetPort == 0 {
+			return nil, fmt.Errorf("could not find port %d in service %s/%s", *backendRef.Port, service.Namespace, service.Name)
+		}
+		cluster.LoadAssignment = createClusterLoadAssignment(clusterName, fqdn, uint32(targetPort))
+	} else {
+		// Use STATIC discovery with the service's ClusterIP.
+		cluster.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC}
+		cluster.LoadAssignment = createClusterLoadAssignment(clusterName, service.Spec.ClusterIP, uint32(*backendRef.Port))
+	}
+
+	return cluster, nil
 }
 
 func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace string) error {
