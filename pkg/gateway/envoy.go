@@ -128,7 +128,7 @@ func gatewaySimpleName(clusterName, namespace, name string) string {
 }
 
 // createGateway create a docker container with a gateway
-func createGateway(clusterName string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
+func createGateway(clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfigData := &configData{
@@ -154,6 +154,7 @@ func createGateway(clusterName string, localAddress string, localPort int, gatew
 		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
 		"--label", fmt.Sprintf("%s=%s", constants.GatewayNameLabelKey, simpleName),
 		"--net", networkName,
+		"--dns", nameserver,
 		"--init=false",
 		"--hostname", name,
 		"--privileged",
