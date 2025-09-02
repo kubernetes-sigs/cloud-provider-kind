@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -655,14 +656,14 @@ func (c *Controller) getServiceCIDRs(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("no servicecidrs found in the cluster")
 	}
 
-	var cidrs []string
+	var cidrs sets.Set[string]
 	for _, serviceCIDRObject := range serviceCIDRs.Items {
-		cidrs = append(cidrs, serviceCIDRObject.Spec.CIDRs...)
+		cidrs.Insert(serviceCIDRObject.Spec.CIDRs...)
 	}
 	if len(cidrs) == 0 {
 		return nil, fmt.Errorf("no CIDRs found in any ServiceCIDR object")
 	}
-	return cidrs, nil
+	return cidrs.UnsortedList(), nil
 }
 
 func (c *Controller) configureContainerNetworking(ctx context.Context, containerName string) error {
@@ -683,32 +684,30 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 		return err
 	}
 
-	serviceCIDRs, err := c.client.NetworkingV1().ServiceCIDRs().List(ctx, metav1.ListOptions{})
+	serviceCIDRs, err := c.getServiceCIDRs(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list servicecidrs: %w", err)
 	}
-	if len(serviceCIDRs.Items) == 0 {
+	if len(serviceCIDRs) == 0 {
 		return fmt.Errorf("no servicecidrs found in the cluster")
 	}
 
 	var routesAdded int
-	for _, serviceCIDRObject := range serviceCIDRs.Items {
-		for _, cidr := range serviceCIDRObject.Spec.CIDRs {
-			prefix, err := netip.ParsePrefix(cidr)
-			if err != nil {
-				return fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
-			}
-			if prefix.Addr().Is4() != nodeAddr.Is4() {
-				continue
-			}
-
-			cmd := []string{"ip", "route", "replace", cidr, "via", nodeIP}
-			klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
-			if err := container.Exec(containerName, cmd, nil, &stdout, &stderr); err != nil {
-				return fmt.Errorf("failed to add route '%s' to container %s: %w", strings.Join(cmd, " "), containerName, err)
-			}
-			routesAdded++
+	for _, cidr := range serviceCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
 		}
+		if prefix.Addr().Is4() != nodeAddr.Is4() {
+			continue
+		}
+
+		cmd := []string{"ip", "route", "replace", cidr, "via", nodeIP}
+		klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
+		if err := container.Exec(containerName, cmd, nil, &stdout, &stderr); err != nil {
+			return fmt.Errorf("failed to add route '%s' to container %s: %w", strings.Join(cmd, " "), containerName, err)
+		}
+		routesAdded++
 	}
 
 	if routesAdded == 0 {
