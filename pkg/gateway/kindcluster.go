@@ -38,38 +38,80 @@ func getRouteAdderBinaryForArch() ([]byte, error) {
 	}
 }
 
-func (c *Controller) getClusterNodeIP(ctx context.Context) (string, error) {
+// getClusterRoutingMap creates a unified map of all routes required for the container.
+// It includes routes for each node's PodCIDRs and for the cluster's ServiceCIDRs.
+func (c *Controller) getClusterRoutingMap(ctx context.Context) (map[string]string, error) {
 	nodes, err := c.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil || len(nodes.Items) == 0 {
-		return "", fmt.Errorf("failed to list kubernetes nodes: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list kubernetes nodes: %w", err)
+	}
+	if len(nodes.Items) == 0 {
+		return nil, fmt.Errorf("no kubernetes nodes found in the cluster")
 	}
 
-	var nodeIP string
+	routeMap := make(map[string]string)
+	controlPlaneIPs := make(map[bool]string) // map[isIPv6]address
+
+	// --- 1. Process all nodes for PodCIDR routes and find a control-plane IP ---
 	for _, node := range nodes.Items {
-		if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok {
-			for _, addr := range node.Status.Addresses {
-				if addr.Type == corev1.NodeInternalIP {
-					nodeIP = addr.Address
-					break
-				}
-			}
-		}
-		if nodeIP != "" {
-			break
-		}
-	}
-	if nodeIP == "" {
-		for _, addr := range nodes.Items[0].Status.Addresses {
+		nodeIPs := make(map[bool]string) // map[isIPv6]address
+		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
-				nodeIP = addr.Address
-				break
+				ip, err := netip.ParseAddr(addr.Address)
+				if err != nil {
+					continue // Skip invalid IPs
+				}
+				nodeIPs[ip.Is6()] = addr.Address
+			}
+		}
+
+		// If this is a control-plane node, save its IPs for service routes
+		if _, ok := node.Labels["node-role.kubernetes.io/control-plane"]; ok && len(controlPlaneIPs) == 0 {
+			controlPlaneIPs = nodeIPs
+		}
+
+		// Map PodCIDRs to this node's IPs, matching family
+		for _, podCIDR := range node.Spec.PodCIDRs {
+			prefix, err := netip.ParsePrefix(podCIDR)
+			if err != nil {
+				continue
+			}
+			if gatewayIP, found := nodeIPs[prefix.Addr().Is6()]; found {
+				routeMap[podCIDR] = gatewayIP
 			}
 		}
 	}
-	if nodeIP == "" {
-		return "", fmt.Errorf("no internal IP found for any node to use as a gateway")
+
+	if len(controlPlaneIPs) == 0 {
+		return nil, fmt.Errorf("could not find any control-plane node to use as a gateway for services")
 	}
-	return nodeIP, nil
+
+	// --- 2. Get ServiceCIDRs and add them to the map ---
+	serviceCIDRs, err := c.getServiceCIDRs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service CIDRs: %w", err)
+	}
+
+	for _, serviceCIDR := range serviceCIDRs {
+		prefix, err := netip.ParsePrefix(serviceCIDR)
+		if err != nil {
+			klog.Warningf("Invalid ServiceCIDR '%s', skipping.", serviceCIDR)
+			continue
+		}
+		// Match the service CIDR family to the control-plane IP family
+		if gatewayIP, found := controlPlaneIPs[prefix.Addr().Is6()]; found {
+			klog.Infof("Found route for services: ServiceCIDR %s -> Gateway %s", serviceCIDR, gatewayIP)
+			routeMap[serviceCIDR] = gatewayIP
+		} else {
+			klog.Warningf("No matching control-plane IP found for ServiceCIDR family '%s'", serviceCIDR)
+		}
+	}
+
+	if len(routeMap) == 0 {
+		return nil, fmt.Errorf("could not construct any valid routes")
+	}
+
+	return routeMap, nil
 }
 
 func (c *Controller) getServiceCIDRs(ctx context.Context) ([]string, error) {
@@ -109,51 +151,32 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 		return fmt.Errorf("failed to setup route-adder binary in container %s: %w", containerName, err)
 	}
 	klog.Infof("Successfully installed route-adder utility in container %s", containerName)
-
-	nodeIP, err := c.getClusterNodeIP(ctx)
+	routeMap, err := c.getClusterRoutingMap(ctx)
 	if err != nil {
-		return err
-	}
-	nodeAddr, err := netip.ParseAddr(nodeIP)
-	if err != nil {
-		return err
+		return fmt.Errorf("failed to get kubernetes cluster routing information: %w", err)
 	}
 
-	serviceCIDRs, err := c.getServiceCIDRs(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list servicecidrs: %w", err)
-	}
-	if len(serviceCIDRs) == 0 {
-		return fmt.Errorf("no servicecidrs found in the cluster")
-	}
-
+	// 3. Iterate through the map and add a route for each entry.
 	var routesAdded int
 	var stdout, stderr bytes.Buffer
-	for _, cidr := range serviceCIDRs {
-		prefix, err := netip.ParsePrefix(cidr)
-		if err != nil {
-			return fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
-		}
-		if prefix.Addr().Is4() != nodeAddr.Is4() {
-			continue
-		}
-		cmd := []string{containerBinaryPath, cidr, nodeIP}
+	for cidr, gatewayIP := range routeMap {
+		cmd := []string{containerBinaryPath, cidr, gatewayIP}
 		klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
 
 		stdout.Reset()
 		stderr.Reset()
-
 		if err := container.Exec(containerName, cmd, nil, &stdout, &stderr); err != nil {
 			return fmt.Errorf("failed to add route '%s' via %s to container %s: %w, stderr: %s",
-				cidr, nodeIP, containerName, err, stderr.String())
+				cidr, gatewayIP, containerName, err, stderr.String())
 		}
 		routesAdded++
 	}
 
 	if routesAdded == 0 {
-		return fmt.Errorf("no valid service CIDRs found to configure routing")
+		return fmt.Errorf("no valid cluster routes were found to configure")
 	}
 
+	klog.Infof("Successfully added %d pod and service routes to container %s", routesAdded, containerName)
 	return nil
 }
 
