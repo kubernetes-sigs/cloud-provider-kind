@@ -23,7 +23,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHost *routev3.VirtualHost) (*listener.FilterChain, *routev3.RouteConfiguration, error) {
+func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHosts []*routev3.VirtualHost) (*listener.FilterChain, *routev3.RouteConfiguration, error) {
 	var filterChain *listener.FilterChain
 	var routeConfig *routev3.RouteConfiguration
 
@@ -31,9 +31,8 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
 		routeConfig = &routev3.RouteConfiguration{
 			Name:         fmt.Sprintf("%s-%s", gateway.Name, lis.Name),
-			VirtualHosts: []*routev3.VirtualHost{virtualHost},
+			VirtualHosts: virtualHosts,
 		}
-
 		routerProto := &routerv3.Router{}
 		routerAny, err := anypb.New(routerProto)
 		if err != nil {
