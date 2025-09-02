@@ -656,7 +656,7 @@ func (c *Controller) getServiceCIDRs(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("no servicecidrs found in the cluster")
 	}
 
-	var cidrs sets.Set[string]
+	cidrs := sets.Set[string]{}
 	for _, serviceCIDRObject := range serviceCIDRs.Items {
 		cidrs.Insert(serviceCIDRObject.Spec.CIDRs...)
 	}
