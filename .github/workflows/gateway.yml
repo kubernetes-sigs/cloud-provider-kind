@@ -127,7 +127,6 @@ jobs:
       run: |
         /usr/local/bin/kind export logs --name ${{ env.KIND_CLUSTER_NAME}} ./_artifacts/logs
         cp ./_artifacts/ccm-kind.log ./_artifacts/logs
-        cp ./_artifacts/loadbalancers/* ./_artifacts/logs
 
     - name: Upload logs
       if: always()
