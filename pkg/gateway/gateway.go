@@ -196,44 +196,81 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				virtualHost.Domains = []string{string(*listener.Hostname)}
 			}
 
+			virtualHosts := make(map[string]*routev3.VirtualHost)
+
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
+				// Process HTTPRoutes
 				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
 				processedHTTPRoutes = append(processedHTTPRoutes, httpRoutes...)
 				for _, httpRoute := range httpRoutes {
-					if err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, virtualHost); err == nil {
-						attachedRoutes++
-						for _, rule := range httpRoute.Spec.Rules {
-							for _, backendRef := range rule.BackendRefs {
-								cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef.BackendRef)
-								if err == nil {
-									envoyClusters[cluster.Name] = cluster
+					hostnames := getRouteHostnames(httpRoute.Spec.Hostnames, listener)
+					for _, hostname := range hostnames {
+						vh, ok := virtualHosts[hostname]
+						if !ok {
+							vh = &routev3.VirtualHost{
+								Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
+								Domains: []string{hostname},
+							}
+							virtualHosts[hostname] = vh
+						}
+						// The translation function now populates the correct VirtualHost
+						if err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, vh); err == nil {
+							// Only count attached routes once per route, not per hostname
+							if len(vh.Routes) == len(httpRoute.Spec.Rules) {
+								attachedRoutes++
+							}
+							for _, rule := range httpRoute.Spec.Rules {
+								for _, backendRef := range rule.BackendRefs {
+									cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef.BackendRef)
+									if err == nil {
+										envoyClusters[cluster.Name] = cluster
+									}
 								}
 							}
 						}
 					}
 				}
 
+				// Process GRPCRoutes
 				grpcRoutes := c.getGRPCRoutesForListener(gateway, listener)
 				processedGRPCRoutes = append(processedGRPCRoutes, grpcRoutes...)
 				for _, grpcRoute := range grpcRoutes {
-					if err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, virtualHost); err == nil {
-						attachedRoutes++
-						for _, rule := range grpcRoute.Spec.Rules {
-							for _, backendRef := range rule.BackendRefs {
-								cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef.BackendRef)
-								if err == nil {
-									envoyClusters[cluster.Name] = cluster
+					hostnames := getRouteHostnames(grpcRoute.Spec.Hostnames, listener)
+					for _, hostname := range hostnames {
+						vh, ok := virtualHosts[hostname]
+						if !ok {
+							vh = &routev3.VirtualHost{
+								Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
+								Domains: []string{hostname},
+							}
+							virtualHosts[hostname] = vh
+						}
+						if err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, vh); err == nil {
+							if len(vh.Routes) == len(grpcRoute.Spec.Rules) {
+								attachedRoutes++
+							}
+							for _, rule := range grpcRoute.Spec.Rules {
+								for _, backendRef := range rule.BackendRefs {
+									cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef.BackendRef)
+									if err == nil {
+										envoyClusters[cluster.Name] = cluster
+									}
 								}
 							}
 						}
 					}
 				}
 			default:
-				klog.Warningf("Unsupported listener protocol: %s", listener.Protocol)
+				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
 			}
 
-			filterChain, routeConfig, err := c.translateListenerToFilterChain(gateway, listener, virtualHost)
+			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHosts))
+			for _, vh := range virtualHosts {
+				vhSlice = append(vhSlice, vh)
+			}
+
+			filterChain, routeConfig, err := c.translateListenerToFilterChain(gateway, listener, vhSlice)
 			if err != nil {
 				// If translation fails, a reference is unresolved. Set both conditions to False.
 				klog.Errorf("Error translating listener %s to filter chain: %v", listener.Name, err)
@@ -594,4 +631,19 @@ func createClusterLoadAssignment(clusterName, serviceHost string, servicePort ui
 			},
 		},
 	}
+}
+
+// getRouteHostnames determines the effective hostnames for a route.
+func getRouteHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.Listener) []string {
+	if len(routeHostnames) > 0 {
+		hostnames := make([]string, len(routeHostnames))
+		for i, h := range routeHostnames {
+			hostnames[i] = string(h)
+		}
+		return hostnames
+	}
+	if listener.Hostname != nil && *listener.Hostname != "" {
+		return []string{string(*listener.Hostname)}
+	}
+	return []string{"*"}
 }
