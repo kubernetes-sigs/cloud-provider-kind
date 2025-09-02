@@ -117,6 +117,9 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			})
 	}
 
+	// TODO
+	// Validate and update gatewayv1.GatewayStatusAddress correctly
+
 	envoyResources, listenerStatuses, httpRoutes, grpcRoutes := c.buildEnvoyResourcesForGateway(newGw)
 	newGw.Status.Listeners = listenerStatuses
 	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
