@@ -394,6 +394,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	klog.Info("Starting Gateway API controller")
 
 	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(),
+		c.gatewayClassListerSynced,
 		c.gatewayListerSynced,
 		c.httprouteListerSynced,
 		c.grpcrouteListerSynced,
