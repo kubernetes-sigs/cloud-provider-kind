@@ -93,13 +93,14 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			})
 	}
 
-	// TODO
-	// Validate and update gatewayv1.GatewayStatusAddress correctly
-
+	// Get the desired state
 	envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses := c.buildEnvoyResourcesForGateway(newGw)
+
+	// Apply the desired state to the data plane (Envoy).
 	newGw.Status.Listeners = listenerStatuses
 	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
 
+	// Calculate and set the Gateway's own status conditions based on the build results.
 	programmedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
 		ObservedGeneration: newGw.Generation,
@@ -150,6 +151,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	return c.updateRouteStatuses(ctx, httpRouteStatuses, grpcRouteStatuses)
 }
 
+// Main State Calculation Function
 func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	map[resourcev3.Type][]envoyproxytypes.Resource,
 	[]gatewayv1.ListenerStatus,
@@ -208,146 +210,91 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-				// Process HTTPRoutes
+				// --- Process HTTPRoutes ---
 				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
 				for _, httpRoute := range httpRoutes {
 					key := types.NamespacedName{Namespace: httpRoute.Namespace, Name: httpRoute.Name}
-					// Get the status we've calculated so far for this route, or create a new one.
-					parentStatus, ok := httpRouteStatuses[key]
-					if !ok {
-						parentStatus = gatewayv1.RouteParentStatus{
-							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-							ControllerName: controllerName,
-							Conditions:     []metav1.Condition{},
+					envoyRoutes, validBackendRefs, finalCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
+
+					// Create the necessary Envoy Cluster resources from the valid backends.
+					for _, backendRef := range validBackendRefs {
+
+						cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef)
+						klog.Infof("DEBUG valid translateBackendRefToCluster %v err %v", cluster, err)
+
+						if err == nil && cluster != nil {
+							if _, exists := envoyClusters[cluster.Name]; !exists {
+								envoyClusters[cluster.Name] = cluster
+							}
 						}
 					}
 
-					var currentAttachmentError error
-
-					hostnames := getRouteHostnames(httpRoute.Spec.Hostnames, listener)
-					for _, hostname := range hostnames {
-						vh, ok := virtualHosts[hostname]
-						if !ok {
-							vh = &routev3.VirtualHost{
-								Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
-								Domains: []string{hostname},
-							}
-							virtualHosts[hostname] = vh
-						}
-						// The translation function now populates the correct VirtualHost
-						err := translateHTTPRouteToEnvoyVirtualHost(httpRoute, vh)
-						if err != nil {
-							currentAttachmentError = errors.Join(currentAttachmentError, err)
-						} else {
-							// Only count attached routes once per route, not per hostname
-							if len(vh.Routes) == len(httpRoute.Spec.Rules) {
-								attachedRoutes++
-							}
-							for _, rule := range httpRoute.Spec.Rules {
-								for _, backendRef := range rule.BackendRefs {
-									cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef.BackendRef)
-									if err != nil {
-										currentAttachmentError = errors.Join(currentAttachmentError, err)
-									} else {
-										envoyClusters[cluster.Name] = cluster
-									}
+					// Aggregate Envoy routes into VirtualHosts.
+					if envoyRoutes != nil {
+						hostnames := getRouteHostnames(httpRoute.Spec.Hostnames, listener)
+						for _, hostname := range hostnames {
+							vh, ok := virtualHosts[hostname]
+							if !ok {
+								vh = &routev3.VirtualHost{
+									Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
+									Domains: []string{hostname},
 								}
+								virtualHosts[hostname] = vh
 							}
+							vh.Routes = append(vh.Routes, envoyRoutes...)
 						}
-					}
-					// If ANY backend reference for this route fails on ANY listener,
-					// the overall ResolvedRefs condition for this Gateway is False.
-					resolvedRefsCond := metav1.Condition{
-						Type:               string(gatewayv1.RouteConditionResolvedRefs),
-						Status:             metav1.ConditionTrue,
-						Reason:             string(gatewayv1.RouteReasonResolvedRefs),
-						Message:            "All references resolved",
-						ObservedGeneration: httpRoute.Generation,
-						LastTransitionTime: metav1.Now(),
-					}
-					// If the condition is already False, or if this new attachment failed, keep it False.
-					if meta.IsStatusConditionFalse(parentStatus.Conditions, string(gatewayv1.RouteConditionResolvedRefs)) || currentAttachmentError != nil {
-						resolvedRefsCond.Status = metav1.ConditionFalse
-						resolvedRefsCond.Reason = string(gatewayv1.RouteReasonInvalidKind)
-						resolvedRefsCond.Message = fmt.Sprintf("Failed to resolve backend ref: %v", currentAttachmentError)
+						attachedRoutes++
 					}
 
-					meta.SetStatusCondition(&parentStatus.Conditions, resolvedRefsCond)
-
-					// Store the updated aggregated status back in the map.
+					// Store the calculated status for the route.
+					parentStatus := gatewayv1.RouteParentStatus{
+						ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
+						ControllerName: controllerName,
+						Conditions:     []metav1.Condition{finalCondition},
+					}
 					httpRouteStatuses[key] = parentStatus
 				}
 
-				// Process HTTPRoutes
+				// --- Process GRPCRoutes ---
 				grpcRoutes := c.getGRPCRoutesForListener(gateway, listener)
 				for _, grpcRoute := range grpcRoutes {
 					key := types.NamespacedName{Namespace: grpcRoute.Namespace, Name: grpcRoute.Name}
-					// Get the status we've calculated so far for this route, or create a new one.
-					parentStatus, ok := grpcRouteStatuses[key]
-					if !ok {
-						parentStatus = gatewayv1.RouteParentStatus{
-							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-							ControllerName: controllerName,
-							Conditions:     []metav1.Condition{},
+					envoyRoutes, validBackendRefs, finalCondition := translateGRPCRouteToEnvoyRoutes(grpcRoute, c.serviceLister)
+
+					// Create clusters for valid GRPCRoute backends.
+					for _, backendRef := range validBackendRefs {
+						cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef)
+						if err == nil && cluster != nil {
+							if _, exists := envoyClusters[cluster.Name]; !exists {
+								envoyClusters[cluster.Name] = cluster
+							}
 						}
 					}
 
-					var currentAttachmentError error
-
-					hostnames := getRouteHostnames(grpcRoute.Spec.Hostnames, listener)
-					for _, hostname := range hostnames {
-						vh, ok := virtualHosts[hostname]
-						if !ok {
-							vh = &routev3.VirtualHost{
-								Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
-								Domains: []string{hostname},
-							}
-							virtualHosts[hostname] = vh
-						}
-						// The translation function now populates the correct VirtualHost
-						err := translateGRPCRouteToEnvoyVirtualHost(grpcRoute, vh)
-						if err != nil {
-							currentAttachmentError = errors.Join(currentAttachmentError, err)
-						} else {
-							// Only count attached routes once per route, not per hostname
-							if len(vh.Routes) == len(grpcRoute.Spec.Rules) {
-								attachedRoutes++
-							}
-							for _, rule := range grpcRoute.Spec.Rules {
-								for _, backendRef := range rule.BackendRefs {
-									cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef.BackendRef)
-									if err != nil {
-										currentAttachmentError = errors.Join(currentAttachmentError, err)
-									} else {
-										envoyClusters[cluster.Name] = cluster
-									}
+					if envoyRoutes != nil {
+						hostnames := getRouteHostnames(grpcRoute.Spec.Hostnames, listener)
+						for _, hostname := range hostnames {
+							vh, ok := virtualHosts[hostname]
+							if !ok {
+								vh = &routev3.VirtualHost{
+									Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
+									Domains: []string{hostname},
 								}
+								virtualHosts[hostname] = vh
 							}
+							vh.Routes = append(vh.Routes, envoyRoutes...)
 						}
-					}
-					// If ANY backend reference for this route fails on ANY listener,
-					// the overall ResolvedRefs condition for this Gateway is False.
-					resolvedRefsCond := metav1.Condition{
-						Type:               string(gatewayv1.RouteConditionResolvedRefs),
-						Status:             metav1.ConditionTrue,
-						Reason:             string(gatewayv1.RouteReasonResolvedRefs),
-						Message:            "All references resolved",
-						ObservedGeneration: grpcRoute.Generation,
-						LastTransitionTime: metav1.Now(),
-					}
-					// If the condition is already False, or if this new attachment failed, keep it False.
-					if meta.IsStatusConditionFalse(parentStatus.Conditions, string(gatewayv1.RouteConditionResolvedRefs)) || currentAttachmentError != nil {
-						resolvedRefsCond.Status = metav1.ConditionFalse
-						// TODO: the Reason should be obtained from the error
-						resolvedRefsCond.Reason = string(gatewayv1.RouteReasonInvalidKind)
-						resolvedRefsCond.Message = fmt.Sprintf("Failed to resolve backend ref: %v", currentAttachmentError)
+						attachedRoutes++
 					}
 
-					meta.SetStatusCondition(&parentStatus.Conditions, resolvedRefsCond)
-
-					// Store the updated aggregated status back in the map.
+					parentStatus := gatewayv1.RouteParentStatus{
+						ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
+						ControllerName: controllerName,
+						Conditions:     []metav1.Condition{finalCondition},
+					}
 					grpcRouteStatuses[key] = parentStatus
 				}
+
 			default:
 				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
 			}
@@ -422,6 +369,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 	clustersSlice := make([]envoyproxytypes.Resource, 0, len(envoyClusters))
 	for _, cluster := range envoyClusters {
+		klog.Infof("DEBUG ADDING/ /cLUSTER %#v", cluster)
 		clustersSlice = append(clustersSlice, cluster)
 	}
 

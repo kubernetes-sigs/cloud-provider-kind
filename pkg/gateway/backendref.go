@@ -7,12 +7,24 @@ import (
 )
 
 // backendRefToClusterName generates a unique Envoy cluster name from a Gateway API BackendRef.
+// It returns a structured ControllerError with the appropriate Reason on failure.
 func backendRefToClusterName(defaultNamespace string, backendRef gatewayv1.BackendRef) (string, error) {
+	// 1. Validate that the Kind is a supported type (Service).
 	if backendRef.Kind != nil && *backendRef.Kind != "Service" {
-		return "", fmt.Errorf("unsupported backend kind: %s", *backendRef.Kind)
+		return "", &ControllerError{
+			Reason:  string(gatewayv1.RouteReasonInvalidKind),
+			Message: fmt.Sprintf("unsupported backend kind: %s", *backendRef.Kind),
+		}
 	}
+
+	// 2. Validate that the Port is specified.
 	if backendRef.Port == nil {
-		return "", fmt.Errorf("backend port must be specified")
+		return "", &ControllerError{
+			// Note: There isn't a specific reason for a missing port,
+			// so InvalidParameters is a reasonable choice.
+			Reason:  string(gatewayv1.RouteReasonUnsupportedProtocol),
+			Message: "backend port must be specified",
+		}
 	}
 
 	namespace := defaultNamespace
@@ -31,5 +43,7 @@ func backendRefToClusterName(defaultNamespace string, backendRef gatewayv1.Backe
 	}
 
 	// Format: <namespace>_<name>_<group>_<kind>_<port>
-	return fmt.Sprintf("%s_%s_%s_%s_%d", namespace, backendRef.Name, group, kind, port), nil
+	clusterName := fmt.Sprintf("%s_%s_%s_%s_%d", namespace, backendRef.Name, group, kind, port)
+
+	return clusterName, nil
 }

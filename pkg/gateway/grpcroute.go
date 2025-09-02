@@ -1,61 +1,124 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-	"k8s.io/klog/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// translateGRPCRouteToEnvoyVirtualHost takes a GRPCRoute and adds its rules as Envoy routes
-// to the provided VirtualHost.
-func translateGRPCRouteToEnvoyVirtualHost(grpcRoute *gatewayv1.GRPCRoute, virtualHost *routev3.VirtualHost) error {
+// translateGRPCRouteToEnvoyRoutes translates a full GRPCRoute into a slice of Envoy Routes.
+// It is a pure function that returns the result, a list of required cluster names, and a final
+// status condition without mutating any arguments.
+func translateGRPCRouteToEnvoyRoutes(
+	grpcRoute *gatewayv1.GRPCRoute,
+	serviceLister corev1listers.ServiceLister,
+) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
+
+	var envoyRoutes []*routev3.Route
+	var validBackendRefs []gatewayv1.BackendRef
+	isOverallSuccess := true
+	var finalFailureMessage string
+	var finalFailureReason gatewayv1.RouteConditionReason
+
 	for ruleIndex, rule := range grpcRoute.Spec.Rules {
-		if len(rule.BackendRefs) == 0 {
-			klog.Warningf("GRPCRoute %s/%s rule %d has no backendRefs, skipping", grpcRoute.Namespace, grpcRoute.Name, ruleIndex)
-			continue
-		}
+		// Attempt to build the forwarding action. This will return an error if backends are invalid.
+		routeAction, backendRefs, err := buildGRPCRouteAction(
+			grpcRoute.Namespace,
+			rule.BackendRefs,
+			serviceLister,
+		)
 
-		routeAction, err := buildGRPCRouteAction(grpcRoute.Namespace, rule.BackendRefs)
-		if err != nil {
-			return fmt.Errorf("failed to build route action for GRPCRoute %s/%s rule %d: %v", grpcRoute.Namespace, grpcRoute.Name, ruleIndex, err)
-		}
+		validBackendRefs = append(validBackendRefs, backendRefs...)
 
-		// GRPCRoute requires at least one match. If empty, the rule is ignored.
-		if len(rule.Matches) == 0 {
-			klog.Warningf("GRPCRoute %s/%s rule %d has no matches, skipping", grpcRoute.Namespace, grpcRoute.Name, ruleIndex)
-			continue
-		}
-
-		for matchIndex, match := range rule.Matches {
-			routeMatch, err := translateGRPCRouteMatch(match)
-			if err != nil {
-				return fmt.Errorf("failed to translate match %d for GRPCRoute %s/%s: %v", matchIndex, grpcRoute.Namespace, grpcRoute.Name, err)
+		// This helper function creates the appropriate Envoy route (forward or direct response)
+		// based on the success of the backend resolution.
+		buildRoutesForRule := func(match gatewayv1.GRPCRouteMatch, matchIndex int) (*routev3.Route, metav1.Condition) {
+			routeMatch, matchCondition := translateGRPCRouteMatch(match, grpcRoute.Generation)
+			if matchCondition.Status == metav1.ConditionFalse {
+				return nil, matchCondition
 			}
 
 			envoyRoute := &routev3.Route{
-				Name:   fmt.Sprintf("%s-%s-rule%d-match%d", grpcRoute.Namespace, grpcRoute.Name, ruleIndex, matchIndex),
-				Match:  routeMatch,
-				Action: routeAction,
+				Name:  fmt.Sprintf("%s-%s-rule%d-match%d", grpcRoute.Namespace, grpcRoute.Name, ruleIndex, matchIndex),
+				Match: routeMatch,
 			}
-			virtualHost.Routes = append(virtualHost.Routes, envoyRoute)
+			var controllerErr *ControllerError
+			if errors.As(err, &controllerErr) {
+				// Backend resolution failed. Create a DirectResponse and a False condition.
+				if isOverallSuccess { // Capture first failure details
+					isOverallSuccess = false
+					finalFailureMessage = controllerErr.Message
+					finalFailureReason = gatewayv1.RouteConditionReason(controllerErr.Reason)
+				}
+				envoyRoute.Action = &routev3.Route_DirectResponse{
+					DirectResponse: &routev3.DirectResponseAction{Status: 500},
+				}
+			} else {
+				// Backend resolution succeeded. Create a normal forwarding route.
+				envoyRoute.Action = &routev3.Route_Route{
+					Route: routeAction,
+				}
+			}
+			return envoyRoute, createSuccessCondition(grpcRoute.Generation)
+		}
+
+		// GRPCRoute requires at least one match per rule.
+		if len(rule.Matches) == 0 {
+			if isOverallSuccess {
+				isOverallSuccess = false
+				finalFailureMessage = "GRPCRoute rule must have at least one match"
+				finalFailureReason = gatewayv1.RouteReasonBackendNotFound
+			}
+		} else {
+			for matchIndex, match := range rule.Matches {
+				envoyRoute, cond := buildRoutesForRule(match, matchIndex)
+				if cond.Status == metav1.ConditionFalse {
+					return nil, nil, cond
+				}
+				envoyRoutes = append(envoyRoutes, envoyRoute)
+			}
 		}
 	}
-	return nil
+
+	if isOverallSuccess {
+		return envoyRoutes, validBackendRefs, createSuccessCondition(grpcRoute.Generation)
+	}
+
+	return envoyRoutes, validBackendRefs, createFailureCondition(finalFailureReason, finalFailureMessage, grpcRoute.Generation)
 }
 
-// buildGRPCRouteAction creates a RouteAction that supports weighted distribution of traffic
-// across multiple backend services.
-func buildGRPCRouteAction(namespace string, backendRefs []gatewayv1.GRPCBackendRef) (*routev3.Route_Route, error) {
+// buildGRPCRouteAction attempts to create a forwarding RouteAction and returns a structured error on failure.
+func buildGRPCRouteAction(
+	namespace string,
+	backendRefs []gatewayv1.GRPCBackendRef,
+	serviceLister corev1listers.ServiceLister,
+) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
 	weightedClusters := &routev3.WeightedCluster{}
+	var validBackendRefs []gatewayv1.BackendRef
 
 	for _, backendRef := range backendRefs {
-		if backendRef.Weight != nil && *backendRef.Weight < 0 {
-			return nil, fmt.Errorf("backend weight must be non-negative")
+		ns := namespace
+		if backendRef.Namespace != nil {
+			ns = string(*backendRef.Namespace)
 		}
+		if _, err := serviceLister.Services(ns).Get(string(backendRef.Name)); err != nil {
+			return nil, nil, &ControllerError{
+				Reason:  string(gatewayv1.RouteReasonBackendNotFound),
+				Message: "backend not found",
+			}
+		}
+		// GRPCRoute uses BackendObjectReference which is slightly different but can be converted.
+		clusterName, err := backendRefToClusterName(namespace, backendRef.BackendRef)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		weight := int32(1)
 		if backendRef.Weight != nil {
 			weight = *backendRef.Weight
@@ -63,12 +126,7 @@ func buildGRPCRouteAction(namespace string, backendRefs []gatewayv1.GRPCBackendR
 		if weight == 0 {
 			continue
 		}
-
-		clusterName, err := backendRefToClusterName(namespace, backendRef.BackendRef)
-		if err != nil {
-			return nil, err
-		}
-
+		validBackendRefs = append(validBackendRefs, backendRef.BackendRef)
 		weightedClusters.Clusters = append(weightedClusters.Clusters, &routev3.WeightedCluster_ClusterWeight{
 			Name:   clusterName,
 			Weight: &wrapperspb.UInt32Value{Value: uint32(weight)},
@@ -76,56 +134,40 @@ func buildGRPCRouteAction(namespace string, backendRefs []gatewayv1.GRPCBackendR
 	}
 
 	if len(weightedClusters.Clusters) == 0 {
-		return &routev3.Route_Route{
-			Route: &routev3.RouteAction{
-				ClusterNotFoundResponseCode: routev3.RouteAction_ClusterNotFoundResponseCode(503),
-			},
-		}, nil
+		return nil, nil, &ControllerError{Reason: string(gatewayv1.RouteReasonAccepted), Message: "no valid backends provided with a weight > 0"}
 	}
 
+	var action *routev3.RouteAction
 	if len(weightedClusters.Clusters) == 1 {
-		return &routev3.Route_Route{
-			Route: &routev3.RouteAction{
-				ClusterSpecifier: &routev3.RouteAction_Cluster{
-					Cluster: weightedClusters.Clusters[0].Name,
-				},
-			},
-		}, nil
+		action = &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: weightedClusters.Clusters[0].Name}}
+	} else {
+		action = &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_WeightedClusters{WeightedClusters: weightedClusters}}
 	}
 
-	return &routev3.Route_Route{
-		Route: &routev3.RouteAction{
-			ClusterSpecifier: &routev3.RouteAction_WeightedClusters{
-				WeightedClusters: weightedClusters,
-			},
-		},
-	}, nil
+	return action, validBackendRefs, nil
 }
 
 // translateGRPCRouteMatch translates a Gateway API GRPCRouteMatch into an Envoy RouteMatch.
-func translateGRPCRouteMatch(match gatewayv1.GRPCRouteMatch) (*routev3.RouteMatch, error) {
+func translateGRPCRouteMatch(match gatewayv1.GRPCRouteMatch, generation int64) (*routev3.RouteMatch, metav1.Condition) {
 	routeMatch := &routev3.RouteMatch{
-		// All gRPC requests are HTTP/2 POST requests.
+		// gRPC requests are HTTP/2 POSTs with a specific content-type.
 		Headers: []*routev3.HeaderMatcher{
 			{
 				Name:                 ":method",
 				HeaderMatchSpecifier: &routev3.HeaderMatcher_ExactMatch{ExactMatch: "POST"},
 			},
 			{
-				Name: "content-type",
-				HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
-					StringMatch: &matcherv3.StringMatcher{
-						MatchPattern: &matcherv3.StringMatcher_Prefix{Prefix: "application/grpc"},
-						IgnoreCase:   true,
-					},
-				},
+				Name:                 "content-type",
+				HeaderMatchSpecifier: &routev3.HeaderMatcher_PrefixMatch{PrefixMatch: "application/grpc"},
 			},
 		},
 	}
 
+	// Translate gRPC method match into a :path header match.
 	if match.Method != nil {
 		if match.Method.Service == nil || match.Method.Method == nil {
-			return nil, fmt.Errorf("GRPCMethodMatch requires both service and method to be set")
+			msg := "GRPCMethodMatch requires both service and method to be set"
+			return nil, createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, generation)
 		}
 		path := fmt.Sprintf("/%s/%s", *match.Method.Service, *match.Method.Method)
 		matchType := gatewayv1.GRPCMethodMatchExact
@@ -145,15 +187,15 @@ func translateGRPCRouteMatch(match gatewayv1.GRPCRouteMatch) (*routev3.RouteMatc
 				},
 			}
 		default:
-			return nil, fmt.Errorf("unsupported gRPC method match type: %s", matchType)
+			msg := fmt.Sprintf("unsupported gRPC method match type: %s", matchType)
+			return nil, createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, generation)
 		}
 		routeMatch.Headers = append(routeMatch.Headers, pathMatcher)
 	}
 
+	// Translate header matches.
 	for _, headerMatch := range match.Headers {
-		headerMatcher := &routev3.HeaderMatcher{
-			Name: string(headerMatch.Name),
-		}
+		headerMatcher := &routev3.HeaderMatcher{Name: string(headerMatch.Name)}
 		matchType := gatewayv1.GRPCHeaderMatchExact
 		if headerMatch.Type != nil {
 			matchType = *headerMatch.Type
@@ -161,11 +203,8 @@ func translateGRPCRouteMatch(match gatewayv1.GRPCRouteMatch) (*routev3.RouteMatc
 
 		switch matchType {
 		case gatewayv1.GRPCHeaderMatchExact:
-			headerMatcher.HeaderMatchSpecifier = &routev3.HeaderMatcher_StringMatch{
-				StringMatch: &matcherv3.StringMatcher{
-					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: headerMatch.Value},
-				},
-			}
+			// CHANGED: Use the modern direct `ExactMatch` field.
+			headerMatcher.HeaderMatchSpecifier = &routev3.HeaderMatcher_ExactMatch{ExactMatch: headerMatch.Value}
 		case gatewayv1.GRPCHeaderMatchRegularExpression:
 			headerMatcher.HeaderMatchSpecifier = &routev3.HeaderMatcher_SafeRegexMatch{
 				SafeRegexMatch: &matcherv3.RegexMatcher{
@@ -174,10 +213,11 @@ func translateGRPCRouteMatch(match gatewayv1.GRPCRouteMatch) (*routev3.RouteMatc
 				},
 			}
 		default:
-			return nil, fmt.Errorf("unsupported header match type: %s", matchType)
+			msg := fmt.Sprintf("unsupported header match type: %s", matchType)
+			return nil, createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, generation)
 		}
 		routeMatch.Headers = append(routeMatch.Headers, headerMatcher)
 	}
 
-	return routeMatch, nil
+	return routeMatch, createSuccessCondition(generation)
 }
