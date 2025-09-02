@@ -181,15 +181,17 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	var processedHTTPRoutes []*gatewayv1.HTTPRoute
 	var processedGRPCRoutes []*gatewayv1.GRPCRoute
 
+	// Aggregate Listeners by Port
 	listenersByPort := make(map[gatewayv1.PortNumber][]gatewayv1.Listener)
 	for _, listener := range gateway.Spec.Listeners {
 		listenersByPort[listener.Port] = append(listenersByPort[listener.Port], listener)
 	}
 
 	finalEnvoyListeners := []envoyproxytypes.Resource{}
+	// Process Listeners by Port
 	for port, listeners := range listenersByPort {
 		var filterChains []*listenerv3.FilterChain
-
+		// All these listeners have the same port
 		for _, listener := range listeners {
 			var attachedRoutes int32
 			listenerStatus := gatewayv1.ListenerStatus{
