@@ -21,8 +21,7 @@ func translateHTTPRouteToEnvoyVirtualHost(httpRoute *gatewayv1.HTTPRoute, virtua
 
 		routeAction, err := buildHTTPRouteAction(httpRoute.Namespace, rule.BackendRefs)
 		if err != nil {
-			klog.Errorf("Error building route action for HTTPRoute %s/%s rule %d: %v", httpRoute.Namespace, httpRoute.Name, ruleIndex, err)
-			continue
+			return fmt.Errorf("can not build route action for HTTPRoute %s/%s rule %d: %v", httpRoute.Namespace, httpRoute.Name, ruleIndex, err)
 		}
 
 		if len(rule.Matches) == 0 {
@@ -38,8 +37,7 @@ func translateHTTPRouteToEnvoyVirtualHost(httpRoute *gatewayv1.HTTPRoute, virtua
 		for matchIndex, match := range rule.Matches {
 			routeMatch, err := translateHTTPRouteMatch(match)
 			if err != nil {
-				klog.Errorf("Failed to translate match %d for HTTPRoute %s/%s: %v", matchIndex, httpRoute.Namespace, httpRoute.Name, err)
-				continue
+				return fmt.Errorf("can not translate match %d for HTTPRoute %s/%s: %v", matchIndex, httpRoute.Namespace, httpRoute.Name, err)
 			}
 
 			envoyRoute := &routev3.Route{

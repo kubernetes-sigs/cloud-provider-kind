@@ -21,8 +21,7 @@ func translateGRPCRouteToEnvoyVirtualHost(grpcRoute *gatewayv1.GRPCRoute, virtua
 
 		routeAction, err := buildGRPCRouteAction(grpcRoute.Namespace, rule.BackendRefs)
 		if err != nil {
-			klog.Errorf("Error building route action for GRPCRoute %s/%s rule %d: %v", grpcRoute.Namespace, grpcRoute.Name, ruleIndex, err)
-			continue
+			return fmt.Errorf("Error building route action for GRPCRoute %s/%s rule %d: %v", grpcRoute.Namespace, grpcRoute.Name, ruleIndex, err)
 		}
 
 		// GRPCRoute requires at least one match. If empty, the rule is ignored.
@@ -34,8 +33,7 @@ func translateGRPCRouteToEnvoyVirtualHost(grpcRoute *gatewayv1.GRPCRoute, virtua
 		for matchIndex, match := range rule.Matches {
 			routeMatch, err := translateGRPCRouteMatch(match)
 			if err != nil {
-				klog.Errorf("Failed to translate match %d for GRPCRoute %s/%s: %v", matchIndex, grpcRoute.Namespace, grpcRoute.Name, err)
-				continue
+				return fmt.Errorf("Failed to translate match %d for GRPCRoute %s/%s: %v", matchIndex, grpcRoute.Namespace, grpcRoute.Name, err)
 			}
 
 			envoyRoute := &routev3.Route{
