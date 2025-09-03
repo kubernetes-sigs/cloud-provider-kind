@@ -35,8 +35,6 @@ func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) (
 		listenersByPort[listener.Port] = append(listenersByPort[listener.Port], listener)
 	}
 
-	conflictedListenerNames := []string{}
-
 	for _, listenersOnPort := range listenersByPort {
 		// Rule: A TCP listener cannot share a port with HTTP/HTTPS/TLS listeners.
 		hasTCP := false
@@ -52,7 +50,6 @@ func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) (
 
 		if hasTCP && hasHTTPTLS {
 			for _, listener := range listenersOnPort {
-				conflictedListenerNames = append(conflictedListenerNames, string(listener.Name))
 				conflictedListenerConditions[listener.Name] = metav1.Condition{
 					Type:    string(gatewayv1.ListenerConditionConflicted),
 					Status:  metav1.ConditionTrue,
@@ -74,9 +71,6 @@ func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) (
 				}
 
 				if conflictingListenerName, exists := seenHostnames[hostname]; exists {
-					// Found a conflict. Mark both this listener and the one we saw before.
-					conflictedListenerNames = append(conflictedListenerNames, string(listener.Name), string(conflictingListenerName))
-
 					conflictedCondition := metav1.Condition{
 						Type:    string(gatewayv1.ListenerConditionConflicted),
 						Status:  metav1.ConditionTrue,
