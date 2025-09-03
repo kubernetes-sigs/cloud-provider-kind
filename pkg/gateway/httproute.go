@@ -25,22 +25,45 @@ func translateHTTPRouteToEnvoyRoutes(
 
 	var envoyRoutes []*routev3.Route
 	var allValidBackendRefs []gatewayv1.BackendRef
-	isOverallSuccess := true
-	var finalFailureMessage string
-	var finalFailureReason gatewayv1.RouteConditionReason
+	overallCondition := createSuccessCondition(httpRoute.Generation)
 
 	for ruleIndex, rule := range httpRoute.Spec.Rules {
-		// Attempt to build the forwarding action and get valid backends.
-		routeAction, validBackends, err := buildHTTPRouteAction(
-			httpRoute.Namespace,
-			rule.BackendRefs,
-			serviceLister,
-		)
-		allValidBackendRefs = append(allValidBackendRefs, validBackends...)
-
+		var redirectAction *routev3.RedirectAction
 		var headersToAdd []*corev3.HeaderValueOption
 		var headersToRemove []string
 		for _, filter := range rule.Filters {
+			if filter.Type == gatewayv1.HTTPRouteFilterRequestRedirect && filter.RequestRedirect != nil {
+				redirect := filter.RequestRedirect
+				redirectAction = &routev3.RedirectAction{}
+
+				if redirect.Hostname != nil {
+					redirectAction.HostRedirect = string(*redirect.Hostname)
+				}
+
+				if redirect.StatusCode != nil {
+					switch *redirect.StatusCode {
+					case 301:
+						redirectAction.ResponseCode = routev3.RedirectAction_MOVED_PERMANENTLY
+					case 302:
+						redirectAction.ResponseCode = routev3.RedirectAction_FOUND
+					case 303:
+						redirectAction.ResponseCode = routev3.RedirectAction_SEE_OTHER
+					case 307:
+						redirectAction.ResponseCode = routev3.RedirectAction_TEMPORARY_REDIRECT
+					case 308:
+						redirectAction.ResponseCode = routev3.RedirectAction_PERMANENT_REDIRECT
+					default:
+						redirectAction.ResponseCode = routev3.RedirectAction_MOVED_PERMANENTLY
+					}
+				} else {
+					// The Gateway API spec defaults to a 302 redirect.
+					// The corresponding Envoy enum is "FOUND".
+					redirectAction.ResponseCode = routev3.RedirectAction_FOUND
+				}
+
+				break // Only one redirect filter is allowed per rule.
+			}
+
 			if filter.Type == gatewayv1.HTTPRouteFilterRequestHeaderModifier && filter.RequestHeaderModifier != nil {
 				// Handle "set" actions (overwrite)
 				for _, header := range filter.RequestHeaderModifier.Set {
@@ -71,10 +94,11 @@ func translateHTTPRouteToEnvoyRoutes(
 			}
 		}
 
-		buildRoutesForRule := func(match gatewayv1.HTTPRouteMatch, matchIndex int) (*routev3.Route, metav1.Condition) {
+		buildRoutesForRule := func(match gatewayv1.HTTPRouteMatch, matchIndex int) {
 			routeMatch, matchCondition := translateHTTPRouteMatch(match, httpRoute.Generation)
 			if matchCondition.Status == metav1.ConditionFalse {
-				return nil, matchCondition
+				overallCondition = matchCondition
+				return
 			}
 
 			envoyRoute := &routev3.Route{
@@ -84,42 +108,43 @@ func translateHTTPRouteToEnvoyRoutes(
 				RequestHeadersToRemove: headersToRemove,
 			}
 
-			var controllerErr *ControllerError
-			if errors.As(err, &controllerErr) {
-				if isOverallSuccess {
-					isOverallSuccess = false
-					finalFailureMessage = controllerErr.Message
-					finalFailureReason = gatewayv1.RouteConditionReason(controllerErr.Reason)
-				}
-				envoyRoute.Action = &routev3.Route_DirectResponse{
-					DirectResponse: &routev3.DirectResponseAction{Status: 500},
+			if redirectAction != nil {
+				// If this is a redirect, set the Redirect action. No backends are needed.
+				envoyRoute.Action = &routev3.Route_Redirect{
+					Redirect: redirectAction,
 				}
 			} else {
-				envoyRoute.Action = &routev3.Route_Route{
-					Route: routeAction,
+				// Attempt to build the forwarding action and get valid backends.
+				routeAction, validBackends, err := buildHTTPRouteAction(
+					httpRoute.Namespace,
+					rule.BackendRefs,
+					serviceLister,
+				)
+				var controllerErr *ControllerError
+				if errors.As(err, &controllerErr) {
+					overallCondition = createFailureCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
+					envoyRoute.Action = &routev3.Route_DirectResponse{
+						DirectResponse: &routev3.DirectResponseAction{Status: 500},
+					}
+				} else {
+					allValidBackendRefs = append(allValidBackendRefs, validBackends...)
+					envoyRoute.Action = &routev3.Route_Route{
+						Route: routeAction,
+					}
 				}
 			}
-			return envoyRoute, createSuccessCondition(httpRoute.Generation)
+			envoyRoutes = append(envoyRoutes, envoyRoute)
 		}
 
 		if len(rule.Matches) == 0 {
-			envoyRoute, _ := buildRoutesForRule(gatewayv1.HTTPRouteMatch{}, 0)
-			envoyRoutes = append(envoyRoutes, envoyRoute)
+			buildRoutesForRule(gatewayv1.HTTPRouteMatch{}, 0)
 		} else {
 			for matchIndex, match := range rule.Matches {
-				envoyRoute, cond := buildRoutesForRule(match, matchIndex)
-				if cond.Status == metav1.ConditionFalse {
-					return nil, nil, cond
-				}
-				envoyRoutes = append(envoyRoutes, envoyRoute)
+				buildRoutesForRule(match, matchIndex)
 			}
 		}
 	}
-
-	if isOverallSuccess {
-		return envoyRoutes, allValidBackendRefs, createSuccessCondition(httpRoute.Generation)
-	}
-	return envoyRoutes, allValidBackendRefs, createFailureCondition(finalFailureReason, finalFailureMessage, httpRoute.Generation)
+	return envoyRoutes, allValidBackendRefs, overallCondition
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
