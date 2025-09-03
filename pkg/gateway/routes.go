@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -143,6 +145,54 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 		}
 	}
 
+	// If the listener specifies no hostname, it allows all route hostnames.
+	if listener.Hostname == nil || *listener.Hostname == "" {
+		return true // Continue with the result of the namespace check.
+	}
+	listenerHostname := string(*listener.Hostname)
+
+	var routeHostnames []gatewayv1.Hostname
+	switch r := route.(type) {
+	case *gatewayv1.HTTPRoute:
+		routeHostnames = r.Spec.Hostnames
+	case *gatewayv1.GRPCRoute:
+		routeHostnames = r.Spec.Hostnames
+	default:
+		return true // Not a type with hostnames, so no hostname check needed.
+	}
+
+	// If the route specifies no hostnames, it inherits from the listener, which is always valid.
+	if len(routeHostnames) == 0 {
+		return true
+	}
+
+	// If the route specifies hostnames, at least one must be permitted by the listener.
+	for _, routeHostname := range routeHostnames {
+		if hostnameMatches(string(routeHostname), listenerHostname) {
+			// Found a valid hostname match. The route is allowed by this listener.
+			return true
+		}
+	}
+
+	// If we reach here, the route specified hostnames, but NONE of them were valid
+	// for this listener. The route must not be attached.
+	return false
+}
+
+// hostnameMatches checks if a route hostname conforms to a listener hostname.
+// It supports exact matches and wildcard listener hostnames (e.g., "*.example.com").
+func hostnameMatches(routeHostname, listenerHostname string) bool {
+	// 1. Exact match
+	if routeHostname == listenerHostname {
+		return true
+	}
+	// 2. Wildcard match (e.g., listener "*.example.com" allows route "foo.example.com")
+	if strings.HasPrefix(listenerHostname, "*.") {
+		domain := strings.TrimPrefix(listenerHostname, "*.")
+		if routeHostname == domain || strings.HasSuffix(routeHostname, "."+domain) {
+			return true
+		}
+	}
 	return false
 }
 

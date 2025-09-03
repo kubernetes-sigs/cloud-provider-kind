@@ -578,13 +578,15 @@ func (c *Controller) getHTTPRoutesForGateway(gw *gatewayv1.Gateway) []*gatewayv1
 	return matchingRoutes
 }
 
-// validateHTTPRoute checks an HTTPRoute against all listeners of a Gateway and returns
-// its definitive parent status and a slice of the specific listeners that accepted it.
+// validateHTTPRoute is the definitive validation function for an HTTPRoute against a Gateway.
+// It checks for a valid parent reference, listener permissions, and backend service existence.
+// It returns the complete and final RouteParentStatus for the route with all necessary conditions.
 func (c *Controller) validateHTTPRoute(gateway *gatewayv1.Gateway, httpRoute *gatewayv1.HTTPRoute) (gatewayv1.RouteParentStatus, []gatewayv1.Listener) {
 	var acceptingListeners []gatewayv1.Listener
 	var finalParentRef gatewayv1.ParentReference
 
-	// Find the specific parentRef that targets this gateway.
+	// Find the parentRef that targets this Gateway
+	var parentRefFound bool
 	for _, pr := range httpRoute.Spec.ParentRefs {
 		refNamespace := httpRoute.Namespace
 		if pr.Namespace != nil {
@@ -592,74 +594,138 @@ func (c *Controller) validateHTTPRoute(gateway *gatewayv1.Gateway, httpRoute *ga
 		}
 		if pr.Name == gatewayv1.ObjectName(gateway.Name) && refNamespace == gateway.Namespace {
 			finalParentRef = pr
+			parentRefFound = true
 			break
 		}
 	}
 
-	// Iterate through all listeners to find all that can accept this route.
+	if !parentRefFound {
+		return gatewayv1.RouteParentStatus{}, nil // Does not target this Gateway.
+	}
+
+	// Find all listeners that could accept this route based on the parentRef
 	for _, listener := range gateway.Spec.Listeners {
-		// 1. Check if the parentRef's constraints (port, sectionName) match the listener.
 		sectionNameMatches := (finalParentRef.SectionName == nil) || (*finalParentRef.SectionName == listener.Name)
 		portMatches := (finalParentRef.Port == nil) || (*finalParentRef.Port == listener.Port)
-		if !sectionNameMatches || !portMatches {
-			continue // This listener is not a potential parent based on the ref.
-		}
+		if sectionNameMatches && portMatches {
+			// Now check if this listener's policy allows the route.
+			if isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
+				acceptingListeners = append(acceptingListeners, listener)
+			} else {
+				// The listener matches but explicitly forbids the route. This is a definitive "NotAllowed" failure.
+				status := gatewayv1.RouteParentStatus{
+					ParentRef:      finalParentRef,
+					ControllerName: controllerName,
+					Conditions: []metav1.Condition{{
+						Type:               string(gatewayv1.RouteConditionAccepted),
+						Status:             metav1.ConditionFalse,
+						Reason:             string(gatewayv1.RouteReasonNotAllowedByListeners),
+						ObservedGeneration: httpRoute.Generation,
+						LastTransitionTime: metav1.Now(),
+					},
+						{
+							Type:               string(gatewayv1.RouteConditionResolvedRefs),
+							Status:             metav1.ConditionTrue,
+							Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+							ObservedGeneration: httpRoute.Generation,
+							LastTransitionTime: metav1.Now(),
+						}},
+				}
 
-		// 2. Check if the listener's own policy (e.g., allowedNamespaces) permits this route.
-		if !isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
-			// This listener explicitly rejects the route. We can stop checking for this route
-			// and immediately return a "NotAllowed" status.
-			status := gatewayv1.RouteParentStatus{
-				ParentRef:      finalParentRef,
-				ControllerName: controllerName,
-				Conditions: []metav1.Condition{{
-					Type:               string(gatewayv1.RouteConditionAccepted),
-					Status:             metav1.ConditionFalse,
-					Reason:             string(gatewayv1.RouteReasonNotAllowedByListeners),
-					Message:            "Route is not allowed by a listener.",
-					ObservedGeneration: httpRoute.Generation,
-					LastTransitionTime: metav1.Now(),
-				}},
+				return status, nil
 			}
-			return status, nil
 		}
-
-		// If we get here, this listener accepts the route.
-		acceptingListeners = append(acceptingListeners, listener)
 	}
 
-	// Now, build the final status based on whether any listeners accepted the route.
-	if len(acceptingListeners) > 0 {
-		// Success! At least one listener accepted the route.
-		status := gatewayv1.RouteParentStatus{
-			ParentRef:      finalParentRef,
-			ControllerName: controllerName,
-			Conditions: []metav1.Condition{{
-				Type:               string(gatewayv1.RouteConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(gatewayv1.RouteReasonAccepted),
-				Message:            "Route is accepted",
-				ObservedGeneration: httpRoute.Generation,
-				LastTransitionTime: metav1.Now(),
-			}},
-		}
-		return status, acceptingListeners
-	}
-
-	// Failure: No listeners accepted the route because none matched the parentRef's criteria.
+	// Build the final status based on the validation outcome
 	status := gatewayv1.RouteParentStatus{
 		ParentRef:      finalParentRef,
 		ControllerName: controllerName,
-		Conditions: []metav1.Condition{{
+		Conditions:     []metav1.Condition{},
+	}
+
+	if len(acceptingListeners) == 0 {
+		// Failure: No listeners accepted the route.
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.RouteConditionAccepted),
 			Status:             metav1.ConditionFalse,
 			Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
-			Message:            "No listener matched the ParentRef's specified SectionName or Port.",
 			ObservedGeneration: httpRoute.Generation,
 			LastTransitionTime: metav1.Now(),
-		}},
+		})
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionResolvedRefs),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
+			ObservedGeneration: httpRoute.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+		return status, nil
 	}
-	return status, nil
+
+	// Success: The route is accepted by at least one listener.
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.RouteReasonAccepted),
+		ObservedGeneration: httpRoute.Generation,
+		LastTransitionTime: metav1.Now(),
+	})
+
+	// --- 4. Now, validate the backends to set the ResolvedRefs condition ---
+	allBackendsValid := true
+	for _, rule := range httpRoute.Spec.Rules {
+		// Redirect rules have no backends to resolve, so they are always valid in this context.
+		if ruleHasRedirectFilter(rule) {
+			continue
+		}
+		for _, backendRef := range rule.BackendRefs {
+			ns := httpRoute.Namespace
+			if backendRef.Namespace != nil {
+				ns = string(*backendRef.Namespace)
+			}
+			_, err := c.serviceLister.Services(ns).Get(string(backendRef.Name))
+			if err != nil {
+				allBackendsValid = false
+				break // One bad backend is enough to fail.
+			}
+		}
+		if !allBackendsValid {
+			break
+		}
+	}
+
+	if allBackendsValid {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionResolvedRefs),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+			Message:            "All backend references have been resolved",
+			ObservedGeneration: httpRoute.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+	} else {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionResolvedRefs),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.RouteReasonBackendNotFound),
+			Message:            "One or more backend references could not be found",
+			ObservedGeneration: httpRoute.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+
+	return status, acceptingListeners
+}
+
+// Helper to check for redirect filters
+func ruleHasRedirectFilter(rule gatewayv1.HTTPRouteRule) bool {
+	for _, filter := range rule.Filters {
+		if filter.Type == gatewayv1.HTTPRouteFilterRequestRedirect {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Controller) getGRPCRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.GRPCRoute {
