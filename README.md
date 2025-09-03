@@ -13,6 +13,11 @@ Kubecon EU 2024 - [Keep Calm and Load Balance on KIND - Antonio Ojea & Benjamin 
 
 [![Keep Calm and Load Balance on KIND](https://img.youtube.com/vi/U6_-y24rJnI/0.jpg)](https://www.youtube.com/watch?v=U6_-y24rJnI)
 
+## Gateway API support (Alpha)
+
+This provider has alpha support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
+It implements the `Gateway` and `HTTPRoute` functionalities.
+
 ## Install
 
 ### Installing with `go install`
