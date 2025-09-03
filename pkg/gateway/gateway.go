@@ -322,6 +322,13 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
 
+		// This happens AFTER all routes for this port have been collected.
+		// Envoy processes the list of routes within a VirtualHost sequentially.
+		// The Gateway API specification requires that controllers order routes from most specific to least specific.
+		for _, vh := range virtualHostsForPort {
+			sortRoutes(vh.Routes)
+		}
+
 		allVirtualHosts := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
 		for _, vh := range virtualHostsForPort {
 			allVirtualHosts = append(allVirtualHosts, vh)
