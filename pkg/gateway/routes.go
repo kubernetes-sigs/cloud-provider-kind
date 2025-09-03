@@ -59,14 +59,6 @@ func isRouteReferenced(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, 
 			continue
 		}
 
-		if ref.SectionName != nil && *ref.SectionName != listener.Name {
-			continue
-		}
-
-		if ref.Port != nil && *ref.Port != listener.Port {
-			continue
-		}
-
 		return true
 	}
 
@@ -147,6 +139,55 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 			allowedGroup = *allowedKind.Group
 		}
 		if routeKind == string(allowedKind.Kind) && routeGroup == string(allowedGroup) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isValidParentRef checks if a given Route has a ParentRef that is a valid,
+// specific reference to the provided Gateway and Listener.
+//
+// It returns:
+// - (true, &parentRef) if a specific ParentRef is a valid match for the listener.
+// - (false, &parentRef) if a ParentRef matched the Gateway but failed to match the listener's port or sectionName.
+// - (false, nil) if no ParentRef in the route targets this Gateway at all.
+func isValidParentRef(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object) bool {
+	var parentRefs []gatewayv1.ParentReference
+
+	// 1. Extract ParentRefs from the specific Route object.
+	switch r := route.(type) {
+	case *gatewayv1.HTTPRoute:
+		parentRefs = r.Spec.ParentRefs
+	case *gatewayv1.GRPCRoute:
+		parentRefs = r.Spec.ParentRefs
+	default:
+		// This case should ideally not be hit if called from the main controller loop.
+		klog.Warningf("isValidParentRef called with unsupported route type: %T", route)
+		return false
+	}
+
+	if len(parentRefs) == 0 {
+		return false
+	}
+
+	for _, parentRef := range parentRefs {
+		// Default to the route's own namespace if the ParentRef doesn't specify one.
+		refNamespace := route.GetNamespace()
+		if parentRef.Namespace != nil {
+			refNamespace = string(*parentRef.Namespace)
+		}
+		if parentRef.Name != gatewayv1.ObjectName(gateway.Name) || refNamespace != gateway.Namespace {
+			continue // This ParentRef is for a different Gateway, so we ignore it.
+		}
+
+		//    A nil field in the ParentRef acts as a wildcard for that property.
+		sectionNameMatches := (parentRef.SectionName == nil) || (*parentRef.SectionName == listener.Name)
+		portMatches := (parentRef.Port == nil) || (*parentRef.Port == listener.Port)
+
+		// For the reference to be valid, ALL specified fields must match.
+		if sectionNameMatches && portMatches {
 			return true
 		}
 	}
