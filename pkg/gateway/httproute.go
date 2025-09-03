@@ -344,8 +344,17 @@ func getPathMatchValue(match *routev3.RouteMatch) string {
 	if match.GetPrefix() != "" {
 		return match.GetPrefix()
 	}
-	if match.GetSafeRegex() != nil {
-		return match.GetSafeRegex().GetRegex()
+	if match.GetPathSeparatedPrefix() != "" {
+		return match.GetPathSeparatedPrefix()
+	}
+	if sr := match.GetSafeRegex(); sr != nil { // Regex Match (used for other PathPrefix)
+		// This correctly handles the output of translateHTTPRouteMatch.
+		regex := sr.GetRegex()
+		// Remove the trailing regex that matches subpaths.
+		path := strings.TrimSuffix(regex, "(/.*)?")
+		// Remove the quoting added by regexp.QuoteMeta.
+		path = strings.ReplaceAll(path, `\`, "")
+		return path
 	}
 	return ""
 }
