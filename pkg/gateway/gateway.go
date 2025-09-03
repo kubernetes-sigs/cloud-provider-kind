@@ -141,7 +141,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 		// This slice will hold the filter chains.
 		var filterChains []*listenerv3.FilterChain
 		// Prepare to collect ALL virtual hosts for this port into a single list.
-		allVirtualHosts := []*routev3.VirtualHost{}
+		virtualHostsForPort := make(map[string]*routev3.VirtualHost)
 		routeName := fmt.Sprintf("route-%d", port)
 
 		// All these listeners have the same port
@@ -270,18 +270,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForListener))
 			for _, vh := range virtualHostsForListener {
 				vhSlice = append(vhSlice, vh)
-				allVirtualHosts = append(allVirtualHosts, vh)
-			}
-
-			// For HTTPS, we create one filter chain per listener because they have unique
-			// SNI matches and TLS settings. For HTTP, we will only create one later.
-			if listener.Protocol == gatewayv1.HTTPSProtocolType {
-				// routeName := fmt.Sprintf("route-%d", port)
-				// Your translateListenerToFilterChain would need to be adapted to handle HTTPS details
-				// filterChain, err := c.translateListenerToFilterChain(gateway, listener, routeName)
-				// if err == nil {
-				//     filterChains = append(filterChains, filterChain)
-				// }
+				virtualHostsForPort[vh.Name] = vh
 			}
 
 			filterChain, err := c.translateListenerToFilterChain(gateway, listener, vhSlice, routeName)
@@ -332,6 +321,12 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			})
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
+
+		allVirtualHosts := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
+		for _, vh := range virtualHostsForPort {
+			allVirtualHosts = append(allVirtualHosts, vh)
+		}
+
 		// now aggregate all the listeners on the same port
 		routeConfig := &routev3.RouteConfiguration{
 			Name:         routeName,
@@ -345,6 +340,13 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				Address:         createEnvoyAddress(uint32(port)),
 				FilterChains:    filterChains,
 				ListenerFilters: createListenerFilters(),
+			}
+			// If this is plain HTTP, we must now create exactly ONE default filter chain.
+			// Use first listener as a template
+			// For HTTPS, we create one filter chain per listener because they have unique
+			// SNI matches and TLS settings.
+			if listeners[0].Protocol == gatewayv1.HTTPProtocolType {
+				envoyListener.FilterChains = []*listenerv3.FilterChain{filterChains[0]}
 			}
 			finalEnvoyListeners = append(finalEnvoyListeners, envoyListener)
 		}
