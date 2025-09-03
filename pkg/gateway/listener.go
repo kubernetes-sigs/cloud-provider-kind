@@ -23,21 +23,16 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHosts []*routev3.VirtualHost) (*listener.FilterChain, *routev3.RouteConfiguration, error) {
+func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHosts []*routev3.VirtualHost, routeName string) (*listener.FilterChain, error) {
 	var filterChain *listener.FilterChain
-	var routeConfig *routev3.RouteConfiguration
 
 	switch lis.Protocol {
 	case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-		routeConfig = &routev3.RouteConfiguration{
-			Name:         fmt.Sprintf("%s-%s", gateway.Name, lis.Name),
-			VirtualHosts: virtualHosts,
-		}
 		routerProto := &routerv3.Router{}
 		routerAny, err := anypb.New(routerProto)
 		if err != nil {
 			klog.Errorf("Failed to marshal router config: %v", err)
-			return nil, nil, err
+			return nil, err
 		}
 
 		hcmConfig := &hcm.HttpConnectionManager{
@@ -48,7 +43,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 						ResourceApiVersion:    corev3.ApiVersion_V3,
 						ConfigSourceSpecifier: &corev3.ConfigSource_Ads{Ads: &corev3.AggregatedConfigSource{}},
 					},
-					RouteConfigName: routeConfig.Name,
+					RouteConfigName: routeName,
 				},
 			},
 			HttpFilters: []*hcm.HttpFilter{{
@@ -60,7 +55,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		}
 		hcmAny, err := anypb.New(hcmConfig)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		filterChain = &listener.FilterChain{
@@ -83,7 +78,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		}
 		tcpProxyAny, err := anypb.New(tcpProxy)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		filterChain = &listener.FilterChain{
 			Filters: []*listener.Filter{{
@@ -103,7 +98,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		}
 		udpProxyAny, err := anypb.New(udpProxy)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		filterChain = &listener.FilterChain{
 			Filters: []*listener.Filter{{
@@ -125,7 +120,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		// Configure TLS context
 		tlsContext, err := c.buildDownstreamTLSContext(context.Background(), gateway, lis)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to build TLS context for listener %s: %w", lis.Name, err)
+			return nil, fmt.Errorf("failed to build TLS context for listener %s: %w", lis.Name, err)
 		}
 		if tlsContext != nil {
 			filterChain.TransportSocket = &corev3.TransportSocket{
@@ -137,7 +132,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		}
 	}
 
-	return filterChain, routeConfig, nil
+	return filterChain, nil
 }
 
 func (c *Controller) buildDownstreamTLSContext(ctx context.Context, gateway *gatewayv1.Gateway, lis gatewayv1.Listener) (*anypb.Any, error) {

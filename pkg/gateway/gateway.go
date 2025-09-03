@@ -174,6 +174,9 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	// Process Listeners by Port
 	for port, listeners := range listenersByPort {
 		var filterChains []*listenerv3.FilterChain
+		allVirtualHosts := []*routev3.VirtualHost{}
+		routeName := fmt.Sprintf("route-%d", port)
+
 		// All these listeners have the same port
 		for _, listener := range listeners {
 			var attachedRoutes int32
@@ -214,14 +217,11 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
 				for _, httpRoute := range httpRoutes {
 					key := types.NamespacedName{Namespace: httpRoute.Namespace, Name: httpRoute.Name}
-					envoyRoutes, validBackendRefs, finalCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
+					routes, validBackendRefs, finalCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
 					for _, backendRef := range validBackendRefs {
-
 						cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef)
-						klog.Infof("DEBUG valid translateBackendRefToCluster %v err %v", cluster, err)
-
 						if err == nil && cluster != nil {
 							if _, exists := envoyClusters[cluster.Name]; !exists {
 								envoyClusters[cluster.Name] = cluster
@@ -230,7 +230,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					}
 
 					// Aggregate Envoy routes into VirtualHosts.
-					if envoyRoutes != nil {
+					if routes != nil {
 						hostnames := getRouteHostnames(httpRoute.Spec.Hostnames, listener)
 						for _, hostname := range hostnames {
 							vh, ok := virtualHosts[hostname]
@@ -241,7 +241,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 								}
 								virtualHosts[hostname] = vh
 							}
-							vh.Routes = append(vh.Routes, envoyRoutes...)
+							vh.Routes = append(vh.Routes, routes...)
 						}
 						attachedRoutes++
 					}
@@ -255,11 +255,11 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					httpRouteStatuses[key] = parentStatus
 				}
 
-				// --- Process GRPCRoutes ---
+				// Process GRPCRoutes
 				grpcRoutes := c.getGRPCRoutesForListener(gateway, listener)
 				for _, grpcRoute := range grpcRoutes {
 					key := types.NamespacedName{Namespace: grpcRoute.Namespace, Name: grpcRoute.Name}
-					envoyRoutes, validBackendRefs, finalCondition := translateGRPCRouteToEnvoyRoutes(grpcRoute, c.serviceLister)
+					routes, validBackendRefs, finalCondition := translateGRPCRouteToEnvoyRoutes(grpcRoute, c.serviceLister)
 
 					// Create clusters for valid GRPCRoute backends.
 					for _, backendRef := range validBackendRefs {
@@ -271,7 +271,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 						}
 					}
 
-					if envoyRoutes != nil {
+					if routes != nil {
 						hostnames := getRouteHostnames(grpcRoute.Spec.Hostnames, listener)
 						for _, hostname := range hostnames {
 							vh, ok := virtualHosts[hostname]
@@ -282,7 +282,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 								}
 								virtualHosts[hostname] = vh
 							}
-							vh.Routes = append(vh.Routes, envoyRoutes...)
+							vh.Routes = append(vh.Routes, routes...)
 						}
 						attachedRoutes++
 					}
@@ -302,9 +302,10 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHosts))
 			for _, vh := range virtualHosts {
 				vhSlice = append(vhSlice, vh)
+				allVirtualHosts = append(allVirtualHosts, vh)
 			}
 
-			filterChain, routeConfig, err := c.translateListenerToFilterChain(gateway, listener, vhSlice)
+			filterChain, err := c.translateListenerToFilterChain(gateway, listener, vhSlice, routeName)
 			if err != nil {
 				// If translation fails, a reference is unresolved. Set both conditions to False.
 				klog.Errorf("Error translating listener %s to filter chain: %v", listener.Name, err)
@@ -339,9 +340,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					ObservedGeneration: gateway.Generation,
 				})
 
-				if routeConfig != nil {
-					envoyRoutes = append(envoyRoutes, routeConfig)
-				}
 				filterChains = append(filterChains, filterChain)
 			}
 
@@ -354,6 +352,14 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				ObservedGeneration: gateway.Generation,
 			})
 			allListenerStatuses[listener.Name] = listenerStatus
+		}
+		// now aggregate all the listeners on the same port
+		if len(allVirtualHosts) > 0 {
+			routeConfig := &routev3.RouteConfiguration{
+				Name:         routeName,
+				VirtualHosts: allVirtualHosts,
+			}
+			envoyRoutes = append(envoyRoutes, routeConfig)
 		}
 
 		if len(filterChains) > 0 {
@@ -369,7 +375,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 	clustersSlice := make([]envoyproxytypes.Resource, 0, len(envoyClusters))
 	for _, cluster := range envoyClusters {
-		klog.Infof("DEBUG ADDING/ /cLUSTER %#v", cluster)
 		clustersSlice = append(clustersSlice, cluster)
 	}
 
