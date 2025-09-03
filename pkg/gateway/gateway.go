@@ -126,6 +126,30 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	httpRouteStatuses := make(map[types.NamespacedName]gatewayv1.RouteParentStatus)
 	grpcRouteStatuses := make(map[types.NamespacedName]gatewayv1.RouteParentStatus)
 
+	// This map will store which valid routes belong to which listeners.
+	// map[listenerName] -> map[routeKey] -> routeObject
+	routesByListener := make(map[gatewayv1.SectionName]map[types.NamespacedName]*gatewayv1.HTTPRoute)
+
+	// Validate all HTTPRoutes against this Gateway
+	allHTTPRoutesForGateway := c.getHTTPRoutesForGateway(gateway)
+	for _, httpRoute := range allHTTPRoutesForGateway {
+		key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
+		parentStatus, acceptingListeners := c.validateHTTPRoute(gateway, httpRoute)
+
+		// Store the definitive status for the route.
+		httpRouteStatuses[key] = parentStatus
+
+		// If the route was accepted, associate it with the listeners that accepted it.
+		if len(acceptingListeners) > 0 {
+			for _, listener := range acceptingListeners {
+				if _, ok := routesByListener[listener.Name]; !ok {
+					routesByListener[listener.Name] = make(map[types.NamespacedName]*gatewayv1.HTTPRoute)
+				}
+				routesByListener[listener.Name][key] = httpRoute
+			}
+		}
+	}
+
 	// Aggregate Listeners by Port
 	listenersByPort := make(map[gatewayv1.PortNumber][]gatewayv1.Listener)
 	for _, listener := range gateway.Spec.Listeners {
@@ -182,60 +206,15 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
 				// Process HTTPRoutes
-				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
-				for _, httpRoute := range httpRoutes {
-					key := types.NamespacedName{Namespace: httpRoute.Namespace, Name: httpRoute.Name}
-					if _, ok := httpRouteStatuses[key]; ok {
-						continue
-					}
-					// Validate that the route's parentRef is a valid reference to this specific listener.
-					if !isValidParentRef(gateway, listener, httpRoute) {
-						// This route references the Gateway but has an invalid SectionName for THIS listener.
-						// Set the "Accepted: False" status and stop processing it further for this listener.
-						parentStatus := gatewayv1.RouteParentStatus{
-							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-							ControllerName: controllerName,
-							Conditions: []metav1.Condition{{
-								Type:               string(gatewayv1.RouteConditionAccepted),
-								Status:             metav1.ConditionFalse,
-								Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
-								Message:            "The referenced SectionName does not match this listener's name.",
-								ObservedGeneration: httpRoute.Generation,
-								LastTransitionTime: metav1.Now(),
-							}},
-						}
-						httpRouteStatuses[key] = parentStatus
-						continue // Stop processing this invalid route.
-					}
-
-					if !isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
-						// This route references the Gateway but has an invalid SectionName for THIS listener.
-						// Set the "Accepted: False" status and stop processing it further for this listener.
-						parentStatus := gatewayv1.RouteParentStatus{
-							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-							ControllerName: controllerName,
-							Conditions: []metav1.Condition{
-								{
-									Type:               string(gatewayv1.RouteConditionResolvedRefs),
-									Status:             metav1.ConditionTrue,
-									Reason:             string(gatewayv1.RouteReasonResolvedRefs),
-									Message:            "The referenced gateway is resolved",
-									ObservedGeneration: httpRoute.Generation,
-									LastTransitionTime: metav1.Now(),
-								},
-								{
-									Type:               string(gatewayv1.RouteConditionAccepted),
-									Status:             metav1.ConditionFalse,
-									Reason:             string(gatewayv1.RouteReasonNotAllowedByListeners),
-									Message:            "The referenced gateway is not allowed",
-									ObservedGeneration: httpRoute.Generation,
-									LastTransitionTime: metav1.Now(),
-								}},
-						}
-						httpRouteStatuses[key] = parentStatus
-						continue // Stop processing this invalid route.
-					}
-					routes, validBackendRefs, finalCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
+				// Get the routes that were pre-validated for this specific listener.
+				acceptedRoutes := routesByListener[listener.Name]
+				for _, httpRoute := range acceptedRoutes {
+					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
+					// Add the ResolvedRefs condition to the existing parent status.
+					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
+					currentStatus := httpRouteStatuses[key]
+					meta.SetStatusCondition(&currentStatus.Conditions, resolvedRefsCondition)
+					httpRouteStatuses[key] = currentStatus
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
 					for _, backendRef := range validBackendRefs {
@@ -262,26 +241,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 							vh.Routes = append(vh.Routes, routes...)
 						}
 						attachedRoutes++
-					}
-
-					if _, ok := httpRouteStatuses[key]; !ok {
-						// Store the calculated status for the route.
-						parentStatus := gatewayv1.RouteParentStatus{
-							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-							ControllerName: controllerName,
-							Conditions: []metav1.Condition{
-								finalCondition,
-								{
-									Type:               string(gatewayv1.RouteConditionAccepted),
-									Status:             metav1.ConditionTrue,
-									Reason:             string(gatewayv1.RouteReasonAccepted),
-									Message:            "Route is accepted",
-									ObservedGeneration: httpRoute.Generation,
-									LastTransitionTime: metav1.Now(),
-								},
-							},
-						}
-						httpRouteStatuses[key] = parentStatus
 					}
 				}
 
@@ -496,10 +455,20 @@ func (c *Controller) updateRouteStatuses(
 			// 3. Find the existing parent status for our Gateway, or append the new one.
 			var found bool
 			for i := range routeToUpdate.Status.Parents {
-				if routeToUpdate.Status.Parents[i].ParentRef.Name == desiredParentStatus.ParentRef.Name &&
-					*routeToUpdate.Status.Parents[i].ParentRef.Namespace == *desiredParentStatus.ParentRef.Namespace {
-					// Found it, so replace it with our new desired status.
-					routeToUpdate.Status.Parents[i] = desiredParentStatus
+				existingRef := routeToUpdate.Status.Parents[i].ParentRef
+				desiredRef := desiredParentStatus.ParentRef
+
+				existingNamespace := routeToUpdate.Namespace
+				if existingRef.Namespace != nil {
+					existingNamespace = string(*existingRef.Namespace)
+				}
+				desiredNamespace := routeToUpdate.Namespace
+				if desiredRef.Namespace != nil {
+					desiredNamespace = string(*desiredRef.Namespace)
+				}
+
+				if existingRef.Name == desiredRef.Name &&
+					existingNamespace == desiredNamespace {
 					found = true
 					break
 				}
@@ -584,20 +553,113 @@ func (c *Controller) updateRouteStatuses(
 	return errors.Join(errGroup...)
 }
 
-func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.HTTPRoute {
+// getHTTPRoutesForGateway returns all HTTPRoutes that have a ParentRef pointing to the specified Gateway.
+func (c *Controller) getHTTPRoutesForGateway(gw *gatewayv1.Gateway) []*gatewayv1.HTTPRoute {
 	var matchingRoutes []*gatewayv1.HTTPRoute
-	httpRoutes, err := c.httprouteLister.List(labels.Everything())
+	allRoutes, err := c.httprouteLister.List(labels.Everything())
 	if err != nil {
-		klog.Infof("failed to list HTTPRoutes: %v", err)
+		klog.Errorf("failed to list HTTPRoutes: %v", err)
 		return matchingRoutes
 	}
 
-	for _, route := range httpRoutes {
-		if isRouteReferenced(gw, listener, route) {
-			matchingRoutes = append(matchingRoutes, route)
+	for _, route := range allRoutes {
+		for _, parentRef := range route.Spec.ParentRefs {
+			// Check if the ParentRef targets the Gateway, defaulting to the route's namespace.
+			refNamespace := route.Namespace
+			if parentRef.Namespace != nil {
+				refNamespace = string(*parentRef.Namespace)
+			}
+			if parentRef.Name == gatewayv1.ObjectName(gw.Name) && refNamespace == gw.Namespace {
+				matchingRoutes = append(matchingRoutes, route)
+				break // Found a matching ref for this gateway, no need to check others.
+			}
 		}
 	}
 	return matchingRoutes
+}
+
+// validateHTTPRoute checks an HTTPRoute against all listeners of a Gateway and returns
+// its definitive parent status and a slice of the specific listeners that accepted it.
+func (c *Controller) validateHTTPRoute(gateway *gatewayv1.Gateway, httpRoute *gatewayv1.HTTPRoute) (gatewayv1.RouteParentStatus, []gatewayv1.Listener) {
+	var acceptingListeners []gatewayv1.Listener
+	var finalParentRef gatewayv1.ParentReference
+
+	// Find the specific parentRef that targets this gateway.
+	for _, pr := range httpRoute.Spec.ParentRefs {
+		refNamespace := httpRoute.Namespace
+		if pr.Namespace != nil {
+			refNamespace = string(*pr.Namespace)
+		}
+		if pr.Name == gatewayv1.ObjectName(gateway.Name) && refNamespace == gateway.Namespace {
+			finalParentRef = pr
+			break
+		}
+	}
+
+	// Iterate through all listeners to find all that can accept this route.
+	for _, listener := range gateway.Spec.Listeners {
+		// 1. Check if the parentRef's constraints (port, sectionName) match the listener.
+		sectionNameMatches := (finalParentRef.SectionName == nil) || (*finalParentRef.SectionName == listener.Name)
+		portMatches := (finalParentRef.Port == nil) || (*finalParentRef.Port == listener.Port)
+		if !sectionNameMatches || !portMatches {
+			continue // This listener is not a potential parent based on the ref.
+		}
+
+		// 2. Check if the listener's own policy (e.g., allowedNamespaces) permits this route.
+		if !isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
+			// This listener explicitly rejects the route. We can stop checking for this route
+			// and immediately return a "NotAllowed" status.
+			status := gatewayv1.RouteParentStatus{
+				ParentRef:      finalParentRef,
+				ControllerName: controllerName,
+				Conditions: []metav1.Condition{{
+					Type:               string(gatewayv1.RouteConditionAccepted),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(gatewayv1.RouteReasonNotAllowedByListeners),
+					Message:            "Route is not allowed by a listener.",
+					ObservedGeneration: httpRoute.Generation,
+					LastTransitionTime: metav1.Now(),
+				}},
+			}
+			return status, nil
+		}
+
+		// If we get here, this listener accepts the route.
+		acceptingListeners = append(acceptingListeners, listener)
+	}
+
+	// Now, build the final status based on whether any listeners accepted the route.
+	if len(acceptingListeners) > 0 {
+		// Success! At least one listener accepted the route.
+		status := gatewayv1.RouteParentStatus{
+			ParentRef:      finalParentRef,
+			ControllerName: controllerName,
+			Conditions: []metav1.Condition{{
+				Type:               string(gatewayv1.RouteConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.RouteReasonAccepted),
+				Message:            "Route is accepted",
+				ObservedGeneration: httpRoute.Generation,
+				LastTransitionTime: metav1.Now(),
+			}},
+		}
+		return status, acceptingListeners
+	}
+
+	// Failure: No listeners accepted the route because none matched the parentRef's criteria.
+	status := gatewayv1.RouteParentStatus{
+		ParentRef:      finalParentRef,
+		ControllerName: controllerName,
+		Conditions: []metav1.Condition{{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
+			Message:            "No listener matched the ParentRef's specified SectionName or Port.",
+			ObservedGeneration: httpRoute.Generation,
+			LastTransitionTime: metav1.Now(),
+		}},
+	}
+	return status, nil
 }
 
 func (c *Controller) getGRPCRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.GRPCRoute {
