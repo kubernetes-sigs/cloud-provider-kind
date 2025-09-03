@@ -3,6 +3,8 @@ package gateway
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -191,7 +193,12 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 		case gatewayv1.PathMatchExact:
 			routeMatch.PathSpecifier = &routev3.RouteMatch_Path{Path: pathValue}
 		case gatewayv1.PathMatchPathPrefix:
-			routeMatch.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: pathValue}
+			if pathValue == "/" {
+				routeMatch.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
+			} else {
+				path := strings.TrimSuffix(pathValue, "/")
+				routeMatch.PathSpecifier = &routev3.RouteMatch_PathSeparatedPrefix{PathSeparatedPrefix: path}
+			}
 		case gatewayv1.PathMatchRegularExpression:
 			routeMatch.PathSpecifier = &routev3.RouteMatch_SafeRegex{
 				SafeRegex: &matcherv3.RegexMatcher{
@@ -277,4 +284,82 @@ func createFailureCondition(reason gatewayv1.RouteConditionReason, message strin
 		ObservedGeneration: generation,
 		LastTransitionTime: metav1.Now(),
 	}
+}
+
+// sortRoutes is the definitive sorter for Envoy routes based on Gateway API precedence.
+func sortRoutes(routes []*routev3.Route) {
+	sort.Slice(routes, func(i, j int) bool {
+		matchI := routes[i].GetMatch()
+		matchJ := routes[j].GetMatch()
+
+		// De-prioritize the catch-all route, ensuring it's always last.
+		isCatchAllI := isCatchAll(matchI)
+		isCatchAllJ := isCatchAll(matchJ)
+
+		if isCatchAllI != isCatchAllJ {
+			// If I is the catch-all, it should come after J (return false).
+			// If J is the catch-all, it should come after I (return true).
+			return isCatchAllJ
+		}
+
+		// Precedence Rule 1: Exact Path Match vs. Other Path Matches
+		isExactPathI := matchI.GetPath() != ""
+		isExactPathJ := matchJ.GetPath() != ""
+		if isExactPathI != isExactPathJ {
+			return isExactPathI // Exact path is higher precedence
+		}
+
+		// Precedence Rule 2: Longest Prefix Match
+		prefixI := getPathMatchValue(matchI)
+		prefixJ := getPathMatchValue(matchJ)
+
+		if len(prefixI) != len(prefixJ) {
+			return len(prefixI) > len(prefixJ) // Longer prefix is higher precedence
+		}
+
+		// Precedence Rule 3: Number of Header Matches
+		headerCountI := len(matchI.GetHeaders())
+		headerCountJ := len(matchJ.GetHeaders())
+		if headerCountI != headerCountJ {
+			return headerCountI > headerCountJ // More headers is higher precedence
+		}
+
+		// Precedence Rule 4: Number of Query Param Matches
+		queryCountI := len(matchI.GetQueryParameters())
+		queryCountJ := len(matchJ.GetQueryParameters())
+		if queryCountI != queryCountJ {
+			return queryCountI > queryCountJ // More query params is higher precedence
+		}
+
+		// If all else is equal, maintain original order (stable sort)
+		return false
+	})
+}
+
+// getPathMatchValue is a helper to extract the path string for comparison.
+func getPathMatchValue(match *routev3.RouteMatch) string {
+	if match.GetPath() != "" {
+		return match.GetPath()
+	}
+	if match.GetPrefix() != "" {
+		return match.GetPrefix()
+	}
+	if match.GetSafeRegex() != nil {
+		return match.GetSafeRegex().GetRegex()
+	}
+	return ""
+}
+
+// isCatchAll determines if a route match is a generic "catch-all" rule.
+// A catch-all matches all paths ("/") and has no other specific conditions.
+func isCatchAll(match *routev3.RouteMatch) bool {
+	if match == nil {
+		return false
+	}
+	// It's a catch-all if the path match is for "/" AND there are no other constraints.
+	isRootPrefix := match.GetPrefix() == "/"
+	hasNoHeaders := len(match.GetHeaders()) == 0
+	hasNoParams := len(match.GetQueryParameters()) == 0
+
+	return isRootPrefix && hasNoHeaders && hasNoParams
 }
