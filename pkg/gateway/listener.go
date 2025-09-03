@@ -19,9 +19,81 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+// validateListeners checks for conflicts among all listeners on a Gateway as per the spec.
+// It returns a map of conflicted listener conditions and a Gateway-level condition if any conflicts exist.
+func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) (
+	conflictedListenerConditions map[gatewayv1.SectionName]metav1.Condition,
+) {
+	conflictedListenerConditions = make(map[gatewayv1.SectionName]metav1.Condition)
+	listenersByPort := make(map[gatewayv1.PortNumber][]gatewayv1.Listener)
+	for _, listener := range gateway.Spec.Listeners {
+		listenersByPort[listener.Port] = append(listenersByPort[listener.Port], listener)
+	}
+
+	conflictedListenerNames := []string{}
+
+	for _, listenersOnPort := range listenersByPort {
+		// Rule: A TCP listener cannot share a port with HTTP/HTTPS/TLS listeners.
+		hasTCP := false
+		hasHTTPTLS := false
+		for _, listener := range listenersOnPort {
+			if listener.Protocol == gatewayv1.TCPProtocolType || listener.Protocol == gatewayv1.UDPProtocolType {
+				hasTCP = true
+			}
+			if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType || listener.Protocol == gatewayv1.TLSProtocolType {
+				hasHTTPTLS = true
+			}
+		}
+
+		if hasTCP && hasHTTPTLS {
+			for _, listener := range listenersOnPort {
+				conflictedListenerNames = append(conflictedListenerNames, string(listener.Name))
+				conflictedListenerConditions[listener.Name] = metav1.Condition{
+					Type:    string(gatewayv1.ListenerConditionConflicted),
+					Status:  metav1.ConditionTrue,
+					Reason:  string(gatewayv1.ListenerReasonProtocolConflict),
+					Message: "Protocol conflict: TCP/UDP listeners cannot share a port with HTTP/HTTPS/TLS listeners.",
+				}
+			}
+			continue // Skip further checks for this port
+		}
+
+		// Rule: HTTP/HTTPS/TLS listeners on the same port must have unique hostnames.
+		seenHostnames := make(map[gatewayv1.Hostname]gatewayv1.SectionName)
+		for _, listener := range listenersOnPort {
+			// This check only applies to protocols that use hostnames for distinction.
+			if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType || listener.Protocol == gatewayv1.TLSProtocolType {
+				hostname := gatewayv1.Hostname("")
+				if listener.Hostname != nil {
+					hostname = *listener.Hostname
+				}
+
+				if conflictingListenerName, exists := seenHostnames[hostname]; exists {
+					// Found a conflict. Mark both this listener and the one we saw before.
+					conflictedListenerNames = append(conflictedListenerNames, string(listener.Name), string(conflictingListenerName))
+
+					conflictedCondition := metav1.Condition{
+						Type:    string(gatewayv1.ListenerConditionConflicted),
+						Status:  metav1.ConditionTrue,
+						Reason:  string(gatewayv1.ListenerReasonHostnameConflict),
+						Message: fmt.Sprintf("Hostname '%s' conflicts with another listener on the same port.", hostname),
+					}
+					conflictedListenerConditions[listener.Name] = conflictedCondition
+					conflictedListenerConditions[conflictingListenerName] = conflictedCondition
+				} else {
+					seenHostnames[hostname] = listener.Name
+				}
+			}
+		}
+	}
+
+	return conflictedListenerConditions
+}
 
 func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHosts []*routev3.VirtualHost, routeName string) (*listener.FilterChain, error) {
 	var filterChain *listener.FilterChain
