@@ -185,6 +185,30 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
 				for _, httpRoute := range httpRoutes {
 					key := types.NamespacedName{Namespace: httpRoute.Namespace, Name: httpRoute.Name}
+					if _, ok := httpRouteStatuses[key]; ok {
+						continue
+					}
+					// Validate that the route's parentRef is a valid reference to this specific listener.
+					isValidRef := isValidParentRef(gateway, listener, httpRoute)
+					if !isValidRef {
+						// This route references the Gateway but has an invalid SectionName for THIS listener.
+						// Set the "Accepted: False" status and stop processing it further for this listener.
+						parentStatus := gatewayv1.RouteParentStatus{
+							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
+							ControllerName: controllerName,
+							Conditions: []metav1.Condition{{
+								Type:               string(gatewayv1.RouteConditionAccepted),
+								Status:             metav1.ConditionFalse,
+								Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
+								Message:            "The referenced SectionName does not match this listener's name.",
+								ObservedGeneration: httpRoute.Generation,
+								LastTransitionTime: metav1.Now(),
+							}},
+						}
+						httpRouteStatuses[key] = parentStatus
+						continue // Stop processing this invalid route.
+					}
+
 					routes, validBackendRefs, finalCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
@@ -214,13 +238,25 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 						attachedRoutes++
 					}
 
-					// Store the calculated status for the route.
-					parentStatus := gatewayv1.RouteParentStatus{
-						ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-						ControllerName: controllerName,
-						Conditions:     []metav1.Condition{finalCondition},
+					if _, ok := httpRouteStatuses[key]; !ok {
+						// Store the calculated status for the route.
+						parentStatus := gatewayv1.RouteParentStatus{
+							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
+							ControllerName: controllerName,
+							Conditions: []metav1.Condition{
+								finalCondition,
+								{
+									Type:               string(gatewayv1.RouteConditionAccepted),
+									Status:             metav1.ConditionTrue,
+									Reason:             string(gatewayv1.RouteReasonAccepted),
+									Message:            "Route is accepted",
+									ObservedGeneration: httpRoute.Generation,
+									LastTransitionTime: metav1.Now(),
+								},
+							},
+						}
+						httpRouteStatuses[key] = parentStatus
 					}
-					httpRouteStatuses[key] = parentStatus
 				}
 
 				// Process GRPCRoutes
@@ -430,18 +466,6 @@ func (c *Controller) updateRouteStatuses(
 
 			// 2. Create a mutable copy to work with.
 			routeToUpdate := originalRoute.DeepCopy()
-
-			// The route is attached, so it is always considered "Accepted".
-			// The ResolvedRefs condition was already calculated in the build phase.
-			acceptedCond := metav1.Condition{
-				Type:               string(gatewayv1.RouteConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(gatewayv1.RouteReasonAccepted),
-				Message:            "Route is accepted",
-				ObservedGeneration: routeToUpdate.Generation,
-				LastTransitionTime: metav1.Now(),
-			}
-			meta.SetStatusCondition(&desiredParentStatus.Conditions, acceptedCond)
 
 			// 3. Find the existing parent status for our Gateway, or append the new one.
 			var found bool
