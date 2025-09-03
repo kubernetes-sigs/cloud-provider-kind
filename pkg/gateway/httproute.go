@@ -4,35 +4,84 @@ import (
 	"errors"
 	"fmt"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// translateHTTPRouteToEnvoyRoutes returns Envoy routes, a list of *valid* BackendRefs, and a condition.
-func translateHTTPRouteToEnvoyRoutes(httpRoute *gatewayv1.HTTPRoute, serviceLister corev1listers.ServiceLister) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
+// translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
+// It now correctly handles RequestHeaderModifier filters.
+func translateHTTPRouteToEnvoyRoutes(
+	httpRoute *gatewayv1.HTTPRoute,
+	serviceLister corev1listers.ServiceLister,
+) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
+
 	var envoyRoutes []*routev3.Route
-	var validBackendRefs []gatewayv1.BackendRef
+	var allValidBackendRefs []gatewayv1.BackendRef
 	isOverallSuccess := true
 	var finalFailureMessage string
 	var finalFailureReason gatewayv1.RouteConditionReason
 
 	for ruleIndex, rule := range httpRoute.Spec.Rules {
-		routeAction, backendRefs, err := buildHTTPRouteAction(httpRoute.Namespace, rule.BackendRefs, serviceLister)
-		validBackendRefs = append(validBackendRefs, backendRefs...)
+		// Attempt to build the forwarding action and get valid backends.
+		routeAction, validBackends, err := buildHTTPRouteAction(
+			httpRoute.Namespace,
+			rule.BackendRefs,
+			serviceLister,
+		)
+		allValidBackendRefs = append(allValidBackendRefs, validBackends...)
+
+		var headersToAdd []*corev3.HeaderValueOption
+		var headersToRemove []string
+		for _, filter := range rule.Filters {
+			if filter.Type == gatewayv1.HTTPRouteFilterRequestHeaderModifier && filter.RequestHeaderModifier != nil {
+				// Handle "set" actions (overwrite)
+				for _, header := range filter.RequestHeaderModifier.Set {
+					headersToAdd = append(headersToAdd, &corev3.HeaderValueOption{
+						Header: &corev3.HeaderValue{
+							Key:   string(header.Name),
+							Value: header.Value,
+						},
+						// This tells Envoy to overwrite the header if it exists.
+						AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+					})
+				}
+
+				// Handle "add" actions (append)
+				for _, header := range filter.RequestHeaderModifier.Add {
+					headersToAdd = append(headersToAdd, &corev3.HeaderValueOption{
+						Header: &corev3.HeaderValue{
+							Key:   string(header.Name),
+							Value: header.Value,
+						},
+						// This tells Envoy to append the value if the header already exists.
+						AppendAction: corev3.HeaderValueOption_APPEND_IF_EXISTS_OR_ADD,
+					})
+				}
+
+				// Handle "remove" actions
+				headersToRemove = append(headersToRemove, filter.RequestHeaderModifier.Remove...)
+			}
+		}
 
 		buildRoutesForRule := func(match gatewayv1.HTTPRouteMatch, matchIndex int) (*routev3.Route, metav1.Condition) {
 			routeMatch, matchCondition := translateHTTPRouteMatch(match, httpRoute.Generation)
 			if matchCondition.Status == metav1.ConditionFalse {
 				return nil, matchCondition
 			}
+
 			envoyRoute := &routev3.Route{
-				Name:  fmt.Sprintf("%s-%s-rule%d-match%d", httpRoute.Namespace, httpRoute.Name, ruleIndex, matchIndex),
-				Match: routeMatch,
+				Name:                   fmt.Sprintf("%s-%s-rule%d-match%d", httpRoute.Namespace, httpRoute.Name, ruleIndex, matchIndex),
+				Match:                  routeMatch,
+				RequestHeadersToAdd:    headersToAdd,
+				RequestHeadersToRemove: headersToRemove,
 			}
+
 			var controllerErr *ControllerError
 			if errors.As(err, &controllerErr) {
 				if isOverallSuccess {
@@ -66,9 +115,9 @@ func translateHTTPRouteToEnvoyRoutes(httpRoute *gatewayv1.HTTPRoute, serviceList
 	}
 
 	if isOverallSuccess {
-		return envoyRoutes, validBackendRefs, createSuccessCondition(httpRoute.Generation)
+		return envoyRoutes, allValidBackendRefs, createSuccessCondition(httpRoute.Generation)
 	}
-	return envoyRoutes, validBackendRefs, createFailureCondition(finalFailureReason, finalFailureMessage, httpRoute.Generation)
+	return envoyRoutes, allValidBackendRefs, createFailureCondition(finalFailureReason, finalFailureMessage, httpRoute.Generation)
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
