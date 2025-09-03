@@ -189,8 +189,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 						continue
 					}
 					// Validate that the route's parentRef is a valid reference to this specific listener.
-					isValidRef := isValidParentRef(gateway, listener, httpRoute)
-					if !isValidRef {
+					if !isValidParentRef(gateway, listener, httpRoute) {
 						// This route references the Gateway but has an invalid SectionName for THIS listener.
 						// Set the "Accepted: False" status and stop processing it further for this listener.
 						parentStatus := gatewayv1.RouteParentStatus{
@@ -209,6 +208,33 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 						continue // Stop processing this invalid route.
 					}
 
+					if !isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
+						// This route references the Gateway but has an invalid SectionName for THIS listener.
+						// Set the "Accepted: False" status and stop processing it further for this listener.
+						parentStatus := gatewayv1.RouteParentStatus{
+							ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
+							ControllerName: controllerName,
+							Conditions: []metav1.Condition{
+								{
+									Type:               string(gatewayv1.RouteConditionResolvedRefs),
+									Status:             metav1.ConditionTrue,
+									Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+									Message:            "The referenced gateway is resolved",
+									ObservedGeneration: httpRoute.Generation,
+									LastTransitionTime: metav1.Now(),
+								},
+								{
+									Type:               string(gatewayv1.RouteConditionAccepted),
+									Status:             metav1.ConditionFalse,
+									Reason:             string(gatewayv1.RouteReasonNotAllowedByListeners),
+									Message:            "The referenced gateway is not allowed",
+									ObservedGeneration: httpRoute.Generation,
+									LastTransitionTime: metav1.Now(),
+								}},
+						}
+						httpRouteStatuses[key] = parentStatus
+						continue // Stop processing this invalid route.
+					}
 					routes, validBackendRefs, finalCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
@@ -567,7 +593,7 @@ func (c *Controller) getHTTPRoutesForListener(gw *gatewayv1.Gateway, listener ga
 	}
 
 	for _, route := range httpRoutes {
-		if isRouteReferenced(gw, listener, route) && isRouteAllowed(gw, listener, route, c.namespaceLister) {
+		if isRouteReferenced(gw, listener, route) {
 			matchingRoutes = append(matchingRoutes, route)
 		}
 	}
