@@ -101,45 +101,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
 
 	// Calculate and set the Gateway's own status conditions based on the build results.
-	programmedCondition := metav1.Condition{
-		Type:               string(gatewayv1.GatewayConditionProgrammed),
-		ObservedGeneration: newGw.Generation,
-	}
-	if err != nil {
-		// If the Envoy update fails, the Gateway is not programmed.
-		programmedCondition.Status = metav1.ConditionFalse
-		programmedCondition.Reason = "ReconciliationError"
-		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", err.Error())
-	} else {
-		// If the Envoy update succeeds, check if all individual listeners were programmed.
-		listenersProgrammed := 0
-		for _, listenerStatus := range listenerStatuses {
-			if meta.IsStatusConditionTrue(listenerStatus.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
-				listenersProgrammed++
-			}
-		}
-
-		if listenersProgrammed == len(listenerStatuses) {
-			// The Gateway is only fully programmed if all listeners are programmed.
-			programmedCondition.Status = metav1.ConditionTrue
-			programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
-			programmedCondition.Message = "Envoy configuration updated successfully"
-		} else {
-			// If any listener failed, the Gateway as a whole is not fully programmed.
-			programmedCondition.Status = metav1.ConditionFalse
-			programmedCondition.Reason = "ListenersNotProgrammed"
-			programmedCondition.Message = fmt.Sprintf("%d out of %d listeners failed to be programmed", listenersProgrammed, len(listenerStatuses))
-		}
-	}
-	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
-
-	meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
-		Type:               string(gatewayv1.GatewayConditionAccepted),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(gatewayv1.GatewayReasonAccepted),
-		Message:            "Gateway is accepted",
-		ObservedGeneration: newGw.Generation,
-	})
+	setGatewayConditions(newGw, listenerStatuses, err)
 
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
 		_, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
@@ -170,10 +132,15 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 		listenersByPort[listener.Port] = append(listenersByPort[listener.Port], listener)
 	}
 
+	// validate listeners that may reuse the same port
+	conflictedListenerConditions := c.validateListeners(gateway)
+
 	finalEnvoyListeners := []envoyproxytypes.Resource{}
 	// Process Listeners by Port
 	for port, listeners := range listenersByPort {
+		// This slice will hold the filter chains.
 		var filterChains []*listenerv3.FilterChain
+		// Prepare to collect ALL virtual hosts for this port into a single list.
 		allVirtualHosts := []*routev3.VirtualHost{}
 		routeName := fmt.Sprintf("route-%d", port)
 
@@ -201,19 +168,20 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				continue // Stop processing this invalid listener
 			}
 
-			virtualHost := &routev3.VirtualHost{
-				Name:    fmt.Sprintf("%s-%s", gateway.Name, listener.Name),
-				Domains: []string{"*"},
-			}
-			if listener.Hostname != nil && *listener.Hostname != "" {
-				virtualHost.Domains = []string{string(*listener.Hostname)}
+			if conflictCondition, isConflicted := conflictedListenerConditions[listener.Name]; isConflicted {
+				// This listener is conflicted. Set its status and skip it.
+				meta.SetStatusCondition(&listenerStatus.Conditions, conflictCondition)
+				allListenerStatuses[listener.Name] = listenerStatus
+				continue // DO NOT generate Envoy config for this listener
 			}
 
-			virtualHosts := make(map[string]*routev3.VirtualHost)
+			// This map is temporary for just this listener's virtual hosts,
+			// which are determined by the hostnames on the attached routes.
+			virtualHostsForListener := make(map[string]*routev3.VirtualHost)
 
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
-				// --- Process HTTPRoutes ---
+				// Process HTTPRoutes
 				httpRoutes := c.getHTTPRoutesForListener(gateway, listener)
 				for _, httpRoute := range httpRoutes {
 					key := types.NamespacedName{Namespace: httpRoute.Namespace, Name: httpRoute.Name}
@@ -233,13 +201,13 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					if routes != nil {
 						hostnames := getRouteHostnames(httpRoute.Spec.Hostnames, listener)
 						for _, hostname := range hostnames {
-							vh, ok := virtualHosts[hostname]
+							vh, ok := virtualHostsForListener[hostname]
 							if !ok {
 								vh = &routev3.VirtualHost{
-									Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
+									Name:    fmt.Sprintf("%s-%s-%d-%s", gateway.Name, listener.Protocol, port, hostname),
 									Domains: []string{hostname},
 								}
-								virtualHosts[hostname] = vh
+								virtualHostsForListener[hostname] = vh
 							}
 							vh.Routes = append(vh.Routes, routes...)
 						}
@@ -274,13 +242,13 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					if routes != nil {
 						hostnames := getRouteHostnames(grpcRoute.Spec.Hostnames, listener)
 						for _, hostname := range hostnames {
-							vh, ok := virtualHosts[hostname]
+							vh, ok := virtualHostsForListener[hostname]
 							if !ok {
 								vh = &routev3.VirtualHost{
-									Name:    fmt.Sprintf("%s-%s-%s", gateway.Name, listener.Name, hostname),
+									Name:    fmt.Sprintf("%s-%s-%d-%s", gateway.Name, listener.Protocol, port, hostname),
 									Domains: []string{hostname},
 								}
-								virtualHosts[hostname] = vh
+								virtualHostsForListener[hostname] = vh
 							}
 							vh.Routes = append(vh.Routes, routes...)
 						}
@@ -299,10 +267,21 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
 			}
 
-			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHosts))
-			for _, vh := range virtualHosts {
+			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForListener))
+			for _, vh := range virtualHostsForListener {
 				vhSlice = append(vhSlice, vh)
 				allVirtualHosts = append(allVirtualHosts, vh)
+			}
+
+			// For HTTPS, we create one filter chain per listener because they have unique
+			// SNI matches and TLS settings. For HTTP, we will only create one later.
+			if listener.Protocol == gatewayv1.HTTPSProtocolType {
+				// routeName := fmt.Sprintf("route-%d", port)
+				// Your translateListenerToFilterChain would need to be adapted to handle HTTPS details
+				// filterChain, err := c.translateListenerToFilterChain(gateway, listener, routeName)
+				// if err == nil {
+				//     filterChains = append(filterChains, filterChain)
+				// }
 			}
 
 			filterChain, err := c.translateListenerToFilterChain(gateway, listener, vhSlice, routeName)
@@ -354,13 +333,11 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
 		// now aggregate all the listeners on the same port
-		if len(allVirtualHosts) > 0 {
-			routeConfig := &routev3.RouteConfiguration{
-				Name:         routeName,
-				VirtualHosts: allVirtualHosts,
-			}
-			envoyRoutes = append(envoyRoutes, routeConfig)
+		routeConfig := &routev3.RouteConfiguration{
+			Name:         routeName,
+			VirtualHosts: allVirtualHosts,
 		}
+		envoyRoutes = append(envoyRoutes, routeConfig)
 
 		if len(filterChains) > 0 {
 			envoyListener := &listenerv3.Listener{
@@ -694,4 +671,48 @@ func getRouteHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.L
 		return []string{string(*listener.Hostname)}
 	}
 	return []string{"*"}
+}
+
+// setGatewayConditions calculates and sets the final status conditions for the Gateway
+// based on the results of the reconciliation loop.
+func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1.ListenerStatus, err error) {
+	programmedCondition := metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionProgrammed),
+		ObservedGeneration: newGw.Generation,
+	}
+	if err != nil {
+		// If the Envoy update fails, the Gateway is not programmed.
+		programmedCondition.Status = metav1.ConditionFalse
+		programmedCondition.Reason = "ReconciliationError"
+		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", err.Error())
+	} else {
+		// If the Envoy update succeeds, check if all individual listeners were programmed.
+		listenersProgrammed := 0
+		for _, listenerStatus := range listenerStatuses {
+			if meta.IsStatusConditionTrue(listenerStatus.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
+				listenersProgrammed++
+			}
+		}
+
+		if listenersProgrammed == len(listenerStatuses) {
+			// The Gateway is only fully programmed if all listeners are programmed.
+			programmedCondition.Status = metav1.ConditionTrue
+			programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
+			programmedCondition.Message = "Envoy configuration updated successfully"
+		} else {
+			// If any listener failed, the Gateway as a whole is not fully programmed.
+			programmedCondition.Status = metav1.ConditionFalse
+			programmedCondition.Reason = "ListenersNotProgrammed"
+			programmedCondition.Message = fmt.Sprintf("%d out of %d listeners failed to be programmed", listenersProgrammed, len(listenerStatuses))
+		}
+	}
+	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
+
+	meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.GatewayReasonAccepted),
+		Message:            "Gateway is accepted",
+		ObservedGeneration: newGw.Generation,
+	})
 }
