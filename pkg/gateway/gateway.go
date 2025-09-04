@@ -771,7 +771,7 @@ func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1
 
 // getIntersectingHostnames calculates the set of hostnames that are valid for a given route and listener.
 func getIntersectingHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.Listener) []string {
-	// If the listener has no hostname, the route's own hostnames (or "*") are used.
+	// If the listener has no hostname, it allows all of the route's hostnames.
 	if listener.Hostname == nil || *listener.Hostname == "" {
 		if len(routeHostnames) == 0 {
 			return []string{"*"}
@@ -782,7 +782,6 @@ func getIntersectingHostnames(routeHostnames []gatewayv1.Hostname, listener gate
 		}
 		return names
 	}
-
 	listenerHostname := string(*listener.Hostname)
 
 	// If the route has no hostnames, it inherits the listener's hostname.
