@@ -485,6 +485,13 @@ func TestIsHostnameSubset(t *testing.T) {
 			routeHostname:    "*.example.com",
 			want:             false,
 		},
+
+		{
+			name:             "Wildcard route does match specific TLD",
+			listenerHostname: "very.specific.com",
+			routeHostname:    "*.specific.com",
+			want:             true,
+		},
 	}
 
 	for _, tc := range testCases {
