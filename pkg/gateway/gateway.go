@@ -243,7 +243,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 					// Aggregate Envoy routes into VirtualHosts.
 					if routes != nil {
-						hostnames := getRouteHostnames(httpRoute.Spec.Hostnames, listener)
+						hostnames := getIntersectingHostnames(httpRoute.Spec.Hostnames, listener)
 						for _, hostname := range hostnames {
 							vh, ok := virtualHostsForListener[hostname]
 							if !ok {
@@ -767,4 +767,35 @@ func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1
 		Message:            "Gateway is accepted",
 		ObservedGeneration: newGw.Generation,
 	})
+}
+
+// getIntersectingHostnames calculates the set of hostnames that are valid for a given route and listener.
+func getIntersectingHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.Listener) []string {
+	// If the listener has no hostname, the route's own hostnames (or "*") are used.
+	if listener.Hostname == nil || *listener.Hostname == "" {
+		if len(routeHostnames) == 0 {
+			return []string{"*"}
+		}
+		var names []string
+		for _, h := range routeHostnames {
+			names = append(names, string(h))
+		}
+		return names
+	}
+
+	listenerHostname := string(*listener.Hostname)
+
+	// If the route has no hostnames, it inherits the listener's hostname.
+	if len(routeHostnames) == 0 {
+		return []string{listenerHostname}
+	}
+
+	// Find the actual intersection between the two sets of hostnames.
+	var intersection []string
+	for _, routeHostname := range routeHostnames {
+		if isHostnameSubset(string(routeHostname), listenerHostname) {
+			intersection = append(intersection, string(routeHostname))
+		}
+	}
+	return intersection
 }
