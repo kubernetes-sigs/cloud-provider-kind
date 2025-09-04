@@ -67,17 +67,19 @@ func isRouteReferenced(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, 
 	return false
 }
 
-// isRouteAllowed checks if a given route is allowed to attach to a listener
-// based on the listener's `allowedRoutes` specification.
-func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object, namespaceLister corev1listers.NamespaceLister) bool {
+// isAllowedByListener checks if a given route is allowed to attach to a listener
+// based on the listener's `allowedRoutes` specification for namespaces and kinds.
+func isAllowedByListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object, namespaceLister corev1listers.NamespaceLister) bool {
 	allowed := listener.AllowedRoutes
 	if allowed == nil {
+		// If AllowedRoutes is not set, only routes in the same namespace are allowed.
 		return route.GetNamespace() == gateway.GetNamespace()
 	}
 
 	routeNamespace := route.GetNamespace()
 	gatewayNamespace := gateway.GetNamespace()
 
+	// Check if the route's namespace is allowed.
 	namespaceAllowed := false
 	effectiveFrom := gatewayv1.NamespacesFromSame
 	if allowed.Namespaces != nil && allowed.Namespaces.From != nil {
@@ -118,7 +120,9 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 		return false
 	}
 
+	// If namespaces are allowed, check if the route's kind is allowed.
 	if len(allowed.Kinds) == 0 {
+		// No kinds specified, so all kinds are allowed.
 		return true
 	}
 
@@ -145,9 +149,16 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 		}
 	}
 
+	// The route's kind is not in the allowed list.
+	return false
+}
+
+// isAllowedByHostname checks if a route is allowed to attach to a listener
+// based on hostname matching rules.
+func isAllowedByHostname(listener gatewayv1.Listener, route metav1.Object) bool {
 	// If the listener specifies no hostname, it allows all route hostnames.
 	if listener.Hostname == nil || *listener.Hostname == "" {
-		return true // Continue with the result of the namespace check.
+		return true
 	}
 	listenerHostname := string(*listener.Hostname)
 
@@ -158,7 +169,8 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 	case *gatewayv1.GRPCRoute:
 		routeHostnames = r.Spec.Hostnames
 	default:
-		return true // Not a type with hostnames, so no hostname check needed.
+		// Not a type with hostnames, so no hostname check needed.
+		return true
 	}
 
 	// If the route specifies no hostnames, it inherits from the listener, which is always valid.
@@ -179,28 +191,87 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 	return false
 }
 
+// getIntersectingHostnames calculates the precise set of hostnames that are valid
+// for a given route and listener, following the Gateway API specification.
+// It correctly handles empty and wildcard hostnames.
+func getIntersectingHostnames(listener gatewayv1.Listener, routeHostnames []gatewayv1.Hostname) []string {
+	// Case 1: The listener has no hostname specified.
+	// This is the most permissive case. The listener acts as a universal wildcard,
+	// allowing any and all hostnames from the route.
+	if listener.Hostname == nil || *listener.Hostname == "" {
+		// If the route also specifies no hostnames, the result is a universal match for all hostnames.
+		if len(routeHostnames) == 0 {
+			return []string{"*"}
+		}
+		// Otherwise, the result is simply the route's own set of hostnames.
+		var names []string
+		for _, h := range routeHostnames {
+			names = append(names, string(h))
+		}
+		return names
+	}
+	listenerHostname := string(*listener.Hostname)
+
+	// Case 2: The route has no hostnames.
+	// It implicitly inherits the listener's specific hostname.
+	if len(routeHostnames) == 0 {
+		return []string{listenerHostname}
+	}
+
+	// Case 3: Both the listener and the route have hostnames.
+	// We must find the specific intersection based on the spec's matching rules.
+	var intersection []string
+	for _, h := range routeHostnames {
+		routeHostname := string(h)
+		if isHostnameSubset(routeHostname, listenerHostname) {
+			// Per the spec, if an intersection is found, the Route's hostname is used
+			// for the resulting configuration.
+			intersection = append(intersection, routeHostname)
+		}
+	}
+
+	return intersection
+}
+
 // isHostnameSubset checks if a route hostname is a valid subset of a listener hostname,
-// following the precise Gateway API matching rules.
+// implementing the precise matching rules from the Gateway API specification.
 func isHostnameSubset(routeHostname, listenerHostname string) bool {
-	// 1. An exact match is always a valid subset.
+	// Rule 1: An exact match is always a valid intersection.
 	if routeHostname == listenerHostname {
 		return true
 	}
 
-	// 2. If the listener has a wildcard, the route's hostname must be a subdomain.
+	// Rule 2: Listener has a wildcard (e.g., "*.example.com").
 	if strings.HasPrefix(listenerHostname, "*.") {
-		domain := strings.TrimPrefix(listenerHostname, "*.")
-		// The route must be a proper subdomain. It cannot be the parent domain itself.
-		// e.g., "foo.example.com" is a subset of "*.example.com".
-		// e.g., "example.com" is NOT a subset of "*.example.com".
-		if strings.HasSuffix(routeHostname, "."+domain) {
-			return true
+		listenerDomain := strings.TrimPrefix(listenerHostname, "*.")
+		// The route can be a more specific wildcard (e.g., "*.foo.example.com")
+		if strings.HasPrefix(routeHostname, "*.") {
+			routeDomain := strings.TrimPrefix(routeHostname, "*.")
+			if strings.HasSuffix(routeDomain, listenerDomain) {
+				return true
+			}
+		}
+		// Or the route can be a specific hostname that is a proper subdomain.
+		// This correctly rejects "example.com" matching "*.example.com".
+		if !strings.HasPrefix(routeHostname, "*") && strings.HasSuffix(routeHostname, listenerDomain) {
+			// Ensure it's a subdomain, not the parent domain.
+			if len(routeHostname) > len(listenerDomain) {
+				return true
+			}
 		}
 	}
 
-	// A route with a wildcard can only be a subset of an identical listener wildcard.
-	// e.g., route "*.example.com" is NOT a subset of listener "foo.example.com".
-	// This case is already handled by the exact match check in rule #1.
+	// Rule 3: Route has a wildcard (e.g., "*.example.com").
+	if strings.HasPrefix(routeHostname, "*.") {
+		routeDomain := strings.TrimPrefix(routeHostname, "*.")
+		// The listener must be more specific (not a wildcard).
+		if !strings.HasPrefix(listenerHostname, "*") {
+			// The listener hostname can be the parent domain or a subdomain.
+			if listenerHostname == routeDomain || strings.HasSuffix(listenerHostname, routeDomain) {
+				return true
+			}
+		}
+	}
 
 	return false
 }

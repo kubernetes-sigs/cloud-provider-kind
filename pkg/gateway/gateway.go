@@ -243,7 +243,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 					// Aggregate Envoy routes into VirtualHosts.
 					if routes != nil {
-						hostnames := getIntersectingHostnames(httpRoute.Spec.Hostnames, listener)
+						hostnames := getIntersectingHostnames(listener, httpRoute.Spec.Hostnames)
 						for _, hostname := range hostnames {
 							vh, ok := virtualHostsForListener[hostname]
 							if !ok {
@@ -517,7 +517,7 @@ func (c *Controller) validateHTTPRoute(
 
 		// This ref targets our Gateway. We MUST generate a status for it.
 		var listenersForThisRef []gatewayv1.Listener
-		var isAllowed = true
+		rejectionReason := gatewayv1.RouteReasonNoMatchingParent
 
 		// --- Find all listeners on the Gateway that match this specific parentRef ---
 		for _, listener := range gateway.Spec.Listeners {
@@ -526,9 +526,13 @@ func (c *Controller) validateHTTPRoute(
 
 			if sectionNameMatches && portMatches {
 				// The listener matches the ref. Now check if the listener's policy (e.g., hostname) allows it.
-				if !isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
-					isAllowed = false
-					break // This ref is definitively rejected because one matching listener forbids it.
+				if !isAllowedByListener(gateway, listener, httpRoute, c.namespaceLister) {
+					rejectionReason = gatewayv1.RouteReasonNotAllowedByListeners
+					continue
+				}
+				if !isAllowedByHostname(listener, httpRoute) {
+					rejectionReason = gatewayv1.RouteReasonNoMatchingListenerHostname
+					continue
 				}
 				listenersForThisRef = append(listenersForThisRef, listener)
 			}
@@ -548,14 +552,15 @@ func (c *Controller) validateHTTPRoute(
 			LastTransitionTime: metav1.Now(),
 		}
 
-		if !isAllowed {
+		if len(listenersForThisRef) == 0 {
 			acceptedCondition.Status = metav1.ConditionFalse
-			acceptedCondition.Reason = string(gatewayv1.RouteReasonNotAllowedByListeners)
-			acceptedCondition.Message = "Route is not allowed by a listener's policy."
-		} else if len(listenersForThisRef) == 0 {
-			acceptedCondition.Status = metav1.ConditionFalse
-			acceptedCondition.Reason = string(gatewayv1.RouteReasonNoMatchingParent)
+			acceptedCondition.Reason = string(rejectionReason)
 			acceptedCondition.Message = "No listener matched the parentRef."
+			if rejectionReason == gatewayv1.RouteReasonNotAllowedByListeners {
+				acceptedCondition.Message = "Route is not allowed by a listener's policy."
+			} else {
+				acceptedCondition.Message = "The route's hostnames do not match any listener hostnames."
+			}
 		} else {
 			acceptedCondition.Status = metav1.ConditionTrue
 			acceptedCondition.Reason = string(gatewayv1.RouteReasonAccepted)
@@ -767,34 +772,4 @@ func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1
 		Message:            "Gateway is accepted",
 		ObservedGeneration: newGw.Generation,
 	})
-}
-
-// getIntersectingHostnames calculates the set of hostnames that are valid for a given route and listener.
-func getIntersectingHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.Listener) []string {
-	// If the listener has no hostname, it allows all of the route's hostnames.
-	if listener.Hostname == nil || *listener.Hostname == "" {
-		if len(routeHostnames) == 0 {
-			return []string{"*"}
-		}
-		var names []string
-		for _, h := range routeHostnames {
-			names = append(names, string(h))
-		}
-		return names
-	}
-	listenerHostname := string(*listener.Hostname)
-
-	// If the route has no hostnames, it inherits the listener's hostname.
-	if len(routeHostnames) == 0 {
-		return []string{listenerHostname}
-	}
-
-	// Find the actual intersection between the two sets of hostnames.
-	var intersection []string
-	for _, routeHostname := range routeHostnames {
-		if isHostnameSubset(string(routeHostname), listenerHostname) {
-			intersection = append(intersection, string(routeHostname))
-		}
-	}
-	return intersection
 }

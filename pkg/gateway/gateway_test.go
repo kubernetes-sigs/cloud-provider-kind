@@ -28,7 +28,6 @@ func Test_getSupportedKinds(t *testing.T) {
 			},
 			want: []gatewayv1.RouteGroupKind{
 				{Group: &group, Kind: "HTTPRoute"},
-				{Group: &group, Kind: "GRPCRoute"},
 			},
 			want1: true,
 		},
@@ -41,7 +40,6 @@ func Test_getSupportedKinds(t *testing.T) {
 			},
 			want: []gatewayv1.RouteGroupKind{
 				{Group: &group, Kind: "HTTPRoute"},
-				{Group: &group, Kind: "GRPCRoute"},
 			},
 			want1: true,
 		},
