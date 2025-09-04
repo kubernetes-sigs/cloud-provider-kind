@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -33,6 +34,13 @@ import (
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+var (
+	CloudProviderSupportedKinds = sets.New[gatewayv1.Kind](
+		"HTTPRoute",
+		// "GRPCRoute",
+	)
 )
 
 func (c *Controller) syncGateway(ctx context.Context, key string) error {
@@ -117,39 +125,42 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	map[resourcev3.Type][]envoyproxytypes.Resource,
 	[]gatewayv1.ListenerStatus,
-	map[types.NamespacedName]gatewayv1.RouteParentStatus, // HTTPRoutes
-	map[types.NamespacedName]gatewayv1.RouteParentStatus, // GRPCRoutes
+	map[types.NamespacedName][]gatewayv1.RouteParentStatus, // HTTPRoutes
+	map[types.NamespacedName][]gatewayv1.RouteParentStatus, // GRPCRoutes
 ) {
-	envoyRoutes := []envoyproxytypes.Resource{}
-	envoyClusters := make(map[string]envoyproxytypes.Resource)
-	allListenerStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
-	httpRouteStatuses := make(map[types.NamespacedName]gatewayv1.RouteParentStatus)
-	grpcRouteStatuses := make(map[types.NamespacedName]gatewayv1.RouteParentStatus)
 
-	// This map will store which valid routes belong to which listeners.
-	// map[listenerName] -> map[routeKey] -> routeObject
-	routesByListener := make(map[gatewayv1.SectionName]map[types.NamespacedName]*gatewayv1.HTTPRoute)
+	httpRouteStatuses := make(map[types.NamespacedName][]gatewayv1.RouteParentStatus)
+	grpcRouteStatuses := make(map[types.NamespacedName][]gatewayv1.RouteParentStatus)
+	routesByListener := make(map[gatewayv1.SectionName][]*gatewayv1.HTTPRoute)
 
 	// Validate all HTTPRoutes against this Gateway
 	allHTTPRoutesForGateway := c.getHTTPRoutesForGateway(gateway)
 	for _, httpRoute := range allHTTPRoutesForGateway {
 		key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
-		parentStatus, acceptingListeners := c.validateHTTPRoute(gateway, httpRoute)
+		parentStatuses, acceptingListeners := c.validateHTTPRoute(gateway, httpRoute)
 
 		// Store the definitive status for the route.
-		httpRouteStatuses[key] = parentStatus
-
+		if len(parentStatuses) > 0 {
+			httpRouteStatuses[key] = parentStatuses
+		}
 		// If the route was accepted, associate it with the listeners that accepted it.
 		if len(acceptingListeners) > 0 {
+			// Associate the accepted route with the listeners that will handle it.
+			// Use a set to prevent adding a route multiple times to the same listener.
+			processedListeners := make(map[gatewayv1.SectionName]bool)
 			for _, listener := range acceptingListeners {
-				if _, ok := routesByListener[listener.Name]; !ok {
-					routesByListener[listener.Name] = make(map[types.NamespacedName]*gatewayv1.HTTPRoute)
+				if _, ok := processedListeners[listener.Name]; !ok {
+					routesByListener[listener.Name] = append(routesByListener[listener.Name], httpRoute)
+					processedListeners[listener.Name] = true
 				}
-				routesByListener[listener.Name][key] = httpRoute
 			}
 		}
 	}
 
+	// Build Envoy config using only the pre-validated and accepted routes
+	envoyRoutes := []envoyproxytypes.Resource{}
+	envoyClusters := make(map[string]envoyproxytypes.Resource)
+	allListenerStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 	// Aggregate Listeners by Port
 	listenersByPort := make(map[gatewayv1.PortNumber][]gatewayv1.Listener)
 	for _, listener := range gateway.Spec.Listeners {
@@ -207,14 +218,18 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
 				// Process HTTPRoutes
 				// Get the routes that were pre-validated for this specific listener.
-				acceptedRoutes := routesByListener[listener.Name]
-				for _, httpRoute := range acceptedRoutes {
+				for _, httpRoute := range routesByListener[listener.Name] {
 					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
-					// Add the ResolvedRefs condition to the existing parent status.
+
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
-					currentStatus := httpRouteStatuses[key]
-					meta.SetStatusCondition(&currentStatus.Conditions, resolvedRefsCondition)
-					httpRouteStatuses[key] = currentStatus
+					currentParentStatuses := httpRouteStatuses[key]
+					for i := range currentParentStatuses {
+						// Only add the ResolvedRefs condition if the parent was Accepted.
+						if meta.IsStatusConditionTrue(currentParentStatuses[i].Conditions, string(gatewayv1.RouteConditionAccepted)) {
+							meta.SetStatusCondition(&currentParentStatuses[i].Conditions, resolvedRefsCondition)
+						}
+					}
+					httpRouteStatuses[key] = currentParentStatuses
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
 					for _, backendRef := range validBackendRefs {
@@ -244,45 +259,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					}
 				}
 
-				// Process GRPCRoutes
-				grpcRoutes := c.getGRPCRoutesForListener(gateway, listener)
-				for _, grpcRoute := range grpcRoutes {
-					key := types.NamespacedName{Namespace: grpcRoute.Namespace, Name: grpcRoute.Name}
-					routes, validBackendRefs, finalCondition := translateGRPCRouteToEnvoyRoutes(grpcRoute, c.serviceLister)
-
-					// Create clusters for valid GRPCRoute backends.
-					for _, backendRef := range validBackendRefs {
-						cluster, err := c.translateBackendRefToCluster(grpcRoute.Namespace, backendRef)
-						if err == nil && cluster != nil {
-							if _, exists := envoyClusters[cluster.Name]; !exists {
-								envoyClusters[cluster.Name] = cluster
-							}
-						}
-					}
-
-					if routes != nil {
-						hostnames := getRouteHostnames(grpcRoute.Spec.Hostnames, listener)
-						for _, hostname := range hostnames {
-							vh, ok := virtualHostsForListener[hostname]
-							if !ok {
-								vh = &routev3.VirtualHost{
-									Name:    fmt.Sprintf("%s-%s-%d-%s", gateway.Name, listener.Protocol, port, hostname),
-									Domains: []string{hostname},
-								}
-								virtualHostsForListener[hostname] = vh
-							}
-							vh.Routes = append(vh.Routes, routes...)
-						}
-						attachedRoutes++
-					}
-
-					parentStatus := gatewayv1.RouteParentStatus{
-						ParentRef:      gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gateway.Name), Namespace: ptr.To(gatewayv1.Namespace(gateway.Namespace))},
-						ControllerName: controllerName,
-						Conditions:     []metav1.Condition{finalCondition},
-					}
-					grpcRouteStatuses[key] = parentStatus
-				}
+				// TODO: Process GRPCRoutes
 
 			default:
 				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
@@ -407,7 +384,7 @@ func getSupportedKinds(listener gatewayv1.Listener) ([]gatewayv1.RouteGroupKind,
 
 	if listener.AllowedRoutes != nil && len(listener.AllowedRoutes.Kinds) > 0 {
 		for _, kind := range listener.AllowedRoutes.Kinds {
-			if (kind.Group == nil || *kind.Group == groupName) && (kind.Kind == "HTTPRoute" || kind.Kind == "GRPCRoute") {
+			if (kind.Group == nil || *kind.Group == groupName) && CloudProviderSupportedKinds.Has(kind.Kind) {
 				supportedKinds = append(supportedKinds, gatewayv1.RouteGroupKind{
 					Group: &groupName,
 					Kind:  kind.Kind,
@@ -417,30 +394,29 @@ func getSupportedKinds(listener gatewayv1.Listener) ([]gatewayv1.RouteGroupKind,
 			}
 		}
 	} else if listener.Protocol == gatewayv1.HTTPProtocolType || listener.Protocol == gatewayv1.HTTPSProtocolType {
-		supportedKinds = append(supportedKinds,
-			gatewayv1.RouteGroupKind{
-				Group: &groupName,
-				Kind:  "HTTPRoute",
-			},
-			gatewayv1.RouteGroupKind{
-				Group: &groupName,
-				Kind:  "GRPCRoute",
-			})
+		for _, kind := range CloudProviderSupportedKinds.UnsortedList() {
+			supportedKinds = append(supportedKinds,
+				gatewayv1.RouteGroupKind{
+					Group: &groupName,
+					Kind:  kind,
+				},
+			)
+		}
 	}
 
 	return supportedKinds, allKindsValid
 }
 func (c *Controller) updateRouteStatuses(
 	ctx context.Context,
-	httpRouteStatuses map[types.NamespacedName]gatewayv1.RouteParentStatus,
-	grpcRouteStatuses map[types.NamespacedName]gatewayv1.RouteParentStatus,
+	httpRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus,
+	grpcRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus,
 ) error {
 	var errGroup []error
 
 	// --- Process HTTPRoutes ---
-	for key, desiredParentStatus := range httpRouteStatuses {
+	for key, desiredParentStatuses := range httpRouteStatuses {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			// 1. GET the latest version of the route from the cache.
+			// GET the latest version of the route from the cache.
 			originalRoute, err := c.httprouteLister.HTTPRoutes(key.Namespace).Get(key.Name)
 			if apierrors.IsNotFound(err) {
 				// Route has been deleted, nothing to do.
@@ -449,35 +425,11 @@ func (c *Controller) updateRouteStatuses(
 				return err
 			}
 
-			// 2. Create a mutable copy to work with.
+			// Create a mutable copy to work with.
 			routeToUpdate := originalRoute.DeepCopy()
+			routeToUpdate.Status.Parents = desiredParentStatuses
 
-			// 3. Find the existing parent status for our Gateway, or append the new one.
-			var found bool
-			for i := range routeToUpdate.Status.Parents {
-				existingRef := routeToUpdate.Status.Parents[i].ParentRef
-				desiredRef := desiredParentStatus.ParentRef
-
-				existingNamespace := routeToUpdate.Namespace
-				if existingRef.Namespace != nil {
-					existingNamespace = string(*existingRef.Namespace)
-				}
-				desiredNamespace := routeToUpdate.Namespace
-				if desiredRef.Namespace != nil {
-					desiredNamespace = string(*desiredRef.Namespace)
-				}
-
-				if existingRef.Name == desiredRef.Name &&
-					existingNamespace == desiredNamespace {
-					found = true
-					break
-				}
-			}
-			if !found {
-				routeToUpdate.Status.Parents = append(routeToUpdate.Status.Parents, desiredParentStatus)
-			}
-
-			// 4. Only make an API call if the status has actually changed.
+			// Only make an API call if the status has actually changed.
 			if !reflect.DeepEqual(originalRoute.Status, routeToUpdate.Status) {
 				_, updateErr := c.gwClient.GatewayV1().HTTPRoutes(routeToUpdate.Namespace).UpdateStatus(ctx, routeToUpdate, metav1.UpdateOptions{})
 				return updateErr
@@ -492,63 +444,7 @@ func (c *Controller) updateRouteStatuses(
 		}
 	}
 
-	// --- Process GRPCRoutes (repeat the same logic) ---
-	for key, desiredParentStatus := range grpcRouteStatuses {
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			// 1. GET the latest version of the route from the cache.
-			originalRoute, err := c.grpcrouteLister.GRPCRoutes(key.Namespace).Get(key.Name)
-			if apierrors.IsNotFound(err) {
-				// Route has been deleted, nothing to do.
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-
-			// 2. Create a mutable copy to work with.
-			routeToUpdate := originalRoute.DeepCopy()
-
-			// The route is attached, so it is always considered "Accepted".
-			// The ResolvedRefs condition was already calculated in the build phase.
-			acceptedCond := metav1.Condition{
-				Type:               string(gatewayv1.RouteConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(gatewayv1.RouteReasonAccepted),
-				Message:            "Route is accepted",
-				ObservedGeneration: routeToUpdate.Generation,
-				LastTransitionTime: metav1.Now(),
-			}
-			meta.SetStatusCondition(&desiredParentStatus.Conditions, acceptedCond)
-
-			// 3. Find the existing parent status for our Gateway, or append the new one.
-			var found bool
-			for i := range routeToUpdate.Status.Parents {
-				if routeToUpdate.Status.Parents[i].ParentRef.Name == desiredParentStatus.ParentRef.Name &&
-					*routeToUpdate.Status.Parents[i].ParentRef.Namespace == *desiredParentStatus.ParentRef.Namespace {
-					// Found it, so replace it with our new desired status.
-					routeToUpdate.Status.Parents[i] = desiredParentStatus
-					found = true
-					break
-				}
-			}
-			if !found {
-				routeToUpdate.Status.Parents = append(routeToUpdate.Status.Parents, desiredParentStatus)
-			}
-
-			// 4. Only make an API call if the status has actually changed.
-			if !reflect.DeepEqual(originalRoute.Status, routeToUpdate.Status) {
-				_, updateErr := c.gwClient.GatewayV1().GRPCRoutes(routeToUpdate.Namespace).UpdateStatus(ctx, routeToUpdate, metav1.UpdateOptions{})
-				return updateErr
-			}
-
-			// Status is already up-to-date.
-			return nil
-		})
-
-		if err != nil {
-			errGroup = append(errGroup, fmt.Errorf("failed to update status for HTTPRoute %s: %w", key, err))
-		}
-	}
+	// TODO: Process GRPCRoutes (repeat the same logic)
 
 	return errors.Join(errGroup...)
 }
@@ -578,104 +474,113 @@ func (c *Controller) getHTTPRoutesForGateway(gw *gatewayv1.Gateway) []*gatewayv1
 	return matchingRoutes
 }
 
-// validateHTTPRoute is the definitive validation function for an HTTPRoute against a Gateway.
-// It checks for a valid parent reference, listener permissions, and backend service existence.
-// It returns the complete and final RouteParentStatus for the route with all necessary conditions.
-func (c *Controller) validateHTTPRoute(gateway *gatewayv1.Gateway, httpRoute *gatewayv1.HTTPRoute) (gatewayv1.RouteParentStatus, []gatewayv1.Listener) {
-	var acceptingListeners []gatewayv1.Listener
-	var finalParentRef gatewayv1.ParentReference
+// validateHTTPRoute is the definitive validation function. It iterates through all
+// parentRefs of an HTTPRoute and generates a complete RouteParentStatus for each one
+// that targets the specified Gateway. It also returns a slice of all listeners
+// that ended up accepting the route.
+func (c *Controller) validateHTTPRoute(
+	gateway *gatewayv1.Gateway,
+	httpRoute *gatewayv1.HTTPRoute,
+) ([]gatewayv1.RouteParentStatus, []gatewayv1.Listener) {
 
-	// Find the parentRef that targets this Gateway
-	var parentRefFound bool
-	for _, pr := range httpRoute.Spec.ParentRefs {
-		refNamespace := httpRoute.Namespace
-		if pr.Namespace != nil {
-			refNamespace = string(*pr.Namespace)
-		}
-		if pr.Name == gatewayv1.ObjectName(gateway.Name) && refNamespace == gateway.Namespace {
-			finalParentRef = pr
-			parentRefFound = true
-			break
-		}
-	}
+	var parentStatuses []gatewayv1.RouteParentStatus
+	// Use a map to collect a unique set of listeners that accepted the route.
+	acceptedListenerSet := make(map[gatewayv1.SectionName]gatewayv1.Listener)
 
-	if !parentRefFound {
-		return gatewayv1.RouteParentStatus{}, nil // Does not target this Gateway.
-	}
-
-	// Find all listeners that could accept this route based on the parentRef
-	for _, listener := range gateway.Spec.Listeners {
-		sectionNameMatches := (finalParentRef.SectionName == nil) || (*finalParentRef.SectionName == listener.Name)
-		portMatches := (finalParentRef.Port == nil) || (*finalParentRef.Port == listener.Port)
-		if sectionNameMatches && portMatches {
-			// Now check if this listener's policy allows the route.
-			if isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
-				acceptingListeners = append(acceptingListeners, listener)
-			} else {
-				// The listener matches but explicitly forbids the route. This is a definitive "NotAllowed" failure.
-				status := gatewayv1.RouteParentStatus{
-					ParentRef:      finalParentRef,
-					ControllerName: controllerName,
-					Conditions: []metav1.Condition{{
-						Type:               string(gatewayv1.RouteConditionAccepted),
-						Status:             metav1.ConditionFalse,
-						Reason:             string(gatewayv1.RouteReasonNotAllowedByListeners),
-						ObservedGeneration: httpRoute.Generation,
-						LastTransitionTime: metav1.Now(),
-					},
-						{
-							Type:               string(gatewayv1.RouteConditionResolvedRefs),
-							Status:             metav1.ConditionTrue,
-							Reason:             string(gatewayv1.RouteReasonResolvedRefs),
-							ObservedGeneration: httpRoute.Generation,
-							LastTransitionTime: metav1.Now(),
-						}},
-				}
-
-				return status, nil
-			}
-		}
-	}
-
-	// Build the final status based on the validation outcome
-	status := gatewayv1.RouteParentStatus{
-		ParentRef:      finalParentRef,
-		ControllerName: controllerName,
-		Conditions:     []metav1.Condition{},
-	}
-
-	if len(acceptingListeners) == 0 {
-		// Failure: No listeners accepted the route.
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.RouteConditionAccepted),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
-			ObservedGeneration: httpRoute.Generation,
-			LastTransitionTime: metav1.Now(),
-		})
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.RouteConditionResolvedRefs),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(gatewayv1.RouteReasonNoMatchingParent),
-			ObservedGeneration: httpRoute.Generation,
-			LastTransitionTime: metav1.Now(),
-		})
-		return status, nil
-	}
-
-	// Success: The route is accepted by at least one listener.
-	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type:               string(gatewayv1.RouteConditionAccepted),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(gatewayv1.RouteReasonAccepted),
+	// --- Determine the ResolvedRefs status for the entire Route first. ---
+	// This is a property of the route itself, independent of any parent.
+	resolvedRefsCondition := metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionResolvedRefs),
 		ObservedGeneration: httpRoute.Generation,
 		LastTransitionTime: metav1.Now(),
-	})
+	}
+	if c.areBackendsValid(httpRoute) {
+		resolvedRefsCondition.Status = metav1.ConditionTrue
+		resolvedRefsCondition.Reason = string(gatewayv1.RouteReasonResolvedRefs)
+		resolvedRefsCondition.Message = "All backend references have been resolved."
+	} else {
+		resolvedRefsCondition.Status = metav1.ConditionFalse
+		resolvedRefsCondition.Reason = string(gatewayv1.RouteReasonBackendNotFound)
+		resolvedRefsCondition.Message = "One or more backend references could not be found."
+	}
 
-	// --- 4. Now, validate the backends to set the ResolvedRefs condition ---
-	allBackendsValid := true
+	// --- Iterate over EACH ParentRef in the HTTPRoute ---
+	for _, parentRef := range httpRoute.Spec.ParentRefs {
+		// We only care about refs that target our current Gateway.
+		refNamespace := httpRoute.Namespace
+		if parentRef.Namespace != nil {
+			refNamespace = string(*parentRef.Namespace)
+		}
+		if parentRef.Name != gatewayv1.ObjectName(gateway.Name) || refNamespace != gateway.Namespace {
+			continue // This ref is for another Gateway.
+		}
+
+		// This ref targets our Gateway. We MUST generate a status for it.
+		var listenersForThisRef []gatewayv1.Listener
+		var isAllowed = true
+
+		// --- Find all listeners on the Gateway that match this specific parentRef ---
+		for _, listener := range gateway.Spec.Listeners {
+			sectionNameMatches := (parentRef.SectionName == nil) || (*parentRef.SectionName == listener.Name)
+			portMatches := (parentRef.Port == nil) || (*parentRef.Port == listener.Port)
+
+			if sectionNameMatches && portMatches {
+				// The listener matches the ref. Now check if the listener's policy (e.g., hostname) allows it.
+				if !isRouteAllowed(gateway, listener, httpRoute, c.namespaceLister) {
+					isAllowed = false
+					break // This ref is definitively rejected because one matching listener forbids it.
+				}
+				listenersForThisRef = append(listenersForThisRef, listener)
+			}
+		}
+
+		// --- Build the final status for this ParentRef ---
+		status := gatewayv1.RouteParentStatus{
+			ParentRef:      parentRef,
+			ControllerName: controllerName,
+			Conditions:     []metav1.Condition{},
+		}
+
+		// Create the 'Accepted' condition based on the listener validation.
+		acceptedCondition := metav1.Condition{
+			Type:               string(gatewayv1.RouteConditionAccepted),
+			ObservedGeneration: httpRoute.Generation,
+			LastTransitionTime: metav1.Now(),
+		}
+
+		if !isAllowed {
+			acceptedCondition.Status = metav1.ConditionFalse
+			acceptedCondition.Reason = string(gatewayv1.RouteReasonNotAllowedByListeners)
+			acceptedCondition.Message = "Route is not allowed by a listener's policy."
+		} else if len(listenersForThisRef) == 0 {
+			acceptedCondition.Status = metav1.ConditionFalse
+			acceptedCondition.Reason = string(gatewayv1.RouteReasonNoMatchingParent)
+			acceptedCondition.Message = "No listener matched the parentRef."
+		} else {
+			acceptedCondition.Status = metav1.ConditionTrue
+			acceptedCondition.Reason = string(gatewayv1.RouteReasonAccepted)
+			acceptedCondition.Message = "Route is accepted."
+			for _, l := range listenersForThisRef {
+				acceptedListenerSet[l.Name] = l
+			}
+		}
+
+		// --- 4. Combine the two independent conditions into the final status. ---
+		status.Conditions = append(status.Conditions, acceptedCondition, resolvedRefsCondition)
+		parentStatuses = append(parentStatuses, status)
+	}
+
+	var allAcceptingListeners []gatewayv1.Listener
+	for _, l := range acceptedListenerSet {
+		allAcceptingListeners = append(allAcceptingListeners, l)
+	}
+
+	return parentStatuses, allAcceptingListeners
+}
+
+// areBackendsValid is a helper extracted from the original validate function.
+func (c *Controller) areBackendsValid(httpRoute *gatewayv1.HTTPRoute) bool {
 	for _, rule := range httpRoute.Spec.Rules {
-		// Redirect rules have no backends to resolve, so they are always valid in this context.
 		if ruleHasRedirectFilter(rule) {
 			continue
 		}
@@ -684,38 +589,12 @@ func (c *Controller) validateHTTPRoute(gateway *gatewayv1.Gateway, httpRoute *ga
 			if backendRef.Namespace != nil {
 				ns = string(*backendRef.Namespace)
 			}
-			_, err := c.serviceLister.Services(ns).Get(string(backendRef.Name))
-			if err != nil {
-				allBackendsValid = false
-				break // One bad backend is enough to fail.
+			if _, err := c.serviceLister.Services(ns).Get(string(backendRef.Name)); err != nil {
+				return false
 			}
 		}
-		if !allBackendsValid {
-			break
-		}
 	}
-
-	if allBackendsValid {
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.RouteConditionResolvedRefs),
-			Status:             metav1.ConditionTrue,
-			Reason:             string(gatewayv1.RouteReasonResolvedRefs),
-			Message:            "All backend references have been resolved",
-			ObservedGeneration: httpRoute.Generation,
-			LastTransitionTime: metav1.Now(),
-		})
-	} else {
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.RouteConditionResolvedRefs),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(gatewayv1.RouteReasonBackendNotFound),
-			Message:            "One or more backend references could not be found",
-			ObservedGeneration: httpRoute.Generation,
-			LastTransitionTime: metav1.Now(),
-		})
-	}
-
-	return status, acceptingListeners
+	return true
 }
 
 // Helper to check for redirect filters
@@ -726,21 +605,6 @@ func ruleHasRedirectFilter(rule gatewayv1.HTTPRouteRule) bool {
 		}
 	}
 	return false
-}
-
-func (c *Controller) getGRPCRoutesForListener(gw *gatewayv1.Gateway, listener gatewayv1.Listener) []*gatewayv1.GRPCRoute {
-	var matchingRoutes []*gatewayv1.GRPCRoute
-	grpcRoutes, err := c.grpcrouteLister.List(labels.Everything())
-	if err != nil {
-		klog.Infof("failed to list GRPCRoutes: %v", err)
-		return matchingRoutes
-	}
-	for _, route := range grpcRoutes {
-		if isRouteReferenced(gw, listener, route) && isRouteAllowed(gw, listener, route, c.namespaceLister) {
-			matchingRoutes = append(matchingRoutes, route)
-		}
-	}
-	return matchingRoutes
 }
 
 func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backendRef gatewayv1.BackendRef) (*clusterv3.Cluster, error) {
