@@ -331,8 +331,9 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 		// now aggregate all the listeners on the same port
 		routeConfig := &routev3.RouteConfiguration{
-			Name:         routeName,
-			VirtualHosts: allVirtualHosts,
+			Name:                     routeName,
+			VirtualHosts:             allVirtualHosts,
+			IgnorePortInHostMatching: true, // tricky to figure out thanks to howardjohn
 		}
 		envoyRoutes = append(envoyRoutes, routeConfig)
 
