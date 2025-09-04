@@ -210,10 +210,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				continue // DO NOT generate Envoy config for this listener
 			}
 
-			// This map is temporary for just this listener's virtual hosts,
-			// which are determined by the hostnames on the attached routes.
-			virtualHostsForListener := make(map[string]*routev3.VirtualHost)
-
 			switch listener.Protocol {
 			case gatewayv1.HTTPProtocolType, gatewayv1.HTTPSProtocolType:
 				// Process HTTPRoutes
@@ -243,19 +239,27 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 					// Aggregate Envoy routes into VirtualHosts.
 					if routes != nil {
-						hostnames := getIntersectingHostnames(listener, httpRoute.Spec.Hostnames)
-						for _, hostname := range hostnames {
-							vh, ok := virtualHostsForListener[hostname]
+						attachedRoutes++
+						// Get the domain for this listener's VirtualHost.
+						vhostDomains := getIntersectingHostnames(listener, httpRoute.Spec.Hostnames)
+						for _, domain := range vhostDomains {
+							vh, ok := virtualHostsForPort[domain]
 							if !ok {
 								vh = &routev3.VirtualHost{
-									Name:    fmt.Sprintf("%s-%s-%d-%s", gateway.Name, listener.Protocol, port, hostname),
-									Domains: []string{hostname},
+									Name:    fmt.Sprintf("%s-vh-%d-%s", gateway.Name, port, domain),
+									Domains: []string{domain},
 								}
-								virtualHostsForListener[hostname] = vh
+								virtualHostsForPort[domain] = vh
 							}
 							vh.Routes = append(vh.Routes, routes...)
+							klog.V(4).Infof("created VirtualHost %s for listener %s with domain %s", vh.Name, listener.
+								Name, domain)
+							if klog.V(4).Enabled() {
+								for _, route := range routes {
+									klog.Infof("adding route %s to VirtualHost %s", route.Name, vh.Name)
+								}
+							}
 						}
-						attachedRoutes++
 					}
 				}
 
@@ -265,10 +269,9 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
 			}
 
-			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForListener))
-			for _, vh := range virtualHostsForListener {
+			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
+			for _, vh := range virtualHostsForPort {
 				vhSlice = append(vhSlice, vh)
-				virtualHostsForPort[vh.Name] = vh
 			}
 
 			filterChain, err := c.translateListenerToFilterChain(gateway, listener, vhSlice, routeName)
@@ -320,15 +323,9 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
 
-		// This happens AFTER all routes for this port have been collected.
-		// Envoy processes the list of routes within a VirtualHost sequentially.
-		// The Gateway API specification requires that controllers order routes from most specific to least specific.
-		for _, vh := range virtualHostsForPort {
-			sortRoutes(vh.Routes)
-		}
-
 		allVirtualHosts := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
 		for _, vh := range virtualHostsForPort {
+			sortRoutes(vh.Routes)
 			allVirtualHosts = append(allVirtualHosts, vh)
 		}
 
