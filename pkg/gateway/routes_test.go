@@ -485,12 +485,23 @@ func TestIsHostnameSubset(t *testing.T) {
 			routeHostname:    "*.example.com",
 			want:             false,
 		},
-
 		{
 			name:             "Wildcard route does match specific TLD",
 			listenerHostname: "very.specific.com",
 			routeHostname:    "*.specific.com",
 			want:             true,
+		},
+		{
+			name:             "Wildcard route does match partially",
+			listenerHostname: "*.specific.com",
+			routeHostname:    "*.muchspecific.com",
+			want:             false,
+		},
+		{
+			name:             "Wildcard route does match partially",
+			listenerHostname: "*.muchspecific.com",
+			routeHostname:    "*.specific.com",
+			want:             false,
 		},
 	}
 
@@ -501,4 +512,151 @@ func TestIsHostnameSubset(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetIntersectingHostnames(t *testing.T) {
+	tests := []struct {
+		name           string
+		listener       gatewayv1.Listener
+		routeHostnames []gatewayv1.Hostname
+		want           []string
+	}{
+		{
+			name: "Listener has no hostname, route has none",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: nil,
+			},
+			routeHostnames: []gatewayv1.Hostname{},
+			want:           []string{"*"},
+		},
+		{
+			name: "Listener has no hostname, route has one",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: nil,
+			},
+			routeHostnames: []gatewayv1.Hostname{"foo.example.com"},
+			want:           []string{"foo.example.com"},
+		},
+		{
+			name: "Listener has no hostname, route has multiple",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: nil,
+			},
+			routeHostnames: []gatewayv1.Hostname{"foo.example.com", "bar.example.com"},
+			want:           []string{"foo.example.com", "bar.example.com"},
+		},
+		{
+			name: "Listener has specific hostname, route has none",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("listener.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{},
+			want:           []string{"listener.example.com"},
+		},
+		{
+			name: "Exact match",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("foo.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"foo.example.com"},
+			want:           []string{"foo.example.com"},
+		},
+		{
+			name: "Wildcard listener, specific route",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"foo.example.com"},
+			want:           []string{"foo.example.com"},
+		},
+		{
+			name: "Specific listener, wildcard route",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("foo.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"*.example.com"},
+			// The result is the listener's more specific hostname
+			want: []string{"foo.example.com"},
+		},
+		{
+			name: "Wildcard listener, more specific wildcard route",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"*.foo.example.com"},
+			want:           []string{"*.foo.example.com"},
+		},
+		{
+			name: "No intersection",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("a.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"b.com"},
+			want:           []string{},
+		},
+		{
+			name: "Multiple valid intersections",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"a.example.com", "b.example.com", "no.match.org"},
+			want:           []string{"a.example.com", "b.example.com"},
+		},
+		{
+			name: "Complex intersection with specific and wildcard",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"a.example.com", "*.b.example.com", "example.com"},
+			// "example.com" is not a valid subset
+			want: []string{"a.example.com", "*.b.example.com"},
+		},
+		{
+			name: "No intersection wildcards are per path",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.wildcard.com")),
+			},
+			routeHostnames: []gatewayv1.Hostname{"*.examplewildcard.com", "*.b.example.com", "example.com"},
+			want:           []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getIntersectingHostnames(tt.listener, tt.routeHostnames)
+			if !equalUnordered(got, tt.want) {
+				t.Errorf("getIntersectingHostnames() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// equalUnordered checks if two string slices are equal, ignoring order.
+func equalUnordered(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]int, len(a))
+	for _, v := range a {
+		m[v]++
+	}
+	for _, v := range b {
+		if m[v] == 0 {
+			return false
+		}
+		m[v]--
+	}
+	return true
 }

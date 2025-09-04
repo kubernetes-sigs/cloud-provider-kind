@@ -250,33 +250,33 @@ func isHostnameSubset(routeHostname, listenerHostname string) bool {
 
 	// Rule 2: Listener has a wildcard (e.g., "*.example.com").
 	if strings.HasPrefix(listenerHostname, "*.") {
-		listenerDomain := strings.TrimPrefix(listenerHostname, "*.")
-		// The route can be a more specific wildcard (e.g., "*.foo.example.com")
+		// Use the part of the string including the dot as the suffix.
+		listenerSuffix := listenerHostname[1:] // e.g., ".example.com"
+
+		// Case 2a: Route also has a wildcard (e.g., "*.foo.example.com").
+		// The route's suffix must be identical to or a sub-suffix of the listener's.
 		if strings.HasPrefix(routeHostname, "*.") {
-			routeDomain := strings.TrimPrefix(routeHostname, "*.")
-			if strings.HasSuffix(routeDomain, listenerDomain) {
-				return true
-			}
+			routeSuffix := routeHostname[1:] // e.g., ".foo.example.com"
+			return strings.HasSuffix(routeSuffix, listenerSuffix)
 		}
-		// Or the route can be a specific hostname that is a proper subdomain.
-		// This correctly rejects "example.com" matching "*.example.com".
-		if !strings.HasPrefix(routeHostname, "*") && strings.HasSuffix(routeHostname, listenerDomain) {
-			// Ensure it's a subdomain, not the parent domain.
-			if len(routeHostname) > len(listenerDomain) {
-				return true
-			}
-		}
+
+		// Case 2b: Route is specific (e.g., "foo.example.com").
+		// The route must end with the listener's suffix. This correctly handles
+		// the "parent domain" case because "example.com" does not have the
+		// suffix ".example.com".
+		return strings.HasSuffix(routeHostname, listenerSuffix)
 	}
 
 	// Rule 3: Route has a wildcard (e.g., "*.example.com").
 	if strings.HasPrefix(routeHostname, "*.") {
-		routeDomain := strings.TrimPrefix(routeHostname, "*.")
+		routeSuffix := routeHostname[1:] // e.g., ".example.com"
+		routeDomain := routeHostname[2:] // e.g., "example.com"
+
 		// The listener must be more specific (not a wildcard).
-		if !strings.HasPrefix(listenerHostname, "*") {
-			// The listener hostname can be the parent domain or a subdomain.
-			if listenerHostname == routeDomain || strings.HasSuffix(listenerHostname, routeDomain) {
-				return true
-			}
+		if !strings.HasPrefix(listenerHostname, "*.") {
+			// The listener hostname must be the parent domain or a subdomain.
+			// e.g., "example.com" or "foo.example.com" are subsets of "*.example.com".
+			return listenerHostname == routeDomain || strings.HasSuffix(listenerHostname, routeSuffix)
 		}
 	}
 
