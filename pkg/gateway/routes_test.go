@@ -1,334 +1,49 @@
 package gateway
 
 import (
+	"fmt"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/utils/ptr"
 
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-func TestIsRouteReferenced(t *testing.T) {
-	var (
-		gwGroup    = gatewayv1.Group(gatewayv1.GroupName)
-		gwKind     = gatewayv1.Kind("Gateway")
-		otherGroup = gatewayv1.Group("other.group")
-		otherKind  = gatewayv1.Kind("OtherKind")
-	)
-
-	testGateway := &gatewayv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gateway",
-			Namespace: "test-ns",
-		},
-	}
-
-	testListener := gatewayv1.Listener{
-		Name:     "test-listener",
-		Port:     80,
-		Protocol: gatewayv1.HTTPProtocolType,
-	}
-
-	tests := []struct {
-		name     string
-		gateway  *gatewayv1.Gateway
-		listener gatewayv1.Listener
-		route    metav1.Object
-		want     bool
-	}{
-		{
-			name:     "HTTPRoute with no ParentRefs",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec:       gatewayv1.HTTPRouteSpec{}, // No ParentRefs
-			},
-			want: false,
-		},
-		{
-			name:     "HTTPRoute with matching ParentRef (name, namespace)",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway"}, // Namespace defaults to route's ns
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with matching ParentRef (name, explicit namespace)",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", Namespace: ptr.To(gatewayv1.Namespace("test-ns"))},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with matching ParentRef (name, namespace, sectionName)",
-			gateway:  testGateway,
-			listener: testListener, // Listener name is "test-listener"
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("test-listener"))},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with matching ParentRef (name, namespace, port)",
-			gateway:  testGateway,
-			listener: testListener, // Listener port is 80
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", Port: ptr.To(gatewayv1.PortNumber(80))},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with matching ParentRef (name, namespace, sectionName, port)",
-			gateway:  testGateway,
-			listener: testListener, // Listener name "test-listener", port 80
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("test-listener")), Port: ptr.To(gatewayv1.PortNumber(80))},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with non-matching SectionName",
-			gateway:  testGateway,
-			listener: testListener, // Listener name is "test-listener"
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("wrong-listener"))}, // Mismatch
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name:     "HTTPRoute with non-matching Port",
-			gateway:  testGateway,
-			listener: testListener, // Listener port is 80
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", Port: ptr.To(gatewayv1.PortNumber(9090))}, // Mismatch
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name:     "HTTPRoute with non-matching Gateway Name",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "wrong-gateway"}, // Mismatch
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name:     "HTTPRoute with non-Gateway Kind",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", Kind: &otherKind}, // Mismatch
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name:     "HTTPRoute with non-Gateway Group",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", Group: &otherGroup}, // Mismatch
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name:     "GRPCRoute with matching ParentRef",
-			gateway:  testGateway,
-			listener: testListener, // Assuming listener protocol allows gRPC
-			route: &gatewayv1.GRPCRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "grpc-route1", Namespace: "test-ns"},
-				Spec: gatewayv1.GRPCRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("test-listener")), Port: ptr.To(gatewayv1.PortNumber(80))},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with multiple ParentRefs, one matching",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "wrong-gateway"},
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("test-listener"))}, // Match
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("other-listener"))},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute with multiple ParentRefs, none matching",
-			gateway:  testGateway,
-			listener: testListener, // Listener name is "test-listener"
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "wrong-gateway"},
-							{Name: "test-gateway", SectionName: ptr.To(gatewayv1.SectionName("other-listener"))},
-							{Name: "test-gateway", Port: ptr.To(gatewayv1.PortNumber(9090))},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name:     "HTTPRoute ParentRef with default Group/Kind",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway"}, // Group/Kind defaults should match Gateway
-						},
-					},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "HTTPRoute ParentRef with explicit Group/Kind",
-			gateway:  testGateway,
-			listener: testListener,
-			route: &gatewayv1.HTTPRoute{
-				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "test-ns"},
-				Spec: gatewayv1.HTTPRouteSpec{
-					CommonRouteSpec: gatewayv1.CommonRouteSpec{
-						ParentRefs: []gatewayv1.ParentReference{
-							{Name: "test-gateway", Group: &gwGroup, Kind: &gwKind}, // Explicitly matches Gateway
-						},
-					},
-				},
-			},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isRouteReferenced(tt.gateway, tt.listener, tt.route); got != tt.want {
-				t.Errorf("isRouteReferenced() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
+// A mock implementation of NamespaceLister for testing purposes.
 type mockNamespaceLister struct {
 	namespaces map[string]*corev1.Namespace
 }
 
-func (m *mockNamespaceLister) List(selector labels.Selector) (ret []*corev1.Namespace, err error) {
+func (m *mockNamespaceLister) List(selector labels.Selector) ([]*corev1.Namespace, error) {
+	var matching []*corev1.Namespace
 	for _, ns := range m.namespaces {
 		if selector.Matches(labels.Set(ns.Labels)) {
-			ret = append(ret, ns)
+			matching = append(matching, ns)
 		}
 	}
-	return ret, nil
+	return matching, nil
 }
 
 func (m *mockNamespaceLister) Get(name string) (*corev1.Namespace, error) {
-	ns, ok := m.namespaces[name]
-	if !ok {
-		return nil, apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "namespaces"}, name)
+	if ns, ok := m.namespaces[name]; ok {
+		return ns, nil
 	}
-	return ns, nil
+	return nil, fmt.Errorf("namespace %s not found", name)
 }
 
-func TestIsRouteAllowed(t *testing.T) {
+func (m *mockNamespaceLister) GetPodNamespaces(pod *corev1.Pod) ([]*corev1.Namespace, error) {
+	return nil, nil
+}
+
+func (m *mockNamespaceLister) Pods(namespace string) corev1listers.PodNamespaceLister {
+	return nil
+}
+
+func TestIsAllowedByListener(t *testing.T) {
 	testGateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-gateway",
@@ -581,8 +296,201 @@ func TestIsRouteAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isRouteAllowed(testGateway, tt.listener, tt.route, tt.namespaceList); got != tt.want {
-				t.Errorf("isRouteAllowed() = %v, want %v", got, tt.want)
+			if got := isAllowedByListener(testGateway, tt.listener, tt.route, tt.namespaceList); got != tt.want {
+				t.Errorf("isAllowedByListener() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAllowedByHostname(t *testing.T) {
+	tests := []struct {
+		name     string
+		listener gatewayv1.Listener
+		route    metav1.Object
+		want     bool
+	}{
+		{
+			name: "Listener has no hostname, allows any route hostname",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: nil,
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"foo.example.com"}},
+			},
+			want: true,
+		},
+		{
+			name: "Route has no hostname, inherits from listener",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("bar.example.com")),
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{}},
+			},
+			want: true,
+		},
+		{
+			name: "Exact match",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("foo.example.com")),
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"foo.example.com"}},
+			},
+			want: true,
+		},
+		{
+			name: "Wildcard listener, subdomain route",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"foo.example.com"}},
+			},
+			want: true,
+		},
+		{
+			name: "No match",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("foo.example.com")),
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"bar.example.com"}},
+			},
+			want: false,
+		},
+		{
+			name: "Wildcard listener, non-matching route",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"foo.another.com"}},
+			},
+			want: false,
+		},
+		{
+			name: "Wildcard listener, parent domain route (not allowed)",
+			listener: gatewayv1.Listener{
+				Name:     "listener-1",
+				Hostname: ptr.To(gatewayv1.Hostname("*.example.com")),
+			},
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: "any-ns"},
+				Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"example.com"}},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAllowedByHostname(tt.listener, tt.route); got != tt.want {
+				t.Errorf("isAllowedByHostname() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsHostnameSubset(t *testing.T) {
+	// Test cases are derived directly from the Gateway API specification
+	// for hostname matching.
+	testCases := []struct {
+		name             string
+		listenerHostname string
+		routeHostname    string
+		want             bool
+	}{
+		// --- Core Scenarios from Spec ---
+		{
+			name:             "Spec: Exact match",
+			listenerHostname: "test.example.com",
+			routeHostname:    "test.example.com",
+			want:             true,
+		},
+		{
+			name:             "Spec: Wildcard route matches specific listener",
+			listenerHostname: "test.example.com",
+			routeHostname:    "*.example.com",
+			want:             true,
+		},
+		{
+			name:             "Spec: Specific route matches wildcard listener",
+			listenerHostname: "*.example.com",
+			routeHostname:    "test.example.com",
+			want:             true,
+		},
+		{
+			name:             "Spec: Multi-level specific route matches wildcard listener",
+			listenerHostname: "*.example.com",
+			routeHostname:    "foo.test.example.com",
+			want:             true,
+		},
+		{
+			name:             "Spec: Identical wildcards match",
+			listenerHostname: "*.example.com",
+			routeHostname:    "*.example.com",
+			want:             true,
+		},
+
+		// --- Explicit "Not Matching" Scenarios from Spec ---
+		{
+			name:             "Spec: Parent domain does not match wildcard listener",
+			listenerHostname: "*.example.com",
+			routeHostname:    "example.com",
+			want:             false,
+		},
+		{
+			name:             "Spec: Different TLD does not match wildcard listener",
+			listenerHostname: "*.example.com",
+			routeHostname:    "test.example.net",
+			want:             false,
+		},
+
+		// --- Additional Edge Cases ---
+		{
+			name:             "Route with more specific wildcard matches listener",
+			listenerHostname: "*.example.com",
+			routeHostname:    "*.foo.example.com",
+			want:             true,
+		},
+		{
+			name:             "Route with less specific wildcard does NOT match listener",
+			listenerHostname: "*.foo.example.com",
+			routeHostname:    "*.example.com",
+			want:             false,
+		},
+		{
+			name:             "Mismatched specific hostnames",
+			listenerHostname: "foo.example.com",
+			routeHostname:    "bar.example.com",
+			want:             false,
+		},
+		{
+			name:             "Wildcard route does not match different specific TLD",
+			listenerHostname: "foo.example.org",
+			routeHostname:    "*.example.com",
+			want:             false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isHostnameSubset(tc.routeHostname, tc.listenerHostname); got != tc.want {
+				t.Errorf("isHostnameSubset(route: %q, listener: %q) = %v; want %v", tc.routeHostname, tc.listenerHostname, got, tc.want)
 			}
 		})
 	}
