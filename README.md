@@ -13,11 +13,6 @@ Kubecon EU 2024 - [Keep Calm and Load Balance on KIND - Antonio Ojea & Benjamin 
 
 [![Keep Calm and Load Balance on KIND](https://img.youtube.com/vi/U6_-y24rJnI/0.jpg)](https://www.youtube.com/watch?v=U6_-y24rJnI)
 
-## Gateway API support (Alpha)
-
-This provider has alpha support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
-It implements the `Gateway` and `HTTPRoute` functionalities.
-
 ## Install
 
 ### Installing with `go install`
@@ -107,6 +102,17 @@ kubectl cluster-info --context kind-kind
 
 Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
 
+```
+
+## Gateway API support (Alpha)
+
+This provider has alpha support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
+It implements the `Gateway` and `HTTPRoute` functionalities.
+
+You can enable the Gateway API controllerby selecting the Gateway API release channel (standard/experimental):
+
+```sh
+cloud-provider-kind --gateway-channel standard
 ```
 
 ### Allowing load balancers access to control plane nodes
@@ -201,6 +207,99 @@ policy-local-59854877c9-xwtfk
 $  kubectl get pods
 NAME                            READY   STATUS    RESTARTS   AGE
 policy-local-59854877c9-xwtfk   1/1     Running   0          2m38s
+```
+
+### Creating a Gateway and a HTTPRoute
+
+Similar to Services with LoadBalancers we can use Gateway API
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: prod-web
+spec:
+  gatewayClassName: cloud-provider-kind
+  listeners:
+  - protocol: HTTP
+    port: 80
+    name: prod-web-gw
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: foo
+spec:
+  parentRefs:
+  - name: prod-web
+  rules:
+  - backendRefs:
+    - name: myapp-svc
+      port: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  selector:
+    matchLabels:
+      app: MyApp
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: MyApp
+    spec:
+      containers:
+      - name: myapp
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args:
+          - netexec
+          - --http-port=80
+          - --delay-shutdown=30
+        ports:
+          - name: httpd
+            containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: MyApp
+  ports:
+    - name: httpd
+      port: 8080
+      targetPort: 80
+```
+
+We can get the external IP associated to the gateway:
+
+```sh
+ kubectl get gateway
+NAME       CLASS                 ADDRESS       PROGRAMMED   AGE
+prod-web   cloud-provider-kind   192.168.8.5   True         3d21h
+```
+
+and the HTTPRoutes
+
+```sh
+kubectl get httproutes
+NAME   HOSTNAMES   AGE
+foo                3d21h
+```
+
+and test that works:
+
+```sh
+$ curl 192.168.8.5/hostname
+myapp-7dcffbf547-9kl2d
 ```
 
 ### Enabling Load Balancer Port Mapping
