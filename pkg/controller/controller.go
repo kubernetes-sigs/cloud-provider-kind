@@ -266,62 +266,67 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	}
 	sharedInformers.Start(ctx.Done())
 
-	// Gateway setup
-	crdManager, err := gateway.NewCRDManager(config)
-	if err != nil {
-		klog.Errorf("Failed to create Gateway API CRD manager: %v", err)
-		cancel()
-		return nil, err
+	var gatewayController *gateway.Controller
+	if cpkconfig.DefaultConfig.GatewayReleaseChannel != "" {
+		// Gateway setup
+		crdManager, err := gateway.NewCRDManager(config)
+		if err != nil {
+			klog.Errorf("Failed to create Gateway API CRD manager: %v", err)
+			cancel()
+			return nil, err
+		}
+
+		err = crdManager.InstallCRDs(ctx, cpkconfig.DefaultConfig.GatewayReleaseChannel)
+		if err != nil {
+			klog.Errorf("Failed to install Gateway API CRDs: %v", err)
+			cancel()
+			return nil, err
+		}
+
+		gwClient, err := gatewayclient.NewForConfig(config)
+		if err != nil {
+			// This error shouldn't fail. It lives like this as a legacy.
+			klog.Errorf("Failed to create Gateway API client: %v", err)
+			cancel()
+			return nil, err
+		}
+
+		sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
+
+		controller, err := gateway.New(
+			clusterName,
+			kubeClient,
+			gwClient,
+			sharedInformers.Core().V1().Namespaces(),
+			sharedInformers.Core().V1().Services(),
+			sharedInformers.Core().V1().Secrets(),
+			sharedGwInformers.Gateway().V1().GatewayClasses(),
+			sharedGwInformers.Gateway().V1().Gateways(),
+			sharedGwInformers.Gateway().V1().HTTPRoutes(),
+			sharedGwInformers.Gateway().V1().GRPCRoutes(),
+		)
+		if err != nil {
+			klog.Errorf("Failed to start gateway controller: %v", err)
+			cancel()
+			return nil, err
+		}
+
+		gatewayController = controller
+
+		err = gatewayController.Init(ctx)
+		if err != nil {
+			klog.Errorf("Failed to initialize gateway controller: %v", err)
+			cancel()
+			return nil, err
+		}
+
+		go func() {
+			_ = gatewayController.Run(ctx)
+		}()
+		sharedGwInformers.Start(ctx.Done())
 	}
-
-	err = crdManager.InstallCRDs(ctx, cpkconfig.DefaultConfig.GatewayReleaseChannel)
-	if err != nil {
-		klog.Errorf("Failed to install Gateway API CRDs: %v", err)
-		cancel()
-		return nil, err
-	}
-
-	gwClient, err := gatewayclient.NewForConfig(config)
-	if err != nil {
-		// This error shouldn't fail. It lives like this as a legacy.
-		klog.Errorf("Failed to create Gateway API client: %v", err)
-		cancel()
-		return nil, err
-	}
-
-	sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
-
-	gatewayController, err := gateway.New(
-		clusterName,
-		kubeClient,
-		gwClient,
-		sharedInformers.Core().V1().Namespaces(),
-		sharedInformers.Core().V1().Services(),
-		sharedInformers.Core().V1().Secrets(),
-		sharedGwInformers.Gateway().V1().GatewayClasses(),
-		sharedGwInformers.Gateway().V1().Gateways(),
-		sharedGwInformers.Gateway().V1().HTTPRoutes(),
-		sharedGwInformers.Gateway().V1().GRPCRoutes(),
-	)
-	if err != nil {
-		klog.Errorf("Failed to start gateway controller: %v", err)
-		cancel()
-		return nil, err
-	}
-
-	err = gatewayController.Init(ctx)
-	if err != nil {
-		klog.Errorf("Failed to initialize gateway controller: %v", err)
-		cancel()
-		return nil, err
-	}
-
-	go func() {
-		_ = gatewayController.Run(ctx)
-	}()
 
 	sharedInformers.Start(ctx.Done())
-	sharedGwInformers.Start(ctx.Done())
 
 	// This has to cleanup all the resources allocated by the cloud provider in this cluster
 	// - containers as loadbalancers
