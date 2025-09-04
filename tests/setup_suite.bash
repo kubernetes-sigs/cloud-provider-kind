@@ -24,7 +24,7 @@ nodes:
 EOF
 
   cd "$BATS_TEST_DIRNAME"/.. && make
-  nohup "$BATS_TEST_DIRNAME"/../bin/cloud-provider-kind -v 2 --enable-log-dumping --logs-dir "$ARTIFACTS_DIR" > "$ARTIFACTS_DIR"/ccm-kind.log 2>&1 &
+  nohup "$BATS_TEST_DIRNAME"/../bin/cloud-provider-kind -v 2 --gateway-channel=standard --enable-log-dumping --logs-dir "$ARTIFACTS_DIR" > "$ARTIFACTS_DIR"/ccm-kind.log 2>&1 &
   export CCM_PID=$!
 
   # test depend on external connectivity that can be very flaky
