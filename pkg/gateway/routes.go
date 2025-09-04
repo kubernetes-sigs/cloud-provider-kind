@@ -179,30 +179,29 @@ func isRouteAllowed(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, rou
 	return false
 }
 
-// isHostnameSubset checks if a route hostname is a valid subset of a listener hostname.
-// This implements the precise Gateway API matching rules.
+// isHostnameSubset checks if a route hostname is a valid subset of a listener hostname,
+// following the precise Gateway API matching rules.
 func isHostnameSubset(routeHostname, listenerHostname string) bool {
-	// 1. Exact match is always a valid subset.
+	// 1. An exact match is always a valid subset.
 	if routeHostname == listenerHostname {
 		return true
 	}
-	// 2. If the listener has a wildcard, the route's hostname must match its domain.
+
+	// 2. If the listener has a wildcard, the route's hostname must be a subdomain.
 	if strings.HasPrefix(listenerHostname, "*.") {
 		domain := strings.TrimPrefix(listenerHostname, "*.")
-		// The route hostname must be the domain itself (e.g., "example.com")
-		// or a subdomain of it (e.g., "foo.example.com").
-		if routeHostname == domain || strings.HasSuffix(routeHostname, "."+domain) {
+		// The route must be a proper subdomain. It cannot be the parent domain itself.
+		// e.g., "foo.example.com" is a subset of "*.example.com".
+		// e.g., "example.com" is NOT a subset of "*.example.com".
+		if strings.HasSuffix(routeHostname, "."+domain) {
 			return true
 		}
 	}
-	// 3. A route with a wildcard can only match a listener with an identical wildcard.
-	// It is NOT a subset of a more specific listener hostname.
-	// e.g., route "*.example.com" does NOT match listener "foo.example.com".
-	if strings.HasPrefix(routeHostname, "*.") {
-		return false
-	}
 
-	// All other cases are not a valid subset.
+	// A route with a wildcard can only be a subset of an identical listener wildcard.
+	// e.g., route "*.example.com" is NOT a subset of listener "foo.example.com".
+	// This case is already handled by the exact match check in rule #1.
+
 	return false
 }
 
