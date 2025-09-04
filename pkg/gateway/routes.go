@@ -5,6 +5,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
@@ -191,19 +192,17 @@ func isAllowedByHostname(listener gatewayv1.Listener, route metav1.Object) bool 
 	return false
 }
 
-// getIntersectingHostnames calculates the precise set of hostnames that are valid
-// for a given route and listener, following the Gateway API specification.
-// It correctly handles empty and wildcard hostnames.
+// getIntersectingHostnames calculates the precise set of hostnames for an Envoy VirtualHost,
+// resolving each match to the most restrictive hostname as per the Gateway API specification.
+// It returns a slice of the resulting hostnames, or an empty slice if there is no valid intersection.
 func getIntersectingHostnames(listener gatewayv1.Listener, routeHostnames []gatewayv1.Hostname) []string {
-	// Case 1: The listener has no hostname specified.
-	// This is the most permissive case. The listener acts as a universal wildcard,
+	// Case 1: The listener has no hostname specified. It acts as a universal wildcard,
 	// allowing any and all hostnames from the route.
 	if listener.Hostname == nil || *listener.Hostname == "" {
-		// If the route also specifies no hostnames, the result is a universal match for all hostnames.
 		if len(routeHostnames) == 0 {
-			return []string{"*"}
+			return []string{"*"} // Universal match
 		}
-		// Otherwise, the result is simply the route's own set of hostnames.
+		// The result is simply the route's own hostnames.
 		var names []string
 		for _, h := range routeHostnames {
 			names = append(names, string(h))
@@ -212,25 +211,33 @@ func getIntersectingHostnames(listener gatewayv1.Listener, routeHostnames []gate
 	}
 	listenerHostname := string(*listener.Hostname)
 
-	// Case 2: The route has no hostnames.
-	// It implicitly inherits the listener's specific hostname.
+	// Case 2: The route has no hostnames. It implicitly inherits the listener's specific hostname.
 	if len(routeHostnames) == 0 {
 		return []string{listenerHostname}
 	}
 
-	// Case 3: Both the listener and the route have hostnames.
-	// We must find the specific intersection based on the spec's matching rules.
-	var intersection []string
+	// Case 3: Both have hostnames. We must find the intersection and then determine
+	// the most restrictive hostname for each match.
+	intersection := sets.New[string]()
 	for _, h := range routeHostnames {
 		routeHostname := string(h)
 		if isHostnameSubset(routeHostname, listenerHostname) {
-			// Per the spec, if an intersection is found, the Route's hostname is used
-			// for the resulting configuration.
-			intersection = append(intersection, routeHostname)
+			// A valid intersection was found. Now, determine the most specific
+			// hostname to use for the configuration.
+			if strings.HasPrefix(routeHostname, "*") && !strings.HasPrefix(listenerHostname, "*") {
+				// If the route is a wildcard and the listener is specific, the listener's
+				// specific hostname is the most restrictive result.
+				intersection.Insert(listenerHostname)
+			} else {
+				// In all other valid cases (exact match, specific route on a wildcard listener),
+				// the route's hostname is the most restrictive result.
+				intersection.Insert(routeHostname)
+			}
 		}
 	}
 
-	return intersection
+	// Return the unique set of resulting hostnames.
+	return intersection.UnsortedList()
 }
 
 // isHostnameSubset checks if a route hostname is a valid subset of a listener hostname,
