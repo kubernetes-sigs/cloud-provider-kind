@@ -12,62 +12,6 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// isRouteReferenced checks if the given route object has a ParentRef
-// that explicitly targets the specified gateway and listener.
-func isRouteReferenced(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object) bool {
-	var parentRefs []gatewayv1.ParentReference
-
-	// Extract ParentRefs based on the concrete route type
-	switch r := route.(type) {
-	case *gatewayv1.HTTPRoute:
-		parentRefs = r.Spec.ParentRefs
-	case *gatewayv1.GRPCRoute:
-		parentRefs = r.Spec.ParentRefs
-	default:
-		klog.Warningf("isRouteReferenced: Unsupported route type %T for route %s/%s", route, route.GetNamespace(), route.GetName())
-		return false
-	}
-
-	if len(parentRefs) == 0 {
-		klog.V(5).Infof("isRouteReferenced: Route %s/%s has no ParentRefs", route.GetNamespace(), route.GetName())
-		return false
-	}
-
-	routeNamespace := route.GetNamespace()
-	gatewayNamespace := gateway.GetNamespace()
-	gatewayName := gatewayv1.ObjectName(gateway.GetName())
-
-	for _, ref := range parentRefs {
-		refGroup := gatewayv1.Group(gatewayv1.GroupName)
-		if ref.Group != nil {
-			refGroup = *ref.Group
-		}
-		refKind := gatewayv1.Kind("Gateway")
-		if ref.Kind != nil {
-			refKind = *ref.Kind
-		}
-		if refGroup != gatewayv1.GroupName || refKind != "Gateway" {
-			continue
-		}
-
-		refNamespace := routeNamespace
-		if ref.Namespace != nil {
-			refNamespace = string(*ref.Namespace)
-		}
-		if refNamespace != gatewayNamespace {
-			continue
-		}
-
-		if ref.Name != gatewayName {
-			continue
-		}
-
-		return true
-	}
-
-	return false
-}
-
 // isAllowedByListener checks if a given route is allowed to attach to a listener
 // based on the listener's `allowedRoutes` specification for namespaces and kinds.
 func isAllowedByListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object, namespaceLister corev1listers.NamespaceLister) bool {
