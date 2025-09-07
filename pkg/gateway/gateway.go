@@ -168,7 +168,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	}
 
 	// validate listeners that may reuse the same port
-	conflictedListenerConditions := c.validateListeners(gateway)
+	listenerValidationConditions := c.validateListeners(gateway)
 
 	finalEnvoyListeners := []envoyproxytypes.Resource{}
 	// Process Listeners by Port
@@ -185,7 +185,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			listenerStatus := gatewayv1.ListenerStatus{
 				Name:           gatewayv1.SectionName(listener.Name),
 				SupportedKinds: []gatewayv1.RouteGroupKind{},
-				Conditions:     []metav1.Condition{},
+				Conditions:     listenerValidationConditions[listener.Name],
 				AttachedRoutes: 0,
 			}
 			supportedKinds, allKindsValid := getSupportedKinds(listener)
@@ -203,11 +203,22 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				continue // Stop processing this invalid listener
 			}
 
-			if conflictCondition, isConflicted := conflictedListenerConditions[listener.Name]; isConflicted {
-				// This listener is conflicted. Set its status and skip it.
-				meta.SetStatusCondition(&listenerStatus.Conditions, conflictCondition)
+			isConflicted := meta.IsStatusConditionTrue(listenerStatus.Conditions, string(gatewayv1.ListenerConditionConflicted))
+			// If the listener is conflicted set its status and skip Envoy config generation.
+			if isConflicted {
 				allListenerStatuses[listener.Name] = listenerStatus
-				continue // DO NOT generate Envoy config for this listener
+				continue
+			}
+
+			// If there are not references issues then set it to tru
+			if !meta.IsStatusConditionFalse(listenerStatus.Conditions, string(gatewayv1.ListenerConditionResolvedRefs)) {
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionTrue,
+					Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+					Message:            "All references resolved",
+					ObservedGeneration: gateway.Generation,
+				})
 			}
 
 			switch listener.Protocol {
@@ -215,7 +226,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// Process HTTPRoutes
 				// Get the routes that were pre-validated for this specific listener.
 				for _, httpRoute := range routesByListener[listener.Name] {
-					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister)
+					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
 
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
 					currentParentStatuses := httpRouteStatuses[key]
@@ -276,15 +287,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 			filterChain, err := c.translateListenerToFilterChain(gateway, listener, vhSlice, routeName)
 			if err != nil {
-				// If translation fails, a reference is unresolved. Set both conditions to False.
-				klog.Errorf("Error translating listener %s to filter chain: %v", listener.Name, err)
-				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
-					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-					Status:             metav1.ConditionFalse,
-					Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-					Message:            fmt.Sprintf("Failed to resolve references: %v", err),
-					ObservedGeneration: gateway.Generation,
-				})
 				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
 					Type:               string(gatewayv1.ListenerConditionProgrammed),
 					Status:             metav1.ConditionFalse,
@@ -293,14 +295,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					ObservedGeneration: gateway.Generation,
 				})
 			} else {
-				// Only if ALL checks pass, set the conditions to True.
-				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
-					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-					Status:             metav1.ConditionTrue,
-					Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
-					Message:            "All references resolved",
-					ObservedGeneration: gateway.Generation,
-				})
 				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
 					Type:               string(gatewayv1.ListenerConditionProgrammed),
 					Status:             metav1.ConditionTrue,

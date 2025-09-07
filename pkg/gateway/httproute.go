@@ -14,6 +14,8 @@ import (
 
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gatewaylistersv1beta1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 )
 
 // translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
@@ -21,6 +23,7 @@ import (
 func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
+	referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister,
 ) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
 
 	var envoyRoutes []*routev3.Route
@@ -119,6 +122,7 @@ func translateHTTPRouteToEnvoyRoutes(
 					httpRoute.Namespace,
 					rule.BackendRefs,
 					serviceLister,
+					referenceGrantLister,
 				)
 				var controllerErr *ControllerError
 				if errors.As(err, &controllerErr) {
@@ -148,7 +152,7 @@ func translateHTTPRouteToEnvoyRoutes(
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
-func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendRef, serviceLister corev1listers.ServiceLister) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
+func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendRef, serviceLister corev1listers.ServiceLister, referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
 	weightedClusters := &routev3.WeightedCluster{}
 	var validBackendRefs []gatewayv1.BackendRef
 
@@ -159,6 +163,29 @@ func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendR
 		if backendRef.Namespace != nil {
 			ns = string(*backendRef.Namespace)
 		}
+
+		// If it's a cross-namespace reference, we must check for a ReferenceGrant.
+		if ns != namespace {
+			from := gatewayv1beta1.ReferenceGrantFrom{
+				Group:     gatewayv1.GroupName,
+				Kind:      "HTTPRoute",
+				Namespace: gatewayv1.Namespace(namespace),
+			}
+			to := gatewayv1beta1.ReferenceGrantTo{
+				Group: "", // Core group for Service
+				Kind:  "Service",
+				Name:  &backendRef.Name,
+			}
+
+			if !isCrossNamespaceRefAllowed(from, to, ns, referenceGrantLister) {
+				// The reference is not permitted.
+				return nil, nil, &ControllerError{
+					Reason:  string(gatewayv1.RouteReasonRefNotPermitted),
+					Message: "permission error",
+				}
+			}
+		}
+
 		if _, err := serviceLister.Services(ns).Get(string(backendRef.Name)); err != nil {
 			return nil, nil, &ControllerError{
 				Reason:  string(gatewayv1.RouteReasonBackendNotFound),
@@ -240,7 +267,7 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 		routeMatch.PathSpecifier = &routev3.RouteMatch_Prefix{Prefix: "/"}
 	}
 
-	// --- 2. Translate Header Matches ---
+	// Translate Header Matches
 	for _, headerMatch := range match.Headers {
 		headerMatcher := &routev3.HeaderMatcher{
 			Name: string(headerMatch.Name),
@@ -271,7 +298,7 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 		routeMatch.Headers = append(routeMatch.Headers, headerMatcher)
 	}
 
-	// --- 3. Translate Query Parameter Matches ---
+	// Translate Query Parameter Matches
 	for _, queryMatch := range match.QueryParams {
 		// Gateway API only supports "Exact" match for query parameters.
 		queryMatcher := &routev3.QueryParameterMatcher{

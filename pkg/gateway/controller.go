@@ -42,6 +42,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1informers "k8s.io/client-go/informers/core/v1"
@@ -55,9 +56,12 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/tunnels"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
+	gatewayinformersv1beta1 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1beta1"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
+	gatewaylistersv1beta1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 )
 
 const (
@@ -113,6 +117,9 @@ type Controller struct {
 	grpcrouteLister       gatewaylisters.GRPCRouteLister
 	grpcrouteListerSynced cache.InformerSynced
 
+	referenceGrantLister       gatewaylistersv1beta1.ReferenceGrantLister
+	referenceGrantListerSynced cache.InformerSynced
+
 	xdscache        cachev3.SnapshotCache
 	xdsserver       serverv3.Server
 	xdsLocalAddress string
@@ -133,6 +140,7 @@ func New(
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
+	referenceGrantInformer gatewayinformersv1beta1.ReferenceGrantInformer,
 ) (*Controller, error) {
 	c := &Controller{
 		clusterName:              clusterName,
@@ -152,10 +160,12 @@ func New(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "gateway"},
 		),
-		httprouteLister:       httprouteInformer.Lister(),
-		httprouteListerSynced: httprouteInformer.Informer().HasSynced,
-		grpcrouteLister:       grpcrouteInformer.Lister(),
-		grpcrouteListerSynced: grpcrouteInformer.Informer().HasSynced,
+		httprouteLister:            httprouteInformer.Lister(),
+		httprouteListerSynced:      httprouteInformer.Informer().HasSynced,
+		grpcrouteLister:            grpcrouteInformer.Lister(),
+		grpcrouteListerSynced:      grpcrouteInformer.Informer().HasSynced,
+		referenceGrantLister:       referenceGrantInformer.Lister(),
+		referenceGrantListerSynced: referenceGrantInformer.Informer().HasSynced,
 	}
 	_, err := gatewayClassInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -274,6 +284,15 @@ func New(
 			}
 			c.processGateways(grpcroute.Spec.ParentRefs, grpcroute.Namespace)
 		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = referenceGrantInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.processReferenceGrant,
+		UpdateFunc: func(old, new interface{}) { c.processReferenceGrant(new) },
+		DeleteFunc: c.processReferenceGrant,
 	})
 	if err != nil {
 		return nil, err
@@ -430,6 +449,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		c.namespaceListerSynced,
 		c.serviceListerSynced,
 		c.secretListerSynced,
+		c.referenceGrantListerSynced,
 	) {
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
@@ -461,6 +481,156 @@ func (c *Controller) processGateways(references []gatewayv1.ParentReference, loc
 	for key := range gatewaysToEnqueue {
 		c.gatewayqueue.Add(key)
 	}
+}
+
+// processReferenceGrant finds all Gateways that may be affected by a change to a
+// ReferenceGrant and enqueues them for reconciliation. This function handles grants
+// for both cross-namespace BackendRefs (from Routes) and cross-namespace
+// SecretRefs (from Gateways).
+func (c *Controller) processReferenceGrant(obj interface{}) {
+	grant, ok := obj.(*gatewayv1beta1.ReferenceGrant)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.Errorf("error decoding object, invalid type")
+			return
+		}
+		grant, ok = tombstone.Obj.(*gatewayv1beta1.ReferenceGrant)
+		if !ok {
+			klog.Errorf("error decoding object tombstone, invalid type")
+			return
+		}
+	}
+
+	gatewaysToEnqueue := make(map[string]struct{})
+	// The ReferenceGrant lives in the namespace of the resource being referenced (the "To" side).
+	targetNamespace := grant.Namespace
+
+	// Check for Grants allowing Routes to reference Services
+	for _, from := range grant.Spec.From {
+		// As the controller supports more route types, they should be added here.
+		if !CloudProviderSupportedKinds.Has(from.Kind) {
+			continue
+		}
+
+		// Check if the grant allows references TO a Service.
+		isServiceGrant := false
+		for _, to := range grant.Spec.To {
+			if to.Kind == "Service" {
+				isServiceGrant = true
+				break
+			}
+		}
+		if !isServiceGrant {
+			continue
+		}
+
+		// Find all routes in the "From" namespace that could be affected.
+		httpRoutes, err := c.httprouteLister.HTTPRoutes(string(from.Namespace)).List(labels.Everything())
+		if err != nil {
+			klog.Errorf("Failed to list HTTPRoutes in namespace %s: %v", from.Namespace, err)
+			continue
+		}
+
+		for _, route := range httpRoutes {
+			if routeReferencesBackendInNamespace(route, targetNamespace) {
+				// This route is affected. Find its parent Gateways and add them to the queue.
+				for _, parentRef := range route.Spec.ParentRefs {
+					if (parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName) ||
+						(parentRef.Kind != nil && string(*parentRef.Kind) != "Gateway") {
+						continue
+					}
+					gwNamespace := route.Namespace
+					if parentRef.Namespace != nil {
+						gwNamespace = string(*parentRef.Namespace)
+					}
+					key := gwNamespace + "/" + string(parentRef.Name)
+					gatewaysToEnqueue[key] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// Check for Grants allowing Gateways to reference Secrets
+	for _, from := range grant.Spec.From {
+		// We are looking for grants FROM Gateways.
+		if from.Group != gatewayv1.GroupName || from.Kind != "Gateway" {
+			continue
+		}
+
+		// Check if the grant allows references TO a Secret.
+		isSecretGrant := false
+		for _, to := range grant.Spec.To {
+			if to.Kind == "Secret" {
+				isSecretGrant = true
+				break
+			}
+		}
+		if !isSecretGrant {
+			continue
+		}
+
+		// Find all Gateways in the "From" namespace that could be affected.
+		gateways, err := c.gatewayLister.Gateways(string(from.Namespace)).List(labels.Everything())
+		if err != nil {
+			klog.Errorf("Failed to list Gateways in namespace %s: %v", from.Namespace, err)
+			continue
+		}
+
+		for _, gw := range gateways {
+			if gatewayReferencesSecretInNamespace(gw, targetNamespace) {
+				// This Gateway is affected. Add it to the queue.
+				key := gw.Namespace + "/" + gw.Name
+				gatewaysToEnqueue[key] = struct{}{}
+			}
+		}
+	}
+
+	// Enqueue all unique Gateways that were found to be affected.
+	for key := range gatewaysToEnqueue {
+		c.gatewayqueue.Add(key)
+	}
+}
+
+// routeReferencesBackendInNamespace is a helper to check if an HTTPRoute has a backendRef
+// pointing to the specified namespace.
+func routeReferencesBackendInNamespace(route *gatewayv1.HTTPRoute, namespace string) bool {
+	for _, rule := range route.Spec.Rules {
+		for _, backendRef := range rule.BackendRefs {
+			backendNamespace := route.Namespace
+			if backendRef.Namespace != nil {
+				backendNamespace = string(*backendRef.Namespace)
+			}
+			if backendNamespace == namespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// gatewayReferencesSecretInNamespace is a helper to check if a Gateway has a certificateRef
+// pointing to a Secret in the specified namespace.
+func gatewayReferencesSecretInNamespace(gateway *gatewayv1.Gateway, namespace string) bool {
+	for _, listener := range gateway.Spec.Listeners {
+		if listener.TLS == nil {
+			continue
+		}
+		for _, certRef := range listener.TLS.CertificateRefs {
+			// We only care about references to Secrets.
+			if (certRef.Group != nil && *certRef.Group != "") || (certRef.Kind != nil && *certRef.Kind != "Secret") {
+				continue
+			}
+			secretNamespace := gateway.Namespace
+			if certRef.Namespace != nil {
+				secretNamespace = string(*certRef.Namespace)
+			}
+			if secretNamespace == namespace {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Controller) runGatewayWorker(ctx context.Context) {
