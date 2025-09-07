@@ -304,6 +304,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 			sharedGwInformers.Gateway().V1().Gateways(),
 			sharedGwInformers.Gateway().V1().HTTPRoutes(),
 			sharedGwInformers.Gateway().V1().GRPCRoutes(),
+			sharedGwInformers.Gateway().V1beta1().ReferenceGrants(),
 		)
 		if err != nil {
 			klog.Errorf("Failed to start gateway controller: %v", err)

@@ -116,10 +116,11 @@ jobs:
             --organization=sigs.k8s.io \
             --project=cloud-provider-kind \
             --url=https://github.com/kubernetes-sigs/cloud-provider-kind \
-            --version=test \
-            --contact=antonio.ojea.garcia@gmail.com \
+            --version=${{ github.sha }} \
+            --contact=https://github.com/kubernetes-sigs/cloud-provider-kind/issues/new \
             --gateway-class=cloud-provider-kind \
-            --supported-features=Gateway,HTTPRoute \
+            --conformance-profiles=GATEWAY-HTTP \
+            --supported-features=Gateway,HTTPRoute,ReferenceGrant \
             --report-output=./_artifacts/conformance.yaml
 
     - name: Export logs
