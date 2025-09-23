@@ -108,6 +108,14 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	newGw.Status.Listeners = listenerStatuses
 	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
 
+	// forward traffic from the host on Mac and Windows
+	if c.tunnelManager != nil {
+		err := c.tunnelManager.SetupTunnels(containerName)
+		if err != nil {
+			klog.Errorf("failed to set up tunnels for gateway %s: %v", key, err)
+		}
+	}
+
 	// Calculate and set the Gateway's own status conditions based on the build results.
 	setGatewayConditions(newGw, listenerStatuses, err)
 
@@ -669,6 +677,13 @@ func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace
 	}
 	if err := c.xdscache.SetSnapshot(ctx, containerName, snapshot); err != nil {
 		return fmt.Errorf("failed to set empty snapshot for deleted gateway %s: %w", name, err)
+	}
+
+	if c.tunnelManager != nil {
+		err := c.tunnelManager.RemoveTunnels(containerName)
+		if err != nil {
+			klog.Errorf("failed to remove tunnels for deleted gateway %s: %v", name, err)
+		}
 	}
 
 	if err := container.Delete(containerName); err != nil {
