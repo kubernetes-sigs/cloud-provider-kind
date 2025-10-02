@@ -3,9 +3,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     api-approved.kubernetes.io: https://github.com/kubernetes-sigs/gateway-api/pull/3328
-    gateway.networking.k8s.io/bundle-version: v1.3.0
+    gateway.networking.k8s.io/bundle-version: v1.4.0-rc.2
     gateway.networking.k8s.io/channel: experimental
-  creationTimestamp: null
   name: grpcroutes.gateway.networking.k8s.io
 spec:
   group: gateway.networking.k8s.io
@@ -151,6 +150,7 @@ spec:
                   type: string
                 maxItems: 16
                 type: array
+                x-kubernetes-list-type: atomic
               parentRefs:
                 description: |-
                   ParentRefs references the resources (usually Gateways) that a Route wants
@@ -363,6 +363,7 @@ spec:
                   type: object
                 maxItems: 32
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: sectionName or port must be specified when parentRefs includes
                     2 or more references to the same parent
@@ -984,6 +985,7 @@ spec:
                                 rule: '!(!has(self.extensionRef) && self.type == ''ExtensionRef'')'
                             maxItems: 16
                             type: array
+                            x-kubernetes-list-type: atomic
                             x-kubernetes-validations:
                             - message: RequestHeaderModifier filter cannot be repeated
                               rule: self.filter(f, f.type == 'RequestHeaderModifier').size()
@@ -1080,6 +1082,7 @@ spec:
                             ? has(self.port) : true'
                       maxItems: 16
                       type: array
+                      x-kubernetes-list-type: atomic
                     filters:
                       description: |-
                         Filters define the filters that are applied to requests that match
@@ -1630,6 +1633,7 @@ spec:
                           rule: '!(!has(self.extensionRef) && self.type == ''ExtensionRef'')'
                       maxItems: 16
                       type: array
+                      x-kubernetes-list-type: atomic
                       x-kubernetes-validations:
                       - message: RequestHeaderModifier filter cannot be repeated
                         rule: self.filter(f, f.type == 'RequestHeaderModifier').size()
@@ -1807,6 +1811,7 @@ spec:
                         type: object
                       maxItems: 64
                       type: array
+                      x-kubernetes-list-type: atomic
                     name:
                       description: |-
                         Name is the name of the route rule. This name MUST be unique within a Route if it is set.
@@ -1908,6 +1913,7 @@ spec:
                   type: object
                 maxItems: 16
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: While 16 rules and 64 matches per rule are allowed, the
                     total number of matches across all rules in a route must be less
@@ -1932,6 +1938,24 @@ spec:
                 - message: Rule name must be unique within the route
                   rule: self.all(l1, !has(l1.name) || self.exists_one(l2, has(l2.name)
                     && l1.name == l2.name))
+              useDefaultGateways:
+                description: |-
+                  UseDefaultGateways indicates the default Gateway scope to use for this
+                  Route. If unset (the default) or set to None, the Route will not be
+                  attached to any default Gateway; if set, it will be attached to any
+                  default Gateway supporting the named scope, subject to the usual rules
+                  about which Routes a Gateway is allowed to claim.
+
+                  Think carefully before using this functionality! The set of default
+                  Gateways supporting the requested scope can change over time without
+                  any notice to the Route author, and in many situations it will not be
+                  appropriate to request a default Gateway for a given Route -- for
+                  example, a Route with specific security requirements should almost
+                  certainly not use a default Gateway.
+                enum:
+                - All
+                - None
+                type: string
             type: object
           status:
             description: Status defines the current state of GRPCRoute.
@@ -2196,14 +2220,18 @@ spec:
                       - name
                       type: object
                   required:
+                  - conditions
                   - controllerName
                   - parentRef
                   type: object
                 maxItems: 32
                 type: array
+                x-kubernetes-list-type: atomic
             required:
             - parents
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true
