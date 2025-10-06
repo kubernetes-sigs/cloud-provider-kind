@@ -22,7 +22,7 @@ require (
 	k8s.io/controller-manager v0.34.1
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/utils v0.0.0-20250820121507-0af2bda4dd1d
-	sigs.k8s.io/gateway-api v1.4.0-rc.2
+	sigs.k8s.io/gateway-api v1.4.0
 	sigs.k8s.io/kind v0.30.0
 )
 
