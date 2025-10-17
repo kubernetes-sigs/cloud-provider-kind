@@ -101,6 +101,7 @@ func (t *TunnelManager) RemoveTunnels(containerName string) error {
 type tunnel struct {
 	listener   net.Listener
 	udpConn    *net.UDPConn
+	udpDone    chan struct{}
 	localIP    string
 	localPort  string
 	protocol   string
@@ -128,9 +129,22 @@ func (t *tunnel) Start() error {
 			return err
 		}
 		conn, err := net.ListenUDP("udp4", udpAddr)
+		if err != nil {
+			return err
+		}
+
+		// use a channel for signaling that the UDP connection has been closed
+		t.udpDone = make(chan struct{})
 		t.udpConn = conn
+
 		go func() {
 			for {
+				select {
+				case <-t.udpDone:
+					return
+				default:
+				}
+
 				err = t.handleUDPConnection(conn)
 				if err != nil {
 					klog.Infof("unexpected error on connection: %v", err)
@@ -177,6 +191,12 @@ func (t *tunnel) Stop() error {
 		_ = t.listener.Close()
 	}
 	if t.udpConn != nil {
+		// Let the UDP handling code know that it can give up
+		select {
+		case <-t.udpDone:
+		default:
+			close(t.udpDone)
+		}
 		_ = t.udpConn.Close()
 	}
 	return nil
