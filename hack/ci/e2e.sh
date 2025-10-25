@@ -196,7 +196,7 @@ run_tests() {
   # use aws provider to enable cloud-provider tests, aws is just a nullprovider
   # without any custom logic
   ./hack/ginkgo-e2e.sh \
-    '--provider=aws' "--num-nodes=${NUM_NODES}" \
+    "--num-nodes=${NUM_NODES}" \
     "--ginkgo.focus=${FOCUS}" "--ginkgo.skip=${SKIP}" \
     "--report-dir=${ARTIFACTS}" '--disable-log-dump=true' &
   GINKGO_PID=$!
