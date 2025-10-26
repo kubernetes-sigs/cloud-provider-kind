@@ -323,7 +323,6 @@ func createSuccessCondition(generation int64) metav1.Condition {
 		Reason:             string(gatewayv1.RouteReasonResolvedRefs),
 		Message:            "All references resolved",
 		ObservedGeneration: generation,
-		LastTransitionTime: metav1.Now(),
 	}
 }
 
@@ -334,7 +333,6 @@ func createFailureCondition(reason gatewayv1.RouteConditionReason, message strin
 		Reason:             string(reason),
 		Message:            message,
 		ObservedGeneration: generation,
-		LastTransitionTime: metav1.Now(),
 	}
 }
 
