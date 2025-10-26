@@ -193,8 +193,22 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			listenerStatus := gatewayv1.ListenerStatus{
 				Name:           gatewayv1.SectionName(listener.Name),
 				SupportedKinds: []gatewayv1.RouteGroupKind{},
-				Conditions:     listenerValidationConditions[listener.Name],
+				Conditions:     []metav1.Condition{},
 				AttachedRoutes: 0,
+			}
+			// Find old status to preserve condition timestamps
+			for _, oldStatus := range gateway.Status.Listeners {
+				if oldStatus.Name == listener.Name {
+					listenerStatus.Conditions = oldStatus.Conditions // Copy old conditions
+					break
+				}
+			}
+
+			// Apply pre-calculated validation conditions
+			if validationConds, ok := listenerValidationConditions[listener.Name]; ok {
+				for _, cond := range validationConds {
+					meta.SetStatusCondition(&listenerStatus.Conditions, cond)
+				}
 			}
 			supportedKinds, allKindsValid := getSupportedKinds(listener)
 			listenerStatus.SupportedKinds = supportedKinds
@@ -492,7 +506,6 @@ func (c *Controller) validateHTTPRoute(
 	resolvedRefsCondition := metav1.Condition{
 		Type:               string(gatewayv1.RouteConditionResolvedRefs),
 		ObservedGeneration: httpRoute.Generation,
-		LastTransitionTime: metav1.Now(),
 	}
 	if c.areBackendsValid(httpRoute) {
 		resolvedRefsCondition.Status = metav1.ConditionTrue
@@ -549,7 +562,6 @@ func (c *Controller) validateHTTPRoute(
 		acceptedCondition := metav1.Condition{
 			Type:               string(gatewayv1.RouteConditionAccepted),
 			ObservedGeneration: httpRoute.Generation,
-			LastTransitionTime: metav1.Now(),
 		}
 
 		if len(listenersForThisRef) == 0 {
@@ -571,7 +583,9 @@ func (c *Controller) validateHTTPRoute(
 		}
 
 		// --- 4. Combine the two independent conditions into the final status. ---
-		status.Conditions = append(status.Conditions, acceptedCondition, resolvedRefsCondition)
+		meta.SetStatusCondition(&status.Conditions, acceptedCondition)
+		meta.SetStatusCondition(&status.Conditions, resolvedRefsCondition)
+
 		parentStatuses = append(parentStatuses, status)
 	}
 

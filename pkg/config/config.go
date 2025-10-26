@@ -2,7 +2,10 @@ package config
 
 // DefaultConfig is a global variable that is initialized at startup with the flags options.
 // It can not be modified after that.
-var DefaultConfig = &Config{}
+var DefaultConfig = &Config{
+	GatewayReleaseChannel: Standard,
+	IngressDefault:        true,
+}
 
 type Config struct {
 	EnableLogDump bool
@@ -16,7 +19,8 @@ type Config struct {
 	ControlPlaneConnectivity Connectivity
 	// Gateway API Release channel (default stable)
 	// https://gateway-api.sigs.k8s.io/concepts/versioning/
-	GatewayReleaseChannel string
+	GatewayReleaseChannel GatewayReleaseChannel
+	IngressDefault        bool
 }
 
 type Connectivity int
@@ -26,4 +30,11 @@ const (
 	Direct
 	Portmap
 	Tunnel
+)
+
+type GatewayReleaseChannel string
+
+const (
+	Standard     GatewayReleaseChannel = "standard"
+	Experimental GatewayReleaseChannel = "experimental"
 )

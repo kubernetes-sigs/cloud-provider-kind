@@ -308,6 +308,20 @@ func New(
 func (c *Controller) Init(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
 
+	klog.Info("Waiting for gateway informer caches to sync")
+	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(),
+		c.gatewayClassListerSynced,
+		c.gatewayListerSynced,
+		c.httprouteListerSynced,
+		c.grpcrouteListerSynced,
+		c.namespaceListerSynced,
+		c.serviceListerSynced,
+		c.secretListerSynced,
+		c.referenceGrantListerSynced,
+	) {
+		return fmt.Errorf("timed out waiting for caches to sync")
+	}
+
 	kindGwClass := gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: GWClassName,
@@ -440,19 +454,6 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	defer c.gatewayqueue.ShutDown()
 	klog.Info("Starting Gateway API controller")
-
-	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(),
-		c.gatewayClassListerSynced,
-		c.gatewayListerSynced,
-		c.httprouteListerSynced,
-		c.grpcrouteListerSynced,
-		c.namespaceListerSynced,
-		c.serviceListerSynced,
-		c.secretListerSynced,
-		c.referenceGrantListerSynced,
-	) {
-		return fmt.Errorf("timed out waiting for caches to sync")
-	}
 
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runGatewayWorker, time.Second)

@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 )
 
 //go:embed crds/standard/*.yaml crds/experimental/*.yaml
@@ -51,19 +52,14 @@ func NewCRDManager(config *rest.Config) (*CRDManager, error) {
 }
 
 // InstallCRDs reads CRDs from the embedded filesystem and applies them to the cluster.
-func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir string) error {
+func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayReleaseChannel) error {
 	crdGVR := schema.GroupVersionResource{
 		Group:    crdGroup,
 		Version:  crdVersion,
 		Resource: crdResource,
 	}
 
-	if channelDir != "standard" && channelDir != "experimental" {
-		// Default to standard if the config is somehow invalid (though cmd/app should prevent this)
-		klog.Warningf("Invalid GatewayReleaseChannel %q found, defaulting to 'standard'", channelDir)
-		channelDir = "standard"
-	}
-	targetDir := filepath.Join(crdsDir, channelDir)
+	targetDir := filepath.Join(crdsDir, string(channelDir))
 
 	klog.Infof("Walking embedded directory for channel %q: %s", channelDir, targetDir)
 	err := fs.WalkDir(crdFS, targetDir, func(path string, d fs.DirEntry, err error) error {

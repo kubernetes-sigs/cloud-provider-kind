@@ -1,4 +1,4 @@
-name: gateway
+name: ingress
 
 on:
   push:
@@ -7,18 +7,17 @@ on:
 
 env:
   GO_VERSION: "1.24"
-  GATEWAY_VERSION: "v1.4.0"
   K8S_VERSION: "v1.34.0"
   KIND_VERSION: "v0.30.0"
   KIND_CLUSTER_NAME: "kind-cloud"
 
 jobs:
-  gateway:
-    name: gateway
+  ingress:
+    name: ingress
     runs-on: ubuntu-latest
     timeout-minutes: 100
     env:
-      JOB_NAME: "cloud-provider-kind-e2e-gateway"
+      JOB_NAME: "cloud-provider-kind-e2e-ingress"
     steps:
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -37,13 +36,6 @@ jobs:
     - name: Set up environment (download dependencies)
       run: |
         TMP_DIR=$(mktemp -d)
-        # Test binaries
-        git clone --branch ${{ env.GATEWAY_VERSION }} --depth 1 https://github.com/kubernetes-sigs/gateway-api.git ${TMP_DIR}
-        cd ${TMP_DIR}
-        go test ./conformance/ -c
-        cd -
-        sudo cp ${TMP_DIR}/conformance.test /usr/local/bin/conformance.test
-        sudo chmod +x /usr/local/bin/conformance.test
         # kubectl
         curl -L https://dl.k8s.io/${{ env.K8S_VERSION }}/bin/linux/amd64/kubectl -o ${TMP_DIR}/kubectl
         # kind
@@ -110,18 +102,25 @@ jobs:
 
     - name: Run tests
       run: |
-        /usr/local/bin/conformance.test -test.run TestConformance \
-            --debug=true \
-            --kubeconfig=_artifacts/kubeconfig.conf \
-            --organization=sigs.k8s.io \
-            --project=cloud-provider-kind \
-            --url=https://github.com/kubernetes-sigs/cloud-provider-kind \
-            --version=${{ github.sha }} \
-            --contact=https://github.com/kubernetes-sigs/cloud-provider-kind/issues/new \
-            --gateway-class=cloud-provider-kind \
-            --conformance-profiles=GATEWAY-HTTP \
-            --supported-features=Gateway,HTTPRoute,ReferenceGrant \
-            --report-output=./_artifacts/conformance.yaml
+        TMP_DIR=$(mktemp -d)
+        # Test binaries
+        git clone --depth 1 https://github.com/kubernetes-sigs/ingress-controller-conformance.git ${TMP_DIR}/ingress-controller-conformance
+        cd ${TMP_DIR}/ingress-controller-conformance
+        # Add the @skip tag to the incompatible test
+        # The Gateway spec for spec.hostnames: ["*.foo.com"] states it matches all subdomains.
+        # The Ingress spec for spec.rules.host: "*.foo.com" states it only matches a single subdomain level.
+        echo "Skipping incompatible test: 'An Ingress with a wildcard host rule should not route traffic matching on more than a single dns label'"
+        sed -i '/Scenario: An Ingress with a wildcard host rule should not route traffic matching on more than a single dns label/i @skip' features/host_rules.feature
+        echo "Skipping load balancing spread test: 'An Ingress with no rules should send all requests to the default backend'"
+        sed -i '/Scenario Outline: An Ingress with no rules should send all requests to the default backend/i @skip' features/load_balancing.feature
+        make build
+        chmod +x ingress-controller-conformance
+        ./ingress-controller-conformance           \
+          --ingress-class=cloud-provider-kind      \
+          --no-colors                              \
+          --output-directory="${PWD}/_artifacts"   \
+          --tags="~@skip"                          \
+          --wait-time-for-ingress-status=65s
 
     - name: Export logs
       if: always()
