@@ -22,11 +22,12 @@ import (
 )
 
 var (
-	flagV               int
-	enableLogDump       bool
-	logDumpDir          string
-	enableLBPortMapping bool
-	gatewayChannel      string
+	flagV                int
+	enableLogDump        bool
+	logDumpDir           string
+	enableLBPortMapping  bool
+	gatewayChannel       string
+	enableDefaultIngress bool
 )
 
 func init() {
@@ -39,6 +40,7 @@ func init() {
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard,experimental), by default is standard")
+	flag.BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [subcommand] [options]\n\n")
@@ -114,6 +116,8 @@ func Main() {
 	if err != nil {
 		logger.Errorf("error setting klog verbosity to %d : %v", flagV, err)
 	}
+
+	config.DefaultConfig.IngressDefault = enableDefaultIngress
 
 	if config.GatewayReleaseChannel(gatewayChannel) == "" {
 		klog.Fatalf("Unknown Gateway API release channel %s", gatewayChannel)
