@@ -118,3 +118,45 @@
     # Cleanup: Delete the applied manifests
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
 }
+
+
+@test "Ingress to Gateway Migration and X-Forwarded-For Header" {
+    # Apply the Gateway and HTTPRoute manifests
+    kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/ingress_foo_bar.yaml
+
+    # Wait for the backend application pod to be ready
+    kubectl wait --for=condition=ready pods -l app=foo --timeout=60s
+    kubectl wait --for=condition=ready pods -l app=foo --timeout=60s
+
+    # Give the controller time to reconcile
+    echo "Waiting for reconciliation..."
+    sleep 5
+
+    echo "Finding Ingress Loadbalancer IP ..."
+    run kubectl get ingress example-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+    [ "$status" -eq 0 ]
+    export INGRESS_SVC_IP="$output"
+    echo "Ingress LoadBalancer IP: $INGRESS_SVC_IP"
+
+    # Test /foo prefix
+    echo "Testing /foo prefix (should match foo-app)..."
+    run kubectl exec curl-pod -- curl -H "Host: foo.example.com" -s "http://$INGRESS_SVC_IP/hostname"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "foo-app" ]]
+
+    # Test /bar prefix
+    echo "Testing /bar prefix (should match bar-app)..."
+    run kubectl exec curl-pod -- curl  -H "Host: bar.example.com" -s "http://$INGRESS_SVC_IP/hostname"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "bar-app" ]]
+
+    # Test X-Forwarded-For header
+    echo "Testing X-Forwarded-For header..."
+    run kubectl exec curl-pod -- curl -H "Host: foo.example.com" -s "http://$INGRESS_SVC_IP/header?key=X-Forwarded-For"
+    [ "$status" -eq 0 ]
+    echo "X-Forwarded-For header value: $output"
+    [[ ! -z "$output" ]]
+
+    # Cleanup: Delete the applied manifests
+    kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/ingress_foo_bar.yaml
+}
