@@ -44,7 +44,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
           path: |
@@ -82,7 +82,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
           path: ./_artifacts
