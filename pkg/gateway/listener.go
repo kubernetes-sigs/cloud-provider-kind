@@ -17,6 +17,7 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -223,6 +224,9 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 
 		hcmConfig := &hcm.HttpConnectionManager{
 			StatPrefix: string(lis.Name),
+			// Enable X-Forwarded-For header
+			// https://github.com/kubernetes-sigs/cloud-provider-kind/issues/296
+			UseRemoteAddress: &wrapperspb.BoolValue{Value: true},
 			RouteSpecifier: &hcm.HttpConnectionManager_Rds{
 				Rds: &hcm.Rds{
 					ConfigSource: &corev3.ConfigSource{
