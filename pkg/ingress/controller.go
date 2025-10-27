@@ -847,15 +847,35 @@ func (c *Controller) handleIngressClass(obj interface{}) {
 		return
 	}
 
-	if class.Name == IngressClassName {
-		if val, ok := class.Annotations[networkingv1.AnnotationIsDefaultIngressClass]; ok && val == "true" {
-			klog.Infof("'%s' is the default IngressClass", IngressClassName)
-			c.isDefaultClass.Store(true)
-		} else {
-			c.isDefaultClass.Store(false)
+	if class.Name != IngressClassName {
+		return
+	}
+	// Check if this is the default class
+	isDefault := false
+	val, ok := class.Annotations[networkingv1.AnnotationIsDefaultIngressClass]
+	if ok && val == "true" {
+		isDefault = true
+	}
+	if config.DefaultConfig.IngressDefault && !isDefault {
+		klog.Infof("'%s' is now the default IngressClass", IngressClassName)
+		_, err := c.clientset.NetworkingV1().IngressClasses().Patch(context.TODO(), IngressClassName, types.MergePatchType, []byte(`{"metadata":{"annotations":{"`+networkingv1.AnnotationIsDefaultIngressClass+`":"true"}}}`), metav1.PatchOptions{})
+		if err != nil {
+			klog.Errorf("Failed to patch IngressClass %s: %v", IngressClassName, err)
 		}
-		// Re-enqueue all Ingresses that might be affected by this change
-		c.enqueueAllIngresses()
+		isDefault = true
+	}
+	if isDefault != c.isDefaultClass.Load() {
+		{
+			if isDefault {
+				klog.Infof("'%s' is now the default IngressClass", IngressClassName)
+			} else {
+				klog.Infof("'%s' is no longer the default IngressClass", IngressClassName)
+			}
+			c.isDefaultClass.Store(isDefault)
+			// Re-enqueue all Ingresses that might be affected by this change
+			c.enqueueAllIngresses()
+		}
+
 	}
 }
 
