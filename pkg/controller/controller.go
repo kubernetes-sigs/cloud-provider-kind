@@ -303,7 +303,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	referenceGrantInformer := sharedGwInformers.Gateway().V1beta1().ReferenceGrants()
 
 	gatewayController, err := gateway.New(
-		gateway.GWClassName,
+		clusterName,
 		kubeClient,
 		gwClient,
 		namespacesInformer,
@@ -383,6 +383,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		}
 
 		for _, name := range containers {
+			klog.V(2).Infof("cleaning up container %s for cluster %s", name, clusterName)
 			cleanupLoadBalancer(lbController, name)
 			cleanupGateway(name)
 		}
