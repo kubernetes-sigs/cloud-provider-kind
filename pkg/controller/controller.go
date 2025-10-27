@@ -404,6 +404,20 @@ func (c *Controller) cleanup() {
 		ccm.cancelFn()
 		delete(c.clusters, cluster)
 	}
+	// final cleanup for containers that be left behind
+	containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
+	if err != nil {
+		klog.Errorf("can't list containers: %v", err)
+		return
+	}
+
+	for _, name := range containers {
+		klog.V(2).Infof("cleaning up container %s", name)
+		err := container.Delete(name)
+		if err != nil {
+			klog.Errorf("error deleting container %s : %v", name, err)
+		}
+	}
 }
 
 func getCloudProviderTaint(ctx context.Context, clusterName string, kubeClient kubernetes.Interface) (bool, error) {
