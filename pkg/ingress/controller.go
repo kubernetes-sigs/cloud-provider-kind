@@ -344,19 +344,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 			routeCopy.Spec = desiredRoute.Spec
 			routeCopy.OwnerReferences = desiredRoute.OwnerReferences
 
-			// This avoids conflicts with the gateway-controller updating status.
-			patch := map[string]interface{}{
-				"spec": desiredRoute.Spec,
-				"metadata": map[string]interface{}{
-					"ownerReferences": desiredRoute.OwnerReferences,
-				},
-			}
-			patchBytes, err := json.Marshal(patch)
-			if err != nil {
-				return fmt.Errorf("failed to marshal patch for HTTPRoute %s/%s: %w", desiredRoute.Namespace, desiredRoute.Name, err)
-			}
-
-			_, updateErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Patch(ctx, desiredRoute.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+			_, updateErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Update(ctx, routeCopy, metav1.UpdateOptions{})
 			if updateErr != nil {
 				klog.Errorf("Failed to update HTTPRoute %s/%s: %v", desiredRoute.Namespace, desiredRoute.Name, updateErr)
 				return fmt.Errorf("failed to update HTTPRoute: %w", updateErr)
@@ -595,10 +583,12 @@ func (c *Controller) translateIngressPaths(ns string, paths []networkingv1.HTTPI
 		backendRef := gatewayv1.HTTPBackendRef{
 			BackendRef: gatewayv1.BackendRef{
 				BackendObjectReference: gatewayv1.BackendObjectReference{
-					Name: gatewayv1.ObjectName(ingressPath.Backend.Service.Name),
-					Kind: ptr.To(gatewayv1.Kind("Service")),
-					Port: &portPtr,
+					Name:  gatewayv1.ObjectName(ingressPath.Backend.Service.Name),
+					Kind:  ptr.To(gatewayv1.Kind("Service")),
+					Group: ptr.To(gatewayv1.Group("")),
+					Port:  &portPtr,
 				},
+				Weight: ptr.To(int32(1)),
 			},
 		}
 
@@ -630,6 +620,7 @@ func (c *Controller) generateDesiredHTTPRoutes(ingress *networkingv1.Ingress, ga
 		Name:      gatewayv1.ObjectName(gatewayName),
 		Namespace: ptr.To(gatewayv1.Namespace(gatewayNamespace)),
 		Kind:      ptr.To(gatewayv1.Kind("Gateway")),
+		Group:     ptr.To(gatewayv1.Group(gatewayv1.GroupName)),
 	}
 
 	var defaultPaths []networkingv1.HTTPIngressPath
@@ -702,10 +693,12 @@ func (c *Controller) generateDesiredHTTPRoutes(ingress *networkingv1.Ingress, ga
 					{
 						BackendRef: gatewayv1.BackendRef{
 							BackendObjectReference: gatewayv1.BackendObjectReference{
-								Name: gatewayv1.ObjectName(ingress.Spec.DefaultBackend.Service.Name),
-								Kind: ptr.To(gatewayv1.Kind("Service")),
-								Port: &portPtr,
+								Name:  gatewayv1.ObjectName(ingress.Spec.DefaultBackend.Service.Name),
+								Kind:  ptr.To(gatewayv1.Kind("Service")),
+								Group: ptr.To(gatewayv1.Group("")),
+								Port:  &portPtr,
 							},
+							Weight: ptr.To(int32(1)),
 						},
 					},
 				},
