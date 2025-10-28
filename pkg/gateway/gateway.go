@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -420,6 +421,15 @@ func getSupportedKinds(listener gatewayv1.Listener) ([]gatewayv1.RouteGroupKind,
 
 	return supportedKinds, allKindsValid
 }
+
+var semanticIgnoreLastTransitionTime = conversion.EqualitiesOrDie(
+	func(a, b metav1.Condition) bool {
+		a.LastTransitionTime = metav1.Time{}
+		b.LastTransitionTime = metav1.Time{}
+		return a == b
+	},
+)
+
 func (c *Controller) updateRouteStatuses(
 	ctx context.Context,
 	httpRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus,
@@ -444,7 +454,7 @@ func (c *Controller) updateRouteStatuses(
 			routeToUpdate.Status.Parents = desiredParentStatuses
 
 			// Only make an API call if the status has actually changed.
-			if !reflect.DeepEqual(originalRoute.Status, routeToUpdate.Status) {
+			if !semanticIgnoreLastTransitionTime.DeepEqual(originalRoute.Status, routeToUpdate.Status) {
 				_, updateErr := c.gwClient.GatewayV1().HTTPRoutes(routeToUpdate.Namespace).UpdateStatus(ctx, routeToUpdate, metav1.UpdateOptions{})
 				return updateErr
 			}
