@@ -39,6 +39,7 @@ import (
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -127,9 +128,12 @@ type Controller struct {
 	xdsVersion      atomic.Uint64
 
 	tunnelManager *tunnels.TunnelManager
+
+	logger logr.Logger
 }
 
 func New(
+	ctx context.Context,
 	clusterName string,
 	client *kubernetes.Clientset,
 	gwClient *gatewayclient.Clientset,
@@ -166,7 +170,9 @@ func New(
 		grpcrouteListerSynced:      grpcrouteInformer.Informer().HasSynced,
 		referenceGrantLister:       referenceGrantInformer.Lister(),
 		referenceGrantListerSynced: referenceGrantInformer.Informer().HasSynced,
+		logger:                     klog.FromContext(ctx).WithValues("controller", "gateway"),
 	}
+
 	_, err := gatewayClassInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -299,7 +305,7 @@ func New(
 	}
 
 	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel {
-		c.tunnelManager = tunnels.NewTunnelManager()
+		c.tunnelManager = tunnels.NewTunnelManager(ctx)
 	}
 
 	return c, nil
@@ -308,7 +314,7 @@ func New(
 func (c *Controller) Init(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
 
-	klog.Info("Waiting for gateway informer caches to sync")
+	c.logger.Info("Waiting for gateway informer caches to sync")
 	if !cache.WaitForNamedCacheSync(controllerName, ctx.Done(),
 		c.gatewayClassListerSynced,
 		c.gatewayListerSynced,
@@ -362,16 +368,17 @@ func (c *Controller) Init(ctx context.Context) error {
 }
 
 func (c *Controller) syncGatewayClass(key string) {
+	l := c.logger.WithValues("gatewayClass", key)
 	startTime := time.Now()
-	klog.V(2).Infof("Started syncing gatewayclass %q (%v)", key, time.Since(startTime))
+	l.V(2).Info("Started syncing gatewayclass")
 	defer func() {
-		klog.V(2).Infof("Finished syncing gatewayclass %q (%v)", key, time.Since(startTime))
+		l.V(2).Info("Finished syncing gatewayclass", "duration", time.Since(startTime))
 	}()
 
 	gwc, err := c.gatewayClassLister.Get(key)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			klog.V(2).Infof("GatewayClass %q has been deleted", key)
+			l.V(2).Info("GatewayClass has been deleted")
 		}
 		return
 	}
@@ -393,16 +400,18 @@ func (c *Controller) syncGatewayClass(key string) {
 
 	// Update the status on the API server.
 	if _, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(context.Background(), newGwc, metav1.UpdateOptions{}); err != nil {
-		klog.Errorf("failed to update gatewayclass status: %v", err)
+		l.Error(err, "Failed to update gatewayclass status")
 	}
 }
 
 func (c *Controller) Run(ctx context.Context) error {
 	defer runtime.HandleCrashWithContext(ctx)
 
-	klog.Info("Starting Envoy proxy controller")
+	c.logger.Info("Starting Envoy proxy controller")
 	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
-	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{})
+	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{
+		logger: c.logger,
+	})
 
 	var grpcOptions []grpc.ServerOption
 	grpcOptions = append(grpcOptions,
@@ -445,22 +454,25 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.xdsLocalAddress = address
 	c.xdsLocalPort = tcpAddr.Port
 	go func() {
-		klog.Infof("XDS management server listening on %s %d\n", c.xdsLocalAddress, c.xdsLocalPort)
+		c.logger.Info(
+			"XDS management server listening",
+			"address", c.xdsLocalAddress,
+			"port", c.xdsLocalPort)
 		if err = grpcServer.Serve(listener); err != nil {
-			klog.Errorln("gRPC server error:", err)
+			c.logger.Error(err, "gRPC server error")
 		}
 		grpcServer.Stop()
 	}()
 
 	defer c.gatewayqueue.ShutDown()
-	klog.Info("Starting Gateway API controller")
+	c.logger.Info("Starting Gateway API controller")
 
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runGatewayWorker, time.Second)
 	}
 
 	<-ctx.Done()
-	klog.Info("Stopping Gateway API controller")
+	c.logger.Info("Stopping Gateway API controller")
 	return nil
 }
 
@@ -493,12 +505,12 @@ func (c *Controller) processReferenceGrant(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			klog.Errorf("error decoding object, invalid type")
+			c.logger.Info("Error decoding object, invalid type")
 			return
 		}
 		grant, ok = tombstone.Obj.(*gatewayv1beta1.ReferenceGrant)
 		if !ok {
-			klog.Errorf("error decoding object tombstone, invalid type")
+			c.logger.Info("Error decoding object tombstone, invalid type")
 			return
 		}
 	}
@@ -529,7 +541,7 @@ func (c *Controller) processReferenceGrant(obj interface{}) {
 		// Find all routes in the "From" namespace that could be affected.
 		httpRoutes, err := c.httprouteLister.HTTPRoutes(string(from.Namespace)).List(labels.Everything())
 		if err != nil {
-			klog.Errorf("Failed to list HTTPRoutes in namespace %s: %v", from.Namespace, err)
+			c.logger.Error(err, "Failed to list HTTPRoutes in namespace", "namespace", from.Namespace)
 			continue
 		}
 
@@ -574,7 +586,7 @@ func (c *Controller) processReferenceGrant(obj interface{}) {
 		// Find all Gateways in the "From" namespace that could be affected.
 		gateways, err := c.gatewayLister.Gateways(string(from.Namespace)).List(labels.Everything())
 		if err != nil {
-			klog.Errorf("Failed to list Gateways in namespace %s: %v", from.Namespace, err)
+			c.logger.Error(err, "Failed to list Gateways in namespace", "namespace", from.Namespace)
 			continue
 		}
 
@@ -658,14 +670,14 @@ func (c *Controller) handleGatewayErr(err error, key string) {
 	}
 
 	if c.gatewayqueue.NumRequeues(key) < maxRetries {
-		klog.Infof("Error syncing Gateway %v: %v", key, err)
+		c.logger.Error(err, "Error syncing Gateway", "gateway", key)
 		c.gatewayqueue.AddRateLimited(key)
 		return
 	}
 
 	c.gatewayqueue.Forget(key)
 	runtime.HandleError(err)
-	klog.Infof("Dropping Gateway %q out of the queue: %v", key, err)
+	c.logger.Error(err, "Dropping Gateway out of the queue", "gateway", key)
 }
 
 func GetControlPlaneAddress() (string, error) {
@@ -728,16 +740,18 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 	if err := c.xdscache.SetSnapshot(ctx, nodeid, snapshot); err != nil {
 		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
 	}
-	klog.V(4).Infof("Updated snapshot cache with resource snapshot...")
+	c.logger.Info("Updated snapshot cache with resource snapshot...")
 	return nil
 }
 
 var _ serverv3.Callbacks = &xdsCallbacks{}
 
-type xdsCallbacks struct{}
+type xdsCallbacks struct {
+	logger logr.Logger
+}
 
 func (cb *xdsCallbacks) OnStreamOpen(ctx context.Context, id int64, typ string) error {
-	klog.V(2).Infof("xDS stream %d opened for type %s", id, typ)
+	cb.logger.V(2).Info("xDS stream opened", "streamID", id, "type", typ)
 	return nil
 }
 func (cb *xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
@@ -745,21 +759,35 @@ func (cb *xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
 	if node != nil {
 		nodeID = node.GetId()
 	}
-	klog.V(2).Infof("xDS stream %d closed for node %s", id, nodeID)
+	cb.logger.V(2).Info("xDS stream closed", "streamID", id, "node", nodeID)
 }
 func (cb *xdsCallbacks) OnStreamRequest(id int64, req *discoveryv3.DiscoveryRequest) error {
-	klog.V(5).Infof("xDS stream %d received request for type %s from node %s", id, req.TypeUrl, req.Node.GetId())
+	cb.logger.V(5).Info(
+		"xDS stream received request",
+		"stream", id,
+		"type", req.TypeUrl,
+		"node", req.Node.GetId())
 	return nil
 }
 func (cb *xdsCallbacks) OnStreamResponse(ctx context.Context, id int64, req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
-	klog.V(5).Infof("xDS stream %d sent response for type %s to node %s", id, resp.TypeUrl, req.Node.GetId())
+	cb.logger.V(5).Info(
+		"xDS stream sent response",
+		"stream", id,
+		"type", req.TypeUrl,
+		"node", req.Node.GetId())
 }
 func (cb *xdsCallbacks) OnFetchRequest(ctx context.Context, req *discoveryv3.DiscoveryRequest) error {
-	klog.V(5).Infof("xDS fetch request received for type %s from node %s", req.TypeUrl, req.Node.GetId())
+	cb.logger.V(5).Info(
+		"xDS fetch request received",
+		"type", req.TypeUrl,
+		"node", req.Node.GetId())
 	return nil
 }
 func (cb *xdsCallbacks) OnFetchResponse(req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
-	klog.V(5).Infof("xDS fetch response sent for type %s to node %s", resp.TypeUrl, req.Node.GetId())
+	cb.logger.V(5).Info(
+		"xDS fetch response sent",
+		"type", req.TypeUrl,
+		"node", req.Node.GetId())
 }
 func (cb *xdsCallbacks) OnStreamDeltaRequest(id int64, req *discoveryv3.DeltaDiscoveryRequest) error {
 	return nil

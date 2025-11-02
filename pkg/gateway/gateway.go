@@ -45,9 +45,10 @@ var (
 )
 
 func (c *Controller) syncGateway(ctx context.Context, key string) error {
+	logger := klog.FromContext(ctx).WithValues("gateway", key)
 	startTime := time.Now()
 	defer func() {
-		klog.V(2).Infof("Finished syncing gateway %q (%v)", key, time.Since(startTime))
+		logger.V(2).Info("Finished syncing gateway", "duration", time.Since(startTime))
 	}()
 
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -57,7 +58,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 
 	gw, err := c.gatewayLister.Gateways(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
-		klog.V(2).Infof("Gateway %s has been deleted, cleaning up resources", key)
+		logger.V(2).Info("Gateway has been deleted, cleaning up resources")
 		return c.deleteGatewayResources(ctx, name, namespace)
 	}
 	if err != nil {
@@ -65,12 +66,12 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	}
 
 	if gw.Spec.GatewayClassName != GWClassName {
-		klog.V(2).Infof("Gateway %s is not for this controller, ignoring", key)
+		logger.V(2).Info("Gateway is not for this controller, ignoring")
 		return nil
 	}
 
 	containerName := gatewayName(c.clusterName, namespace, name)
-	klog.Infof("Syncing Gateway %s, container %s", key, containerName)
+	logger.Info("Syncing Gateway", "container", containerName)
 
 	err = c.ensureGatewayContainer(ctx, gw)
 	if err != nil {
@@ -113,7 +114,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	if c.tunnelManager != nil {
 		err := c.tunnelManager.SetupTunnels(containerName)
 		if err != nil {
-			klog.Errorf("failed to set up tunnels for gateway %s: %v", key, err)
+			logger.Error(err, "Failed to set up tunnels for gateway")
 		}
 	}
 
@@ -123,7 +124,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
 		_, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
 		if err != nil {
-			klog.Errorf("Failed to update gateway status: %v", err)
+			logger.Error(err, "Failed to update gateway status")
 			return err
 		}
 	}
@@ -137,7 +138,6 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	map[types.NamespacedName][]gatewayv1.RouteParentStatus, // HTTPRoutes
 	map[types.NamespacedName][]gatewayv1.RouteParentStatus, // GRPCRoutes
 ) {
-
 	httpRouteStatuses := make(map[types.NamespacedName][]gatewayv1.RouteParentStatus)
 	grpcRouteStatuses := make(map[types.NamespacedName][]gatewayv1.RouteParentStatus)
 	routesByListener := make(map[gatewayv1.SectionName][]*gatewayv1.HTTPRoute)
@@ -249,7 +249,8 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// Process HTTPRoutes
 				// Get the routes that were pre-validated for this specific listener.
 				for _, httpRoute := range routesByListener[listener.Name] {
-					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
+					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(
+						c.logger, httpRoute, c.serviceLister, c.referenceGrantLister)
 
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
 					currentParentStatuses := httpRouteStatuses[key]
@@ -286,11 +287,17 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 								virtualHostsForPort[domain] = vh
 							}
 							vh.Routes = append(vh.Routes, routes...)
-							klog.V(4).Infof("created VirtualHost %s for listener %s with domain %s", vh.Name, listener.
-								Name, domain)
-							if klog.V(4).Enabled() {
+							c.logger.V(4).Info(
+								"Created VirtualHost",
+								"virtualHost", vh.Name,
+								"listener", listener.Name,
+								"domain", domain)
+							if c.logger.V(4).Enabled() {
 								for _, route := range routes {
-									klog.Infof("adding route %s to VirtualHost %s", route.Name, vh.Name)
+									c.logger.Info(
+										"Adding route to VirtualHost",
+										"route", route.Name,
+										"virtualHost", vh.Name)
 								}
 							}
 						}
@@ -300,7 +307,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// TODO: Process GRPCRoutes
 
 			default:
-				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
+				c.logger.Info("Unsupported listener protocol for route processing", "protocol", listener.Protocol)
 			}
 
 			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
@@ -478,7 +485,7 @@ func (c *Controller) getHTTPRoutesForGateway(gw *gatewayv1.Gateway) []*gatewayv1
 	var matchingRoutes []*gatewayv1.HTTPRoute
 	allRoutes, err := c.httprouteLister.List(labels.Everything())
 	if err != nil {
-		klog.Errorf("failed to list HTTPRoutes: %v", err)
+		c.logger.Error(err, "Failed to list HTTPRoutes")
 		return matchingRoutes
 	}
 
@@ -549,7 +556,7 @@ func (c *Controller) validateHTTPRoute(
 
 			if sectionNameMatches && portMatches {
 				// The listener matches the ref. Now check if the listener's policy (e.g., hostname) allows it.
-				if !isAllowedByListener(gateway, listener, httpRoute, c.namespaceLister) {
+				if !isAllowedByListener(c.logger, gateway, listener, httpRoute, c.namespaceLister) {
 					rejectionReason = gatewayv1.RouteReasonNotAllowedByListeners
 					continue
 				}
@@ -684,7 +691,8 @@ func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backe
 }
 
 func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace string) error {
-	klog.Infof("Deleting resources for Gateway: %s/%s", namespace, name)
+	l := c.logger.WithValues("gateway", klog.KRef(namespace, name))
+	l.Info("Deleting resources for Gateway")
 	containerName := gatewayName(c.clusterName, namespace, name)
 
 	c.xdsVersion.Add(1)
@@ -706,7 +714,7 @@ func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace
 	if c.tunnelManager != nil {
 		err := c.tunnelManager.RemoveTunnels(containerName)
 		if err != nil {
-			klog.Errorf("failed to remove tunnels for deleted gateway %s: %v", name, err)
+			l.Error(err, "Failed to remove tunnels for deleted gateway")
 		}
 	}
 
@@ -714,7 +722,7 @@ func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace
 		return fmt.Errorf("failed to delete container for gateway %s: %v", name, err)
 	}
 
-	klog.Infof("Successfully cleared resources for deleted Gateway: %s", name)
+	l.Info("Successfully cleared resources for deleted Gateway")
 	return nil
 }
 

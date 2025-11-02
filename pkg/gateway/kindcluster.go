@@ -93,17 +93,18 @@ func (c *Controller) getClusterRoutingMap(ctx context.Context) (map[string]strin
 	}
 
 	for _, serviceCIDR := range serviceCIDRs {
+		l := c.logger.WithValues("serviceCIDR", serviceCIDR)
 		prefix, err := netip.ParsePrefix(serviceCIDR)
 		if err != nil {
-			klog.Warningf("Invalid ServiceCIDR '%s', skipping.", serviceCIDR)
+			l.Info("Invalid ServiceCIDR, skipping")
 			continue
 		}
 		// Match the service CIDR family to the control-plane IP family
 		if gatewayIP, found := controlPlaneIPs[prefix.Addr().Is6()]; found {
-			klog.Infof("Found route for services: ServiceCIDR %s -> Gateway %s", serviceCIDR, gatewayIP)
+			l.Info("Found route for services", "gatewayIP", gatewayIP)
 			routeMap[serviceCIDR] = gatewayIP
 		} else {
-			klog.Warningf("No matching control-plane IP found for ServiceCIDR family '%s'", serviceCIDR)
+			l.Info("No matching control-plane IP found for ServiceCIDR family")
 		}
 	}
 
@@ -134,6 +135,7 @@ func (c *Controller) getServiceCIDRs(ctx context.Context) ([]string, error) {
 }
 
 func (c *Controller) configureContainerNetworking(ctx context.Context, containerName string) error {
+	l := c.logger.WithValues("container", containerName)
 	binaryData, err := getRouteAdderBinaryForArch()
 	if err != nil {
 		return err
@@ -146,11 +148,11 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 	setupCmd := []string{"sh", "-c", fmt.Sprintf("cat > %s && chmod +x %s", containerBinaryPath, containerBinaryPath)}
 	stdinReader := bytes.NewReader(binaryData)
 
-	klog.Infof("Streaming and setting up route-adder utility in %s", containerName)
+	l.Info("Streaming and setting up route-adder utility")
 	if err := container.Exec(containerName, setupCmd, stdinReader, nil, nil); err != nil {
 		return fmt.Errorf("failed to setup route-adder binary in container %s: %w", containerName, err)
 	}
-	klog.Infof("Successfully installed route-adder utility in container %s", containerName)
+	l.Info("Successfully installed route-adder utility")
 	routeMap, err := c.getClusterRoutingMap(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get kubernetes cluster routing information: %w", err)
@@ -161,7 +163,7 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 	var stdout, stderr bytes.Buffer
 	for cidr, gatewayIP := range routeMap {
 		cmd := []string{containerBinaryPath, cidr, gatewayIP}
-		klog.Infof("Adding route to container %s: %s", containerName, strings.Join(cmd, " "))
+		l.Info("Adding route to container", "routes", strings.Join(cmd, " "))
 
 		stdout.Reset()
 		stderr.Reset()
@@ -176,7 +178,7 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 		return fmt.Errorf("no valid cluster routes were found to configure")
 	}
 
-	klog.Infof("Successfully added %d pod and service routes to container %s", routesAdded, containerName)
+	l.Info("Successfully added service routes to container", "routes", routesAdded)
 	return nil
 }
 
@@ -184,9 +186,10 @@ func (c *Controller) ensureGatewayContainer(ctx context.Context, gw *gatewayv1.G
 	namespace := gw.Namespace
 	name := gw.Name
 	containerName := gatewayName(c.clusterName, namespace, name)
+	l := c.logger.WithValues("container", containerName)
 
 	if !container.IsRunning(containerName) {
-		klog.Infof("container %s for gateway %s/%s is not running", containerName, namespace, name)
+		l.Info("container gateway is not running", "gateway", klog.KRef(namespace, name))
 		if container.Exist(containerName) {
 			if err := container.Delete(containerName); err != nil {
 				return err
@@ -194,9 +197,9 @@ func (c *Controller) ensureGatewayContainer(ctx context.Context, gw *gatewayv1.G
 		}
 	}
 	if !container.Exist(containerName) {
-		klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
+		l.V(2).Info("creating container for gateway", "gateway", klog.KRef(namespace, name), "cluster", c.clusterName)
 		enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
-		err := createGateway(c.clusterName, c.clusterNameserver, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
+		err := createGateway(l, c.clusterName, c.clusterNameserver, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
 		if err != nil {
 			return err
 		}
@@ -206,7 +209,7 @@ func (c *Controller) ensureGatewayContainer(ctx context.Context, gw *gatewayv1.G
 
 		if err := c.configureContainerNetworking(ctx, containerName); err != nil {
 			if delErr := container.Delete(containerName); delErr != nil {
-				klog.Errorf("failed to delete container %s after networking setup failed: %v", containerName, delErr)
+				l.Error(err, "Failed to delete container after networking setup failed")
 			}
 			return fmt.Errorf("failed to configure networking for new gateway container %s: %w", containerName, err)
 		}

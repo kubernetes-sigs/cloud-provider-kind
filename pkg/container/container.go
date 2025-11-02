@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"k8s.io/klog/v2"
+	"github.com/go-logr/logr"
 	kindexec "sigs.k8s.io/kind/pkg/exec"
 )
 
@@ -179,7 +179,7 @@ func IPs(name string) (ipv4 string, ipv6 string, err error) {
 }
 
 // return a list with the map of the internal port to the external port
-func PortMaps(name string) (map[string]string, error) {
+func PortMaps(l logr.Logger, name string) (map[string]string, error) {
 	// retrieve the IP address of the node using docker inspect
 	cmd := kindexec.Command(containerRuntime, "inspect",
 		"-f", "{{ json .NetworkSettings.Ports }}",
@@ -213,7 +213,7 @@ func PortMaps(name string) (map[string]string, error) {
 			protocol = strings.ToLower(parts[1])
 		}
 		if protocol != "tcp" && protocol != "udp" {
-			klog.Infof("skipping protocol %s not supported, only UDP and TCP", protocol)
+			l.Info("Skipping unsupportewd protocol, only UDP and TCP", "protocol", protocol)
 			continue
 		}
 

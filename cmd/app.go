@@ -7,10 +7,10 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/go-logr/logr"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
 
@@ -22,7 +22,6 @@ import (
 )
 
 var (
-	flagV                int
 	enableLogDump        bool
 	logDumpDir           string
 	enableLBPortMapping  bool
@@ -35,7 +34,8 @@ func init() {
 		{"list-images", "list images used by cloud-provider-kind"},
 	}
 
-	flag.IntVar(&flagV, "v", 2, "Verbosity level")
+	klog.InitFlags(flag.CommandLine)
+	_ = flag.Set("v", "2")
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
@@ -103,18 +103,21 @@ func Main() {
 	}()
 
 	// initialize loggers, kind logger and klog
-	logger := kindcmd.NewLogger()
+	logger := klog.NewKlogr()
+	ctx = logr.NewContext(ctx, logger)
+
+	kindLogger := kindcmd.NewLogger()
 	type verboser interface {
 		SetVerbosity(int)
 	}
-	v, ok := logger.(verboser)
+	v, ok := kindLogger.(verboser)
 	if ok {
-		v.SetVerbosity(flagV)
+		v.SetVerbosity(logger.GetV())
 	}
 
-	_, err := logs.GlogSetter(strconv.Itoa(flagV))
+	_, err := logs.GlogSetter(fmt.Sprintf("%d", logger.GetV()))
 	if err != nil {
-		logger.Errorf("error setting klog verbosity to %d : %v", flagV, err)
+		logger.Error(err, "Error setting klog verbosity")
 	}
 
 	config.DefaultConfig.IngressDefault = enableDefaultIngress
@@ -136,12 +139,13 @@ func Main() {
 
 		if _, err := os.Stat(logDumpDir); os.IsNotExist(err) {
 			if err := os.MkdirAll(logDumpDir, 0755); err != nil {
-				klog.Fatalf("directory %s does not exist: %v", logDumpDir, err)
+				logger.Error(err, "Directory does not exist", "path", logDumpDir)
+				klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 			}
 		}
 		config.DefaultConfig.EnableLogDump = true
 		config.DefaultConfig.LogDir = logDumpDir
-		klog.Infof("**** Dumping load balancers logs to: %s", logDumpDir)
+		logger.Info("**** Dumping load balancers", "path", logDumpDir)
 	}
 
 	// some platforms require to enable tunneling for the LoadBalancers
@@ -162,11 +166,12 @@ func Main() {
 	// initialize kind provider
 	option, err := cluster.DetectNodeProvider()
 	if err != nil {
-		klog.Fatalf("can not detect cluster provider: %v", err)
+		logger.Error(err, "Unable to detect cluster provider")
+		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 	kindProvider := cluster.NewProvider(
 		option,
-		cluster.ProviderWithLogger(logger),
+		cluster.ProviderWithLogger(kindLogger),
 	)
 	controller.New(kindProvider).Run(ctx)
 }

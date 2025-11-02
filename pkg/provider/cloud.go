@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"context"
+
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 
@@ -9,11 +11,11 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster"
 )
 
-func New(clusterName string, kindClient *cluster.Provider) cloudprovider.Interface {
+func New(ctx context.Context, clusterName string, kindClient *cluster.Provider) cloudprovider.Interface {
 	return &cloud{
 		clusterName:  clusterName,
 		kindClient:   kindClient,
-		lbController: loadbalancer.NewServer(),
+		lbController: loadbalancer.NewServer(ctx),
 	}
 }
 

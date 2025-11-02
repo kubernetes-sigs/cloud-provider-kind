@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -277,7 +278,7 @@ func TestIsCrossNamespaceRefAllowed(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			lister := newFakeReferenceGrantLister(tc.grants, tc.listerError)
-			result := isCrossNamespaceRefAllowed(tc.from, tc.to, tc.toNamespace, lister)
+			result := isCrossNamespaceRefAllowed(logr.Discard(), tc.from, tc.to, tc.toNamespace, lister)
 			if result != tc.expected {
 				t.Errorf("expected %v, but got %v", tc.expected, result)
 			}

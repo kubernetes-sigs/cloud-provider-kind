@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -67,10 +68,13 @@ type Controller struct {
 
 	isDefaultClass atomic.Bool
 	workqueue      workqueue.TypedRateLimitingInterface[string]
+
+	logger logr.Logger
 }
 
 // NewController returns a new ingress controller
 func NewController(
+	ctx context.Context,
 	clientset kubernetes.Interface,
 	gwClientset gatewayclient.Interface,
 	gatewayClassName string, // Class for managed Gateways
@@ -81,7 +85,7 @@ func NewController(
 	httpRouteInformer gatewayinformers.HTTPRouteInformer, // Add HTTPRoute informer
 	gatewayInformer gatewayinformers.GatewayInformer, // Add Gateway informer
 ) (*Controller, error) {
-
+	logger := klog.FromContext(ctx).WithValues("controller", "ingress")
 	controller := &Controller{
 		clientset:        clientset,
 		gwClientset:      gwClientset,
@@ -102,9 +106,10 @@ func NewController(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "ingress"},
 		),
+		logger: logger,
 	}
 
-	klog.Info("Setting up event handlers for Ingress controller")
+	logger.Info("Setting up event handlers for Ingress controller")
 	// Watch Ingresses
 	_, err := ingressInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueIngress,
@@ -173,8 +178,10 @@ func NewController(
 }
 
 func (c *Controller) Init(ctx context.Context) error {
+	l := c.logger.WithValues("ingressClass", IngressClassName)
+
 	// Wait for the caches to be synced before starting workers
-	klog.Info("Waiting for informer caches to sync")
+	l.Info("Waiting for informer caches to sync")
 	if !cache.WaitForCacheSync(ctx.Done(),
 		c.ingressSynced,
 		c.classSynced,
@@ -188,14 +195,14 @@ func (c *Controller) Init(ctx context.Context) error {
 
 	_, err := c.classLister.Get(IngressClassName)
 	if err == nil {
-		klog.Infof("IngressClass '%s' already exists", IngressClassName)
+		l.Info("IngressClass already exists")
 		return nil
 	}
 	if !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to get IngressClass '%s': %v", IngressClassName, err)
 	}
 
-	klog.Infof("IngressClass '%s' not found, creating...", IngressClassName)
+	l.Info("IngressClass not found, creating...")
 	ingressClass := &networkingv1.IngressClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: IngressClassName,
@@ -219,16 +226,16 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 	defer runtime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	klog.Info("Starting Ingress controller")
+	c.logger.Info("Starting Ingress controller")
 
-	klog.Info("Starting workers")
+	c.logger.Info("Starting workers")
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
 	}
 
-	klog.Info("Started workers")
+	c.logger.Info("Started workers")
 	<-ctx.Done()
-	klog.Info("Shutting down workers")
+	c.logger.Info("Shutting down workers")
 }
 
 func (c *Controller) runWorker(ctx context.Context) {
@@ -277,7 +284,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 			// Kubernetes Garbage Collection will delete child HTTPRoutes due to OwnerReference.
 			// We only need to reconcile the Gateway in case this Ingress
 			// was the last one providing a particular TLS secret.
-			klog.V(4).Infof("Ingress %s/%s deleted. Reconciling Gateway.", namespace, name)
+			c.logger.V(4).Info("Ingress deleted, reconciling Gateway", "ingress", klog.KRef(namespace, name))
 			if _, err := c.reconcileNamespaceGateway(ctx, namespace); err != nil {
 				// We still return an error to requeue, as Gateway reconciliation
 				// might fail temporarily (e.g., API server issues).
@@ -290,7 +297,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	// Check if this Ingress is for us
 	if !c.isIngressForUs(ingress) {
-		klog.V(4).Infof("Skipping Ingress %s/%s: not for this controller", namespace, name)
+		c.logger.V(4).Info("Skipping Ingress not for this controller", "ingress", klog.KRef(namespace, name))
 		// TODO: If we *used* to own it, we should delete the HTTPRoutes
 		// and reconcile the Gateway. For now, we assume GC handles routes.
 		return nil
@@ -304,7 +311,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// === 2. Reconcile HTTPRoutes (1-to-Many) ===
-	klog.V(4).Infof("Reconciling HTTPRoutes for Ingress %s/%s", namespace, name)
+	c.logger.V(4).Info("Reconciling HTTPRoutes for Ingress", "ingress", klog.KRef(namespace, name))
 
 	// Generate the desired state
 	desiredRoutes, err := c.generateDesiredHTTPRoutes(ingress, gateway.Name, gateway.Namespace)
@@ -327,26 +334,27 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	// Reconcile: Create/Update
 	for routeName, desiredRoute := range desiredRoutes {
+		l := c.logger.WithValues("route", klog.KObj(desiredRoute))
 		existingRoute, exists := existingRoutes[routeName]
 		if !exists {
 			// Create
-			klog.V(2).Infof("Creating HTTPRoute %s/%s", desiredRoute.Namespace, desiredRoute.Name)
+			l.V(2).Info("Creating HTTPRoute")
 			_, createErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Create(ctx, desiredRoute, metav1.CreateOptions{})
 			if createErr != nil {
-				klog.Errorf("Failed to create HTTPRoute %s/%s: %v", desiredRoute.Namespace, desiredRoute.Name, createErr)
+				l.Error(createErr, "Failed to create HTTPRoute")
 				return fmt.Errorf("failed to create HTTPRoute: %w", createErr)
 			}
 		} else if !reflect.DeepEqual(existingRoute.Spec, desiredRoute.Spec) ||
 			!reflect.DeepEqual(existingRoute.OwnerReferences, desiredRoute.OwnerReferences) {
 
-			klog.V(2).Infof("Updating HTTPRoute %s/%s", desiredRoute.Namespace, desiredRoute.Name)
+			l.V(2).Info("Updating HTTPRoute")
 			routeCopy := existingRoute.DeepCopy()
 			routeCopy.Spec = desiredRoute.Spec
 			routeCopy.OwnerReferences = desiredRoute.OwnerReferences
 
 			_, updateErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Update(ctx, routeCopy, metav1.UpdateOptions{})
 			if updateErr != nil {
-				klog.Errorf("Failed to update HTTPRoute %s/%s: %v", desiredRoute.Namespace, desiredRoute.Name, updateErr)
+				l.Error(updateErr, "Failed to update HTTPRoute")
 				return fmt.Errorf("failed to update HTTPRoute: %w", updateErr)
 			}
 		}
@@ -356,10 +364,11 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	// Reconcile: Delete (stale routes)
 	for routeName, routeToDelete := range existingRoutes {
-		klog.V(2).Infof("Deleting stale HTTPRoute %s/%s", routeToDelete.Namespace, routeName)
+		l := c.logger.WithValues("route", klog.KObj(routeToDelete))
+		l.V(2).Info("Deleting stale HTTPRoute")
 		deleteErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Delete(ctx, routeName, metav1.DeleteOptions{})
 		if deleteErr != nil && !errors.IsNotFound(deleteErr) {
-			klog.Errorf("Failed to delete stale HTTPRoute %s/%s: %v", routeToDelete.Namespace, routeName, deleteErr)
+			l.Error(deleteErr, "Failed to delete stale HTTPRoute")
 			return fmt.Errorf("failed to delete stale HTTPRoute: %w", deleteErr)
 		}
 	}
@@ -449,7 +458,10 @@ func (c *Controller) reconcileNamespaceGateway(ctx context.Context, namespace st
 		}
 
 		// Not found, create it
-		klog.V(2).Infof("Creating Gateway %s/%s for class %s", namespace, GatewayName, c.gatewayClassName)
+		c.logger.V(2).Info(
+			"Creating Gateway for class",
+			"gateway", klog.KRef(namespace, GatewayName),
+			"class", c.gatewayClassName)
 		newGw := &gatewayv1.Gateway{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      GatewayName,
@@ -465,7 +477,9 @@ func (c *Controller) reconcileNamespaceGateway(ctx context.Context, namespace st
 
 	// 5. Gateway exists, check if update is needed
 	if !reflect.DeepEqual(gw.Spec.Listeners, desiredListeners) {
-		klog.V(2).Infof("Updating Gateway %s/%s with new listener configuration", namespace, GatewayName)
+		c.logger.V(2).Info(
+			"Updating Gateway with new listener configuration",
+			"gateway", klog.KRef(namespace, GatewayName))
 		// This avoids conflicts with the gateway-controller updating status.
 		patch := map[string]interface{}{
 			"spec": map[string]interface{}{
@@ -774,7 +788,7 @@ func (c *Controller) updateIngressStatus(ctx context.Context, ingress *networkin
 
 	// Check if status is already up-to-date
 	if reflect.DeepEqual(latestIngress.Status.LoadBalancer, *lbStatus) {
-		klog.V(4).Infof("Ingress %s/%s status already up to date.", ingress.Namespace, ingress.Name)
+		c.logger.V(4).Info("Ingress status already up to date", "ingress", klog.KRef(ingress.Namespace, ingress.Name))
 		return nil
 	}
 
@@ -785,7 +799,11 @@ func (c *Controller) updateIngressStatus(ctx context.Context, ingress *networkin
 	if err != nil {
 		return fmt.Errorf("failed to update ingress status: %w", err)
 	}
-	klog.V(2).Infof("Successfully updated status for Ingress %s/%s with IPs %v and Hostnames: %v", ingress.Namespace, ingress.Name, ips, hostnames)
+	c.logger.V(2).Info(
+		"Successfully updated status for Ingress",
+		"ingress", klog.KRef(ingress.Namespace, ingress.Name),
+		"IPs", ips,
+		"host", hostnames)
 	return nil
 }
 
@@ -798,7 +816,7 @@ func (c *Controller) enqueueIngress(obj interface{}) {
 		runtime.HandleError(err)
 		return
 	}
-	klog.V(4).Infof("Enqueuing Ingress %s", key)
+	c.logger.V(4).Info("Enqueuing Ingress", "ingress", key)
 	c.workqueue.Add(key)
 }
 
@@ -828,13 +846,14 @@ func (c *Controller) enqueueIngressFromRoute(obj interface{}) {
 	if ownerRef.APIVersion == networkingv1.SchemeGroupVersion.String() && ownerRef.Kind == "Ingress" {
 		// Enqueue the Ingress
 		key := route.Namespace + "/" + ownerRef.Name
-		klog.V(4).Infof("Enqueuing Ingress %s due to change in HTTPRoute %s", key, route.Name)
+		c.logger.V(4).Info("Enqueuing Ingress due to change in HTTPRoute", "ingress", key, "route", route.Name)
 		c.workqueue.Add(key)
 	}
 }
 
 // handleIngressClass checks if we are the default class
 func (c *Controller) handleIngressClass(obj interface{}) {
+	l := c.logger.WithValues("ingressClass", IngressClassName)
 	class, ok := obj.(*networkingv1.IngressClass)
 	if !ok {
 		return
@@ -850,19 +869,19 @@ func (c *Controller) handleIngressClass(obj interface{}) {
 		isDefault = true
 	}
 	if config.DefaultConfig.IngressDefault && !isDefault {
-		klog.Infof("'%s' is now the default IngressClass", IngressClassName)
+		l.Info("Set default IngressClass")
 		_, err := c.clientset.NetworkingV1().IngressClasses().Patch(context.TODO(), IngressClassName, types.MergePatchType, []byte(`{"metadata":{"annotations":{"`+networkingv1.AnnotationIsDefaultIngressClass+`":"true"}}}`), metav1.PatchOptions{})
 		if err != nil {
-			klog.Errorf("Failed to patch IngressClass %s: %v", IngressClassName, err)
+			l.Error(err, "Failed to patch IngressClass")
 		}
 		isDefault = true
 	}
 	if isDefault != c.isDefaultClass.Load() {
 		{
 			if isDefault {
-				klog.Infof("'%s' is now the default IngressClass", IngressClassName)
+				l.Info("Set default IngressClass")
 			} else {
-				klog.Infof("'%s' is no longer the default IngressClass", IngressClassName)
+				l.Info("No longer the default IngressClass")
 			}
 			c.isDefaultClass.Store(isDefault)
 			// Re-enqueue all Ingresses that might be affected by this change
@@ -895,11 +914,12 @@ func (c *Controller) handleObject(obj interface{}) {
 	// List all ingresses
 	ingresses, err := c.ingressLister.List(labels.Everything())
 	if err != nil {
-		klog.Errorf("Failed to list Ingresses: %v", err)
+		c.logger.Error(err, "Failed to list Ingresses")
 		return
 	}
 
 	for _, ingress := range ingresses {
+		l := c.logger.WithValues("ingress", klog.KObj(ingress))
 		if !c.isIngressForUs(ingress) {
 			continue
 		}
@@ -908,12 +928,12 @@ func (c *Controller) handleObject(obj interface{}) {
 		switch obj.(type) {
 		case *corev1.Service:
 			if c.ingressReferencesService(ingress, object.GetNamespace(), object.GetName()) {
-				klog.V(4).Infof("Enqueuing Ingress %s/%s due to change in Service %s/%s", ingress.Namespace, ingress.Name, object.GetNamespace(), object.GetName())
+				l.V(4).Info("Enqueuing Ingress due to change in Service", "service", klog.KObj(object))
 				c.enqueueIngress(ingress)
 			}
 		case *corev1.Secret:
 			if c.ingressReferencesSecret(ingress, object.GetNamespace(), object.GetName()) {
-				klog.V(4).Infof("Enqueuing Ingress %s/%s due to change in Secret %s/%s", ingress.Namespace, ingress.Name, object.GetNamespace(), object.GetName())
+				l.V(4).Info("Enqueuing Ingress due to change in Secret", "service", klog.KObj(object))
 				// When a secret changes, we must re-enqueue ALL ingresses in that namespace
 				// to re-calculate the Gateway's aggregated certificate list.
 				c.enqueueAllIngressesInNamespace(object.GetNamespace())
@@ -941,7 +961,7 @@ func (c *Controller) handleGateway(obj interface{}) {
 	// If this is one of our managed Gateways, re-enqueue all Ingresses in that namespace
 	// This is critical for updating Ingress status when the Gateway gets an IP
 	if gw.Name == GatewayName {
-		klog.V(4).Infof("Gateway %s/%s changed, re-enqueuing all Ingresses in namespace %s", gw.Namespace, gw.Name, gw.Namespace)
+		c.logger.V(4).Info("Gateway changed, re-enqueuing all Ingresses in namespace", "gateway", klog.KObj(gw), "namespace", gw.Namespace)
 		c.enqueueAllIngressesInNamespace(gw.Namespace)
 	}
 }
@@ -950,7 +970,7 @@ func (c *Controller) handleGateway(obj interface{}) {
 func (c *Controller) enqueueAllIngressesInNamespace(namespace string) {
 	ingresses, err := c.ingressLister.Ingresses(namespace).List(labels.Everything())
 	if err != nil {
-		klog.Errorf("Failed to list Ingresses in namespace %s: %v", namespace, err)
+		c.logger.Error(err, "Failed to list Ingresses in namespace", "namespace", namespace)
 		return
 	}
 	for _, ingress := range ingresses {
@@ -1003,10 +1023,10 @@ func (c *Controller) isIngressForUs(ingress *networkingv1.Ingress) bool {
 func (c *Controller) enqueueAllIngresses() {
 	ingresses, err := c.ingressLister.List(labels.Everything())
 	if err != nil {
-		klog.Errorf("Failed to list all Ingresses: %v", err)
+		c.logger.Error(err, "Failed to list all Ingresses")
 		return
 	}
-	klog.Info("Enqueuing all Ingresses due to IngressClass change")
+	c.logger.Info("Enqueuing all Ingresses due to IngressClass change")
 	for _, ingress := range ingresses {
 		c.enqueueIngress(ingress)
 	}

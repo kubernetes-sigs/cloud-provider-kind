@@ -10,7 +10,7 @@ import (
 	"strings"
 	"text/template"
 
-	"k8s.io/klog/v2"
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	"sigs.k8s.io/cloud-provider-kind/pkg/images"
@@ -128,7 +128,7 @@ func gatewaySimpleName(clusterName, namespace, name string) string {
 }
 
 // createGateway create a docker container with a gateway
-func createGateway(clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
+func createGateway(l logr.Logger, clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfigData := &configData{
@@ -214,7 +214,7 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 	cmd := []string{"bash", "-c", startupCmd.String()}
 	args = append(args, cmd...)
 
-	klog.V(2).Infof("creating gateway with parameters: %v", args)
+	l.V(2).Info("creating gateway with parameters", "args", args)
 	err = container.Create(name, args)
 	if err != nil {
 		return fmt.Errorf("failed to create containers %s %v: %w", name, args, err)

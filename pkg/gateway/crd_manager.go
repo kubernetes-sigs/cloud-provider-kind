@@ -53,6 +53,8 @@ func NewCRDManager(config *rest.Config) (*CRDManager, error) {
 
 // InstallCRDs reads CRDs from the embedded filesystem and applies them to the cluster.
 func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayReleaseChannel) error {
+	logger := klog.FromContext(ctx)
+
 	crdGVR := schema.GroupVersionResource{
 		Group:    crdGroup,
 		Version:  crdVersion,
@@ -61,7 +63,7 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayR
 
 	targetDir := filepath.Join(crdsDir, string(channelDir))
 
-	klog.Infof("Walking embedded directory for channel %q: %s", channelDir, targetDir)
+	logger.Info("Walking embedded directory for channel", "channel", channelDir, "targetDir", targetDir)
 	err := fs.WalkDir(crdFS, targetDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("error walking embedded fs at %q: %w", path, err)
@@ -71,20 +73,20 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayR
 		if d.IsDir() {
 			// Skip the root directory itself, only process files within it
 			if path == targetDir {
-				klog.V(4).Infof("Entering directory: %s", path)
+				logger.V(4).Info("Entering directory", "path", path)
 				return nil
 			}
-			klog.V(4).Infof("Skipping directory: %s", path)
+			logger.V(4).Info("Skipping directory", "path", path)
 			return nil // Continue walking
 		}
 
 		// Process only YAML files
 		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
-			klog.V(4).Infof("Skipping non-yaml file: %s", path)
+			logger.V(4).Info("Skipping non-yaml file", "path", path)
 			return nil
 		}
 
-		klog.Infof("Processing embedded CRD file: %s", path)
+		logger.Info("Processing embedded CRD file", "path", path)
 		file, err := crdFS.Open(path)
 		if err != nil {
 			return fmt.Errorf("failed to open embedded file %q: %w", path, err)
@@ -104,22 +106,25 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayR
 
 			// Basic validation
 			if obj.GetKind() != crdKind || obj.GetAPIVersion() != crdAPIVersion {
-				klog.Warningf("Skipping object in %q with unexpected kind/apiVersion: %s/%s", path, obj.GetAPIVersion(), obj.GetKind())
+				logger.Info(
+					"Skipping object in with unexpected kind/apiVersion",
+					"path", path,
+					"object", klog.KObj(obj))
 				continue
 			}
 
 			crdName := obj.GetName()
-			klog.Infof("Attempting to create CRD: %s", crdName)
+			logger.Info("Attempting to create CRD", "crdName", crdName)
 			_, createErr := m.dynamicClient.Resource(crdGVR).Create(ctx, obj, metav1.CreateOptions{})
 			if createErr != nil {
 				if errors.IsAlreadyExists(createErr) {
-					klog.Infof("CRD %q already exists, skipping creation.", crdName)
+					logger.Info("CRD already exists, skipping creation", "crdName", crdName)
 					// TODO: Consider updating/patching if needed, but for CRDs, create-if-not-exists is often sufficient.
 				} else {
 					return fmt.Errorf("failed to create CRD %q from file %q: %w", crdName, path, createErr)
 				}
 			} else {
-				klog.Infof("Successfully created CRD: %s", crdName)
+				logger.Info("Successfully created CRD", "crdName", crdName)
 			}
 		}
 		return nil
@@ -129,6 +134,6 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayR
 		return fmt.Errorf("error processing embedded CRDs from %s: %w", targetDir, err)
 	}
 
-	klog.Info("Finished processing embedded CRDs.")
+	logger.Info("Finished processing embedded CRDs.")
 	return nil
 }

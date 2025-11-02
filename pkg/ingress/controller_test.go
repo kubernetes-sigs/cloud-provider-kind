@@ -65,6 +65,7 @@ func newTestFixture(t *testing.T, kubeObjects []runtime.Object, gwObjects []runt
 
 	// Create controller
 	controller, err := NewController(
+		ctx,
 		kubeClient,
 		gwClient,
 		testGatewayClassName,
@@ -280,7 +281,7 @@ func TestSyncHandler_Create(t *testing.T) {
 		if err != nil {
 			return false, err
 		}
-		if ing.Status.LoadBalancer.Ingress != nil && len(ing.Status.LoadBalancer.Ingress) > 0 {
+		if len(ing.Status.LoadBalancer.Ingress) > 0 {
 			return ing.Status.LoadBalancer.Ingress[0].Hostname == "my-test-lb.com", nil
 		}
 		return false, nil

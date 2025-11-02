@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -296,7 +297,7 @@ func TestIsAllowedByListener(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isAllowedByListener(testGateway, tt.listener, tt.route, tt.namespaceList); got != tt.want {
+			if got := isAllowedByListener(logr.Discard(), testGateway, tt.listener, tt.route, tt.namespaceList); got != tt.want {
 				t.Errorf("isAllowedByListener() = %v, want %v", got, tt.want)
 			}
 		})

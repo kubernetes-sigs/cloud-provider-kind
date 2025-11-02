@@ -13,7 +13,9 @@ import (
 )
 
 func probeHTTP(ctx context.Context, address string) bool {
-	klog.Infof("probe HTTP address %s", address)
+	logger := klog.FromContext(ctx).WithValues("address", address)
+
+	logger.Info("Probing HTTP address")
 	httpClient := &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{
@@ -27,7 +29,7 @@ func probeHTTP(ctx context.Context, address string) bool {
 	req = req.WithContext(ctx)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		klog.Infof("Failed to connect to HTTP address %s: %v", address, err)
+		logger.Error(err, "Failed to connect to HTTP address")
 		return false
 	}
 	defer resp.Body.Close()

@@ -28,11 +28,11 @@ type Server struct {
 
 var _ cloudprovider.LoadBalancer = &Server{}
 
-func NewServer() cloudprovider.LoadBalancer {
+func NewServer(ctx context.Context) cloudprovider.LoadBalancer {
 	s := &Server{}
 
 	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel {
-		s.tunnelManager = tunnels.NewTunnelManager()
+		s.tunnelManager = tunnels.NewTunnelManager(ctx)
 	}
 	return s
 }
@@ -93,8 +93,10 @@ func (s *Server) GetLoadBalancerName(ctx context.Context, clusterName string, se
 
 func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
 	name := loadBalancerName(clusterName, service)
+	logger := klog.FromContext(ctx).WithValues("loadBalancer", name)
+
 	if !container.IsRunning(name) {
-		klog.Infof("container %s for loadbalancer is not running", name)
+		logger.Info("Container for loadbalancer is not running")
 		if container.Exist(name) {
 			err := container.Delete(name)
 			if err != nil {
@@ -103,15 +105,15 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 		}
 	}
 	if !container.Exist(name) {
-		klog.V(2).Infof("creating container for loadbalancer")
-		err := s.createLoadBalancer(clusterName, service, images.Images["proxy"])
+		logger.V(2).Info("Creating container for loadbalancer")
+		err := s.createLoadBalancer(ctx, clusterName, service, images.Images["proxy"])
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	// update loadbalancer
-	klog.V(2).Infof("updating loadbalancer")
+	logger.V(2).Info("Updating loadbalancer")
 	err := s.UpdateLoadBalancer(ctx, clusterName, service, nodes)
 	if err != nil {
 		return nil, err
@@ -119,15 +121,15 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 
 	// on some platforms that run containers in VMs forward from userspace
 	if s.tunnelManager != nil {
-		klog.V(2).Infof("updating loadbalancer tunnels on userspace")
+		logger.V(2).Info("Updating loadbalancer tunnels on userspace")
 		err = s.tunnelManager.SetupTunnels(loadBalancerName(clusterName, service))
 		if err != nil {
-			klog.ErrorS(err, "error setting up tunnels")
+			logger.Error(err, "Error setting up tunnels")
 		}
 	}
 
 	// get loadbalancer Status
-	klog.V(2).Infof("get loadbalancer status")
+	logger.V(2).Info("Get loadbalancer status")
 	status, ok, err := s.GetLoadBalancer(ctx, clusterName, service)
 	if !ok {
 		return nil, fmt.Errorf("loadbalancer %s not found", name)
@@ -144,6 +146,8 @@ func (s *Server) UpdateLoadBalancer(ctx context.Context, clusterName string, ser
 
 func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName string, service *v1.Service) error {
 	containerName := loadBalancerName(clusterName, service)
+	l := klog.FromContext(ctx).WithValues("containerName", containerName)
+
 	var err1, err2 error
 	if s.tunnelManager != nil {
 		err1 = s.tunnelManager.RemoveTunnels(containerName)
@@ -151,9 +155,9 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 	// Before deleting the load balancer store the logs if required
 	if config.DefaultConfig.EnableLogDump {
 		fileName := path.Join(config.DefaultConfig.LogDir, service.Namespace+"_"+service.Name+".log")
-		klog.V(2).Infof("storing logs for loadbalancer %s on %s", containerName, fileName)
+		l.V(2).Info("Storing logs for loadbalancer", "fileName", fileName)
 		if err := container.LogDump(containerName, fileName); err != nil {
-			klog.Infof("error trying to store logs for load balancer %s : %v", containerName, err)
+			l.Error(err, "Error trying to store logs for load balancer")
 		}
 	}
 	err2 = container.Delete(containerName)
@@ -186,7 +190,7 @@ func ServiceFromLoadBalancerSimpleName(s string) (clusterName string, service *v
 }
 
 // createLoadBalancer create a docker container with a loadbalancer
-func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, image string) error {
+func (s *Server) createLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, image string) error {
 	name := loadBalancerName(clusterName, service)
 
 	networkName := constants.FixedNetworkName
@@ -255,7 +259,8 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		fmt.Sprintf(`echo -en '%s' > %s && touch %s && touch %s && while true; do envoy -c %s && break; sleep 1; done`,
 			dynamicFilesystemConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, proxyConfigPath)}
 	args = append(args, cmd...)
-	klog.V(2).Infof("creating loadbalancer with parameters: %v", args)
+	l := klog.FromContext(ctx).WithValues("loadBalancer", name)
+	l.V(2).Info("Creating loadbalancer with parameters", "args", args)
 	err := container.Create(name, args)
 	if err != nil {
 		return fmt.Errorf("failed to create continers %s %v: %w", name, args, err)

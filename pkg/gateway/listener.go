@@ -22,7 +22,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -164,7 +163,7 @@ func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) map[gatewayv1
 					Kind:  "Secret",
 					Name:  &certRef.Name,
 				}
-				if !isCrossNamespaceRefAllowed(from, to, secretNamespace, c.referenceGrantLister) {
+				if !isCrossNamespaceRefAllowed(c.logger, from, to, secretNamespace, c.referenceGrantLister) {
 					setListenerCondition(listenerConditions, listener.Name, metav1.Condition{
 						Type:    string(gatewayv1.ListenerConditionResolvedRefs),
 						Status:  metav1.ConditionFalse,
@@ -218,7 +217,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		routerProto := &routerv3.Router{}
 		routerAny, err := anypb.New(routerProto)
 		if err != nil {
-			klog.Errorf("Failed to marshal router config: %v", err)
+			c.logger.Error(err, "Failed to marshal router config")
 			return nil, err
 		}
 

@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -201,7 +202,7 @@ func proxyConfig(configTemplate string, data *proxyConfigData) (config string, e
 	return buff.String(), nil
 }
 
-func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
+func generateConfig(l logr.Logger, service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	if service == nil {
 		return nil
 	}
@@ -219,7 +220,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	for _, ipFamily := range service.Spec.IPFamilies {
 		for _, port := range service.Spec.Ports {
 			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
-				klog.Infof("service port protocol %s not supported", port.Protocol)
+				l.Info("Service port protocol not supported", "protocol", port.Protocol)
 				continue
 			}
 			key := fmt.Sprintf("%s_%d_%s", ipFamily, port.Port, port.Protocol)
@@ -233,7 +234,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 				for _, addr := range n.Status.Addresses {
 					// only internal IPs supported
 					if addr.Type != v1.NodeInternalIP {
-						klog.V(2).Infof("address type %s, only %s supported", addr.Type, v1.NodeInternalIP)
+						l.V(2).Info("Address type not supported", "type", addr.Type, "internalIP", v1.NodeInternalIP)
 						continue
 					}
 					// only addresses that match the Service IP family
@@ -268,7 +269,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 		}
 	}
 
-	klog.V(2).Infof("envoy config info: %+v", lbConfig)
+	l.V(2).Info("Envoy config info", "config", lbConfig)
 	return lbConfig
 }
 
@@ -279,14 +280,17 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 	var stdout, stderr bytes.Buffer
 	name := loadBalancerName(clusterName, service)
-	config := generateConfig(service, nodes)
+
+	l := klog.FromContext(ctx).WithValues("loadBalancer", name)
+	config := generateConfig(l, service, nodes)
+
 	// create loadbalancer config data
 	ldsConfig, err := proxyConfig(proxyLDSConfigTemplate, config)
 	if err != nil {
 		return errors.Wrap(err, "failed to generate loadbalancer config data")
 	}
 
-	klog.V(2).Infof("updating loadbalancer with config %s", ldsConfig)
+	l.V(2).Info("Updating loadbalancer with config", "config", ldsConfig)
 	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathLDS + ".tmp"}, strings.NewReader(ldsConfig), &stdout, &stderr)
 	if err != nil {
 		return err
@@ -297,7 +301,7 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 		return errors.Wrap(err, "failed to generate loadbalancer config data")
 	}
 
-	klog.V(2).Infof("updating loadbalancer with config %s", cdsConfig)
+	l.V(2).Info("Updating loadbalancer with config", "config", cdsConfig)
 	err = container.Exec(name, []string{"cp", "/dev/stdin", proxyConfigPathCDS + ".tmp"}, strings.NewReader(cdsConfig), &stdout, &stderr)
 	if err != nil {
 		return err
@@ -314,7 +318,9 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 }
 
 func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Duration) error {
-	portmaps, err := container.PortMaps(name)
+	l := klog.FromContext(ctx).WithValues("loadBalancer", name)
+
+	portmaps, err := container.PortMaps(l, name)
 	if err != nil {
 		return err
 	}
@@ -339,25 +345,27 @@ func waitLoadBalancerReady(ctx context.Context, name string, timeout time.Durati
 		// iptables port forwarding on localhost only works for IPv4
 		resp, err := httpClient.Get(fmt.Sprintf("http://%s/ready", authority))
 		if err != nil {
-			klog.V(2).Infof("unexpected error trying to get load balancer %s readiness :%v", name, err)
+			l.V(2).Error(err, "Unexpected error trying to get load balancer readiness")
 			return false, nil
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			klog.V(2).Infof("unexpected status code from load balancer %s expected LIVE got %d", name, resp.StatusCode)
+			l.V(2).Info(
+				"Unexpected status code from load balancer, expected LIVE",
+				"statusCode", resp.StatusCode)
 			return false, nil
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			klog.V(2).Infof("unexpected error trying to get load balancer %s readiness :%v", name, err)
+			l.V(2).Error(err, "Unexpected error trying to get load balancer readiness")
 			return false, nil
 		}
 
 		response := strings.TrimSpace(string(body))
 		if response != "LIVE" {
-			klog.V(2).Infof("unexpected ready response from load balancer %s expected LIVE got %s", name, response)
+			l.V(2).Info("Unexpected ready response from load balancer, expected LIVE", "response", response)
 			return false, nil
 		}
 		return true, nil

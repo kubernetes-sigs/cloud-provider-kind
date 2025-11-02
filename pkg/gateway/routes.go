@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -14,7 +16,7 @@ import (
 
 // isAllowedByListener checks if a given route is allowed to attach to a listener
 // based on the listener's `allowedRoutes` specification for namespaces and kinds.
-func isAllowedByListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object, namespaceLister corev1listers.NamespaceLister) bool {
+func isAllowedByListener(l logr.Logger, gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object, namespaceLister corev1listers.NamespaceLister) bool {
 	allowed := listener.AllowedRoutes
 	if allowed == nil {
 		// If AllowedRoutes is not set, only routes in the same namespace are allowed.
@@ -38,26 +40,26 @@ func isAllowedByListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener
 		namespaceAllowed = (routeNamespace == gatewayNamespace)
 	case gatewayv1.NamespacesFromSelector:
 		if allowed.Namespaces.Selector == nil {
-			klog.Errorf("Invalid AllowedRoutes: Namespaces.From is 'Selector' but Namespaces.Selector is nil for Gateway %s/%s, Listener %s", gatewayNamespace, gateway.GetName(), listener.Name)
+			l.Info("Invalid AllowedRoutes: Namespaces.From is 'Selector' but Namespaces.Selector is nil", "gateway", klog.KObj(gateway), "listener", listener.Name)
 			return false
 		}
 		if namespaceLister == nil {
-			klog.Warningf("Namespace selection using 'Selector' requires a Namespace Lister, but none was provided. Denying route %s/%s.", routeNamespace, route.GetName())
+			l.Info("Namespace selection using 'Selector' requires a Namespace Lister, but none was provided. Denying route", "route", klog.KObj(route))
 			return false
 		}
 		selector, err := metav1.LabelSelectorAsSelector(allowed.Namespaces.Selector)
 		if err != nil {
-			klog.Errorf("Failed to parse label selector for Gateway %s/%s, Listener %s: %v", gatewayNamespace, gateway.GetName(), listener.Name, err)
+			l.Error(err, "Failed to parse label selector", "gateway", klog.KObj(gateway), "listener", listener.Name)
 			return false
 		}
 		routeNsObj, err := namespaceLister.Get(routeNamespace)
 		if err != nil {
-			klog.Warningf("Failed to get namespace %s for route %s/%s: %v", routeNamespace, routeNamespace, route.GetName(), err)
+			l.Error(err, "Failed to get namespace for route", "namespace", routeNamespace, "route", klog.KObj(route))
 			return false
 		}
 		namespaceAllowed = selector.Matches(labels.Set(routeNsObj.GetLabels()))
 	default:
-		klog.Errorf("Unknown 'From' value %q in AllowedRoutes.Namespaces for Gateway %s/%s, Listener %s", effectiveFrom, gatewayNamespace, gateway.GetName(), listener.Name)
+		l.Info("Unknown 'From' value in AllowedRoutes.Namespaces", "from", effectiveFrom, "gateway", klog.KObj(gateway), "listener", listener.Name)
 		return false
 	}
 
@@ -80,7 +82,7 @@ func isAllowedByListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener
 		routeGroup = gatewayv1.GroupName
 		routeKind = "GRPCRoute"
 	default:
-		klog.Warningf("Cannot determine GroupKind for route object type %T for route %s/%s", route, routeNamespace, route.GetName())
+		l.Info("Cannot determine GroupKind for route object type", "type", fmt.Sprintf("%T", route), "route", klog.KObj(route))
 		return false
 	}
 

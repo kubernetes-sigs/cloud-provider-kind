@@ -9,6 +9,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -21,11 +22,11 @@ import (
 // translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
 // It now correctly handles RequestHeaderModifier filters.
 func translateHTTPRouteToEnvoyRoutes(
+	l logr.Logger,
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
 	referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister,
 ) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
-
 	var envoyRoutes []*routev3.Route
 	var allValidBackendRefs []gatewayv1.BackendRef
 	overallCondition := createSuccessCondition(httpRoute.Generation)
@@ -119,6 +120,7 @@ func translateHTTPRouteToEnvoyRoutes(
 			} else {
 				// Attempt to build the forwarding action and get valid backends.
 				routeAction, validBackends, err := buildHTTPRouteAction(
+					l,
 					httpRoute.Namespace,
 					rule.BackendRefs,
 					serviceLister,
@@ -152,7 +154,7 @@ func translateHTTPRouteToEnvoyRoutes(
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
-func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendRef, serviceLister corev1listers.ServiceLister, referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
+func buildHTTPRouteAction(l logr.Logger, namespace string, backendRefs []gatewayv1.HTTPBackendRef, serviceLister corev1listers.ServiceLister, referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
 	weightedClusters := &routev3.WeightedCluster{}
 	var validBackendRefs []gatewayv1.BackendRef
 
@@ -177,7 +179,7 @@ func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendR
 				Name:  &backendRef.Name,
 			}
 
-			if !isCrossNamespaceRefAllowed(from, to, ns, referenceGrantLister) {
+			if !isCrossNamespaceRefAllowed(l, from, to, ns, referenceGrantLister) {
 				// The reference is not permitted.
 				return nil, nil, &ControllerError{
 					Reason:  string(gatewayv1.RouteReasonRefNotPermitted),

@@ -17,7 +17,7 @@ var errNodeNotFound = errors.New("node not found")
 
 // InstanceExists returns true if the instance for the given node exists according to the cloud provider.
 func (c *cloud) InstanceExists(ctx context.Context, node *v1.Node) (bool, error) {
-	klog.V(2).Infof("Check if instance %s exists", node.Name)
+	klog.FromContext(ctx).V(2).Info("Check if instance exists", "instance", node.Name)
 	_, err := c.findNodeByName(node.Name)
 	if err == nil {
 		return true, nil
@@ -30,7 +30,7 @@ func (c *cloud) InstanceExists(ctx context.Context, node *v1.Node) (bool, error)
 
 // InstanceShutdown returns true of the container doesn't exist
 func (c *cloud) InstanceShutdown(ctx context.Context, node *v1.Node) (bool, error) {
-	klog.V(2).Infof("Check if instance %s is shutdown", node.Name)
+	klog.FromContext(ctx).V(2).Info("Check if instance is shutdown", "instance", node.Name)
 	_, err := c.findNodeByName(node.Name)
 	if err == nil {
 		return false, nil
@@ -44,7 +44,8 @@ func (c *cloud) InstanceShutdown(ctx context.Context, node *v1.Node) (bool, erro
 // InstanceMetadata returns the instance's metadata. The values returned in InstanceMetadata are
 // translated into specific fields and labels in the Node object on registration.
 func (c *cloud) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprovider.InstanceMetadata, error) {
-	klog.V(2).Infof("Check instance metadata for %s", node.Name)
+	l := klog.FromContext(ctx).WithValues("instance", node.Name)
+	l.V(2).Info("Check instance metadata")
 	n, err := c.findNodeByName(node.Name)
 	if err != nil {
 		return nil, err
@@ -72,7 +73,7 @@ func (c *cloud) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprov
 	if ipv6 != "" {
 		m.NodeAddresses = append(m.NodeAddresses, v1.NodeAddress{Type: v1.NodeInternalIP, Address: ipv6})
 	}
-	klog.V(2).Infof("instance metadata for %s: %#v", node.Name, m)
+	l.V(2).Info("Instance metadata", "metadata", m)
 	return m, nil
 }
 

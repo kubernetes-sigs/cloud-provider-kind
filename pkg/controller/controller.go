@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -17,12 +18,12 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	cloudprovider "k8s.io/cloud-provider"
 	cloudproviderapi "k8s.io/cloud-provider/api"
+	"k8s.io/klog/v2"
 
 	nodecontroller "k8s.io/cloud-provider/controllers/node"
 	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	ccmfeatures "k8s.io/controller-manager/pkg/features"
-	"k8s.io/klog/v2"
 
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
@@ -61,12 +62,14 @@ func New(provider *cluster.Provider) *Controller {
 }
 
 func (c *Controller) Run(ctx context.Context) {
-	defer c.cleanup()
+	logger := klog.FromContext(ctx)
+
+	defer c.cleanup(ctx)
 	for {
 		// get existing kind clusters
 		clusters, err := c.kind.List()
 		if err != nil {
-			klog.Infof("error listing clusters, retrying ...: %v", err)
+			logger.Info("Error listing clusters, retrying...", "err", err)
 		}
 
 		// add new ones
@@ -76,28 +79,29 @@ func (c *Controller) Run(ctx context.Context) {
 				return
 			default:
 			}
+			logger := logger.WithValues("cluster", cluster)
 
-			klog.V(3).Infof("processing cluster %s", cluster)
+			logger.V(3).Info("Processing cluster")
 			_, ok := c.clusters[cluster]
 			if ok {
-				klog.V(3).Infof("cluster %s already exist", cluster)
+				logger.V(3).Info("Cluster already exist")
 				continue
 			}
 
 			restConfig, err := c.getRestConfig(ctx, cluster)
 			if err != nil {
-				klog.Errorf("Failed to create kubeClient for cluster %s: %v", cluster, err)
+				logger.Error(err, "Failed to create kubeClient")
 				continue
 			}
 
-			klog.V(2).Infof("Creating new cloud provider for cluster %s", cluster)
-			cloud := provider.New(cluster, c.kind)
+			logger.V(2).Info("Creating new cloud provider")
+			cloud := provider.New(ctx, cluster, c.kind)
 			ccm, err := startCloudControllerManager(ctx, cluster, restConfig, cloud)
 			if err != nil {
-				klog.Errorf("Failed to start cloud controller for cluster %s: %v", cluster, err)
+				logger.Error(err, "Failed to start cloud controller")
 				continue
 			}
-			klog.Infof("Starting cloud controller for cluster %s", cluster)
+			logger.Info("Starting cloud controller")
 			c.clusters[cluster] = ccm
 		}
 		// remove expired ones
@@ -105,7 +109,7 @@ func (c *Controller) Run(ctx context.Context) {
 		for cluster, ccm := range c.clusters {
 			_, ok := clusterSet[cluster]
 			if !ok {
-				klog.Infof("Deleting resources for cluster %s", cluster)
+				logger.Info("Deleting resources", "cluster", cluster)
 				ccm.cancelFn()
 				delete(c.clusters, cluster)
 			}
@@ -118,16 +122,16 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 }
 
-func (c *Controller) getKubeConfig(cluster string, internal bool) (*rest.Config, error) {
+func (c *Controller) getKubeConfig(l logr.Logger, cluster string, internal bool) (*rest.Config, error) {
 	kconfig, err := c.kind.KubeConfig(cluster, internal)
 	if err != nil {
-		klog.Errorf("Failed to get kubeconfig for cluster %s: %v", cluster, err)
+		l.Error(err, "Failed to get kubeconfig")
 		return nil, err
 	}
 
 	config, err := clientcmd.RESTConfigFromKubeConfig([]byte(kconfig))
 	if err != nil {
-		klog.Errorf("Failed to convert kubeconfig for cluster %s: %v", cluster, err)
+		l.Error(err, "Failed to convert kubeconfig")
 		return nil, err
 	}
 	return config, nil
@@ -136,32 +140,35 @@ func (c *Controller) getKubeConfig(cluster string, internal bool) (*rest.Config,
 // getRestConfig returns a valid rest.Config for the cluster passed as argument
 // It tries first to connect to the internal endpoint.
 func (c *Controller) getRestConfig(ctx context.Context, cluster string) (*rest.Config, error) {
+	logger := klog.FromContext(ctx).WithValues("cluster", cluster)
+
 	addresses := []string{}
-	internalConfig, err := c.getKubeConfig(cluster, true)
+	internalConfig, err := c.getKubeConfig(logger, cluster, true)
 	if err != nil {
-		klog.Errorf("Failed to get internal kubeconfig for cluster %s: %v", cluster, err)
+		logger.Error(err, "Failed to get internal kubeconfig")
 	} else {
 		addresses = append(addresses, internalConfig.Host)
 	}
-	externalConfig, err := c.getKubeConfig(cluster, false)
+	externalConfig, err := c.getKubeConfig(logger, cluster, false)
 	if err != nil {
-		klog.Errorf("Failed to get external kubeconfig for cluster %s: %v", cluster, err)
+		logger.Error(err, "Failed to get external kubeconfig")
 	} else {
 		addresses = append(addresses, externalConfig.Host)
 	}
 
 	if len(addresses) == 0 {
-		return nil, fmt.Errorf("could not find kubeconfig for cluster %s", cluster)
+		return nil, fmt.Errorf("could not find kubeconfig")
 	}
 
 	var host string
 	for i := 0; i < 5; i++ {
+		ctx = logr.NewContext(ctx, logger)
 		host, err = firstSuccessfulProbe(ctx, addresses)
 		if err != nil {
-			klog.Errorf("Failed to connect to any address in %v: %v", addresses, err)
+			logger.Error(err, "Failed to connect to any address", "addresses", addresses)
 			time.Sleep(time.Second * time.Duration(i))
 		} else {
-			klog.Infof("Connected succesfully to %s", host)
+			logger.Info("Connected succesfully", "host", host)
 			break
 		}
 	}
@@ -185,9 +192,11 @@ func (c *Controller) getRestConfig(ctx context.Context, cluster string) (*rest.C
 	return config, nil
 }
 
-// TODO: implement leader election to not have problems with  multiple providers
+// TODO: implement leader election to not have problems with multiple providers
 // ref: https://github.com/kubernetes/kubernetes/blob/d97ea0f705847f90740cac3bc3dd8f6a4026d0b5/cmd/kube-scheduler/app/server.go#L211
 func startCloudControllerManager(ctx context.Context, clusterName string, config *rest.Config, cloud cloudprovider.Interface) (*ccm, error) {
+	logger := klog.FromContext(ctx).WithValues("cluster", clusterName)
+
 	// TODO: we need to set up the ccm specific feature gates
 	// but try to avoid to expose this to users
 	featureGates := utilfeature.DefaultMutableFeatureGate
@@ -198,7 +207,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 
 	kubeClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		klog.Errorf("Failed to create kubeClient for cluster %s: %v", clusterName, err)
+		logger.Error(err, "Failed to create kubeClient")
 		return nil, err
 	}
 
@@ -214,7 +223,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		return true, nil
 	})
 	if err != nil {
-		klog.Errorf("Failed waiting for apiserver to be ready: %v", err)
+		logger.Error(err, "Failed waiting for apiserver to be ready")
 		return nil, err
 	}
 
@@ -238,7 +247,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
-		klog.Errorf("Failed to start service controller: %v", err)
+		logger.Error(err, "Failed to start service controller")
 		return nil, err
 	}
 
@@ -249,7 +258,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 
 	hasCloudProviderTaint, err := getCloudProviderTaint(ctx, clusterName, kubeClient)
 	if err != nil {
-		klog.Errorf("Failed get cluster nodes: %v", err)
+		logger.Error(err, "Failed get cluster nodes")
 		cancel()
 		return nil, err
 	}
@@ -265,7 +274,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		)
 		if err != nil {
 			// This error shouldn't fail. It lives like this as a legacy.
-			klog.Errorf("Failed to start node controller: %v", err)
+			logger.Error(err, "Failed to start node controller")
 			cancel()
 			return nil, err
 		}
@@ -275,14 +284,14 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	// Gateway setup
 	crdManager, err := gateway.NewCRDManager(config)
 	if err != nil {
-		klog.Errorf("Failed to create Gateway API CRD manager: %v", err)
+		logger.Error(err, "Failed to create Gateway API CRD manager")
 		cancel()
 		return nil, err
 	}
 
 	err = crdManager.InstallCRDs(ctx, cpkconfig.DefaultConfig.GatewayReleaseChannel)
 	if err != nil {
-		klog.Errorf("Failed to install Gateway API CRDs: %v", err)
+		logger.Error(err, "Failed to install Gateway API CRDs")
 		cancel()
 		return nil, err
 	}
@@ -290,7 +299,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	gwClient, err := gatewayclient.NewForConfig(config)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
-		klog.Errorf("Failed to create Gateway API client: %v", err)
+		logger.Error(err, "Failed to create Gateway API client")
 		cancel()
 		return nil, err
 	}
@@ -303,6 +312,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	referenceGrantInformer := sharedGwInformers.Gateway().V1beta1().ReferenceGrants()
 
 	gatewayController, err := gateway.New(
+		ctx,
 		clusterName,
 		kubeClient,
 		gwClient,
@@ -316,13 +326,14 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		referenceGrantInformer,
 	)
 	if err != nil {
-		klog.Errorf("Failed to start gateway controller: %v", err)
+		logger.Error(err, "Failed to start gateway controller")
 		cancel()
 		return nil, err
 	}
 
 	// Ingress to Gateway controller migration
 	ingressController, err := ingress.NewController(
+		ctx,
 		kubeClient,
 		gwClient,
 		gateway.GWClassName,
@@ -334,7 +345,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		gwInformer,
 	)
 	if err != nil {
-		klog.Errorf("Failed to create Ingress controller: %v", err)
+		logger.Error(err, "Failed to create Ingress controller")
 		cancel()
 		return nil, err
 	}
@@ -344,7 +355,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 
 	err = gatewayController.Init(ctx)
 	if err != nil {
-		klog.Errorf("Failed to initialize gateway controller: %v", err)
+		logger.Error(err, "Failed to initialize gateway controller")
 		cancel()
 		return nil, err
 	}
@@ -355,7 +366,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 
 	err = ingressController.Init(ctx)
 	if err != nil {
-		klog.Errorf("Failed to initialize ingress controller: %v", err)
+		logger.Error(err, "Failed to initialize ingress controller")
 		cancel()
 		return nil, err
 	}
@@ -372,7 +383,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 
 		containers, err := container.ListByLabel(fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName))
 		if err != nil {
-			klog.Errorf("can't list containers: %v", err)
+			logger.Error(err, "Failed to list containers")
 			return
 		}
 
@@ -383,9 +394,10 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		}
 
 		for _, name := range containers {
-			klog.V(2).Infof("cleaning up container %s for cluster %s", name, clusterName)
-			cleanupLoadBalancer(lbController, name)
-			cleanupGateway(name)
+			l := logger.WithValues("container", name)
+			l.V(2).Info("Cleaning up container", "container", name)
+			cleanupLoadBalancer(l, lbController, name)
+			cleanupGateway(l, name)
 		}
 	}
 
@@ -398,24 +410,26 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 }
 
 // TODO cleanup alias ip on mac
-func (c *Controller) cleanup() {
+func (c *Controller) cleanup(ctx context.Context) {
+	logger := klog.FromContext(ctx)
+
 	for cluster, ccm := range c.clusters {
-		klog.Infof("Cleaning resources for cluster %s", cluster)
+		logger.Info("Cleaning resources", "cluster", cluster)
 		ccm.cancelFn()
 		delete(c.clusters, cluster)
 	}
 	// final cleanup for containers that be left behind
 	containers, err := container.ListByLabel(constants.NodeCCMLabelKey)
 	if err != nil {
-		klog.Errorf("can't list containers: %v", err)
+		logger.Error(err, "Failed to list containers")
 		return
 	}
 
 	for _, name := range containers {
-		klog.V(2).Infof("cleaning up container %s", name)
+		logger.V(2).Info("cleaning up container", "container", name)
 		err := container.Delete(name)
 		if err != nil {
-			klog.Errorf("error deleting container %s : %v", name, err)
+			logger.Error(err, "Error deleting container", "container", name)
 		}
 	}
 }
@@ -435,35 +449,39 @@ func getCloudProviderTaint(ctx context.Context, clusterName string, kubeClient k
 	return false, nil
 }
 
-func cleanupLoadBalancer(lbController cloudprovider.LoadBalancer, name string) {
+func cleanupLoadBalancer(l logr.Logger, lbController cloudprovider.LoadBalancer, name string) {
 	// create fake service to pass to the cloud provider method
 	v, err := container.GetLabelValue(name, constants.LoadBalancerNameLabelKey)
 	if err != nil || v == "" {
-		klog.Infof("could not get the label for the loadbalancer on container %s : %v", name, err)
+		l.Error(err, "Could not get the label for the loadbalancer")
 		return
 	}
 	clusterName, service := loadbalancer.ServiceFromLoadBalancerSimpleName(v)
 	if service == nil {
-		klog.Infof("invalid format for loadbalancer on cluster %s: %s", clusterName, v)
+		l.Error(err, "Invalid format for loadbalancer", "cluster", clusterName, "loadBalancer", v)
 		return
 	}
 	err = lbController.EnsureLoadBalancerDeleted(context.Background(), clusterName, service)
 	if err != nil {
-		klog.Infof("error deleting loadbalancer %s/%s on cluster %s : %v", service.Namespace, service.Name, clusterName, err)
+		l.Error(
+			err,
+			"error deleting loadbalancer",
+			"service", klog.KObj(service),
+			"cluster", clusterName)
 		return
 	}
 }
 
-func cleanupGateway(name string) {
+func cleanupGateway(l logr.Logger, name string) {
 	// create fake service to pass to the cloud provider method
 	v, err := container.GetLabelValue(name, constants.GatewayNameLabelKey)
 	if err != nil || v == "" {
-		klog.Infof("could not get the label for the loadbalancer on container %s : %v", name, err)
+		l.Error(err, "Could not get the label for the loadbalancer")
 		return
 	}
 	err = container.Delete(name)
 	if err != nil {
-		klog.Infof("error deleting container %s gateway %s : %v", name, v, err)
+		l.Error(err, "Error deleting gateway", "gateway", v)
 		return
 	}
 }

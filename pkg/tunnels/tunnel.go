@@ -1,6 +1,7 @@
 package tunnels
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
@@ -16,31 +18,36 @@ import (
 type TunnelManager struct {
 	mu      sync.Mutex
 	tunnels map[string]map[string]*tunnel // first key is the service namespace/name second key is the servicePort
+	logger  logr.Logger
 }
 
-func NewTunnelManager() *TunnelManager {
+func NewTunnelManager(ctx context.Context) *TunnelManager {
+	logger := klog.FromContext(ctx)
 	t := &TunnelManager{
 		tunnels: map[string]map[string]*tunnel{},
+		logger:  logger,
 	}
 	return t
 }
 
 func (t *TunnelManager) SetupTunnels(containerName string) error {
+	l := t.logger.WithValues("container", containerName)
+
 	// get the portmapping from the container and its internal IPs and forward them
 	// 1. Create the fake IP on the tunnel interface
 	// 2. Capture the traffic directed to that IP port and forward to the exposed port in the host
-	portmaps, err := container.PortMaps(containerName)
+	portmaps, err := container.PortMaps(l, containerName)
 	if err != nil {
 		return err
 	}
-	klog.V(0).Infof("found port maps %v associated to container %s", portmaps, containerName)
+	l.V(0).Info("Found port maps associated to container", "portMaps", portmaps)
 
 	ipv4, _, err := container.IPs(containerName)
 	if err != nil {
 		return err
 	}
 
-	klog.V(0).Infof("setting IPv4 address %s associated to container %s", ipv4, containerName)
+	l.V(0).Info("Setting IPv4 address associated to container", "IP", ipv4)
 	output, err := AddIPToLocalInterface(ipv4)
 	if err != nil {
 		return fmt.Errorf("error adding IP to local interface: %w - %s", err, output)
@@ -56,7 +63,7 @@ func (t *TunnelManager) SetupTunnels(containerName string) error {
 			return fmt.Errorf("expected format port/protocol for container port, got %s", containerPort)
 		}
 
-		tun := NewTunnel(ipv4, parts[0], parts[1], "localhost", hostPort)
+		tun := NewTunnel(l, ipv4, parts[0], parts[1], "localhost", hostPort)
 		// TODO check if we can leak tunnels
 		err = tun.Start()
 		if err != nil {
@@ -72,7 +79,8 @@ func (t *TunnelManager) SetupTunnels(containerName string) error {
 }
 
 func (t *TunnelManager) RemoveTunnels(containerName string) error {
-	klog.V(0).Infof("stopping tunnels on containers %s", containerName)
+	l := t.logger.WithValues("container", containerName)
+	l.V(0).Info("Stopping tunnels on containers")
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	tunnels, ok := t.tunnels[containerName]
@@ -89,7 +97,7 @@ func (t *TunnelManager) RemoveTunnels(containerName string) error {
 		tunnel.Stop() // nolint: errcheck
 	}
 
-	klog.V(0).Infof("Removing IPv4 address %s associated to local interface", tunnelIP)
+	l.V(0).Info("Removing IPv4 address associated to local interface", "IP", tunnelIP)
 	output, err := RemoveIPFromLocalInterface(tunnelIP)
 	if err != nil {
 		return fmt.Errorf("error removing IP from local interface: %w - %s", err, output)
@@ -107,20 +115,22 @@ type tunnel struct {
 	protocol   string
 	remoteIP   string // address:Port
 	remotePort string
+	logger     logr.Logger
 }
 
-func NewTunnel(localIP, localPort, protocol, remoteIP, remotePort string) *tunnel {
+func NewTunnel(l logr.Logger, localIP, localPort, protocol, remoteIP, remotePort string) *tunnel {
 	return &tunnel{
 		localIP:    localIP,
 		localPort:  localPort,
 		protocol:   protocol,
 		remoteIP:   remoteIP,
 		remotePort: remotePort,
+		logger:     l,
 	}
 }
 
 func (t *tunnel) Start() error {
-	klog.Infof("Starting tunnel on %s %s", net.JoinHostPort(t.localIP, t.localPort), t.protocol)
+	t.logger.Info("Starting tunnel", "address", net.JoinHostPort(t.localIP, t.localPort), "protocol", t.protocol)
 	switch t.protocol {
 	case "udp":
 		localAddrStr := net.JoinHostPort(t.localIP, t.localPort)
@@ -147,7 +157,7 @@ func (t *tunnel) Start() error {
 
 				err = t.handleUDPConnection(conn)
 				if err != nil {
-					klog.Infof("unexpected error on connection: %v", err)
+					t.logger.Error(err, "Unexpected error on connection")
 				}
 			}
 		}()
@@ -163,19 +173,20 @@ func (t *tunnel) Start() error {
 			for {
 				conn, err := ln.Accept()
 				if err != nil {
-					klog.Infof("unexpected error listening: %v", err)
+					t.logger.Error(err, "Unexpected error listening")
 					return
 				}
 				tcpConn, ok := conn.(*net.TCPConn)
 				if !ok {
-					klog.Errorf("unexpected connection type %T, expected *net.TCPConn", conn)
+					err := fmt.Errorf("unexpected connection type %T", conn)
+					t.logger.Error(err, "Expected *net.TCPConn")
 					conn.Close() // nolint: errcheck
 					continue
 				}
 				go func() {
 					err := t.handleTCPConnection(tcpConn)
 					if err != nil {
-						klog.Infof("unexpected error on connection: %v", err)
+						t.logger.Error(err, "Unexpected error on connection")
 					}
 				}()
 			}
@@ -243,22 +254,25 @@ func (t *tunnel) handleUDPConnection(conn *net.UDPConn) error {
 	if err != nil {
 		return err
 	}
-	klog.V(4).Infof("Read %d bytes from %s", nRead, srcAddr.String())
+	hostAddr := net.JoinHostPort(t.remoteIP, t.remotePort)
+	l := t.logger.WithValues("hostAddr", hostAddr, "srcAddr", srcAddr.String())
+	l.V(4).Info("Read bytes from source", "bytes", nRead)
 
-	klog.V(4).Infof("Connecting to %s", net.JoinHostPort(t.remoteIP, t.remotePort))
-	remoteConn, err := net.Dial("udp4", net.JoinHostPort(t.remoteIP, t.remotePort))
+	l.V(4).Info("Connecting")
+	remoteConn, err := net.Dial("udp4", hostAddr)
 	if err != nil {
-		return fmt.Errorf("can't connect to server %q: %v", net.JoinHostPort(t.remoteIP, t.remotePort), err)
+		return fmt.Errorf("can't connect to server %q: %v", hostAddr, err)
 	}
 	defer remoteConn.Close()
+	l = l.WithValues("remoteAddr", remoteConn.RemoteAddr())
 
 	nWrite, err := remoteConn.Write(buf[:nRead])
 	if err != nil {
 		return fmt.Errorf("fail to write to remote %s: %s", remoteConn.RemoteAddr(), err)
 	} else if nWrite < nRead {
-		klog.V(2).Infof("Buffer underflow %d < %d to remote %s", nWrite, nRead, remoteConn.RemoteAddr())
+		l.V(2).Info("Buffer underflow to remote", "writtenBytes", nWrite, "readBytes", nRead)
 	}
-	klog.V(4).Infof("Wrote %d bytes to to %s", nWrite, remoteConn.RemoteAddr().String())
+	l.V(4).Info("Wrote bytes", "bytes", nWrite)
 
 	buf = make([]byte, 1500)
 	err = remoteConn.SetReadDeadline(time.Now().Add(5 * time.Second)) // Add deadline to ensure it doesn't block forever
@@ -269,7 +283,7 @@ func (t *tunnel) handleUDPConnection(conn *net.UDPConn) error {
 	if err != nil {
 		return fmt.Errorf("fail to read from remote %s: %s", remoteConn.RemoteAddr(), err)
 	}
-	klog.V(4).Infof("Read %d bytes from %s", nRead, remoteConn.RemoteAddr().String())
+	l.V(4).Info("Read bytes", "bytes", nRead)
 
 	_, err = conn.WriteToUDP(buf[:nRead], srcAddr)
 
