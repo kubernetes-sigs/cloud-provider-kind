@@ -82,6 +82,17 @@ Or using `compose.yaml` file:
 NET_MODE=kind docker compose up -d
 ```
 
+## Gateway API support (Alpha)
+
+This provider has alpha support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
+It implements the `Gateway` and `HTTPRoute` functionalities.
+
+You can enable the Gateway API controllerby selecting the Gateway API release channel (standard/experimental):
+
+```sh
+cloud-provider-kind --gateway-channel standard
+```
+
 ## How to use it
 
 Run a KIND cluster:
@@ -102,17 +113,6 @@ kubectl cluster-info --context kind-kind
 
 Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
 
-```
-
-## Gateway API support (Alpha)
-
-This provider has alpha support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
-It implements the `Gateway` and `HTTPRoute` functionalities.
-
-You can enable the Gateway API controllerby selecting the Gateway API release channel (standard/experimental):
-
-```sh
-cloud-provider-kind --gateway-channel standard
 ```
 
 ### Allowing load balancers access to control plane nodes
