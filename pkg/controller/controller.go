@@ -287,87 +287,101 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		return nil, err
 	}
 
-	err = crdManager.InstallCRDs(ctx, cpkconfig.DefaultConfig.GatewayReleaseChannel)
-	if err != nil {
-		logger.Error(err, "Failed to install Gateway API CRDs")
-		cancel()
-		return nil, err
+	// Only install CRDs if gateway channel is not disabled
+	if cpkconfig.DefaultConfig.GatewayReleaseChannel != cpkconfig.Disabled {
+		err = crdManager.InstallCRDs(ctx, cpkconfig.DefaultConfig.GatewayReleaseChannel)
+		if err != nil {
+			logger.Error(err, "Failed to install Gateway API CRDs")
+			cancel()
+			return nil, err
+		}
+	} else {
+		logger.Info("Gateway API CRDs installation skipped (disabled)")
 	}
 
-	gwClient, err := gatewayclient.NewForConfig(config)
-	if err != nil {
-		// This error shouldn't fail. It lives like this as a legacy.
-		logger.Error(err, "Failed to create Gateway API client")
-		cancel()
-		return nil, err
+	var gatewayController *gateway.Controller
+
+	// Only set up Gateway API controllers if not disabled
+	if cpkconfig.DefaultConfig.GatewayReleaseChannel != cpkconfig.Disabled {
+		gwClient, err := gatewayclient.NewForConfig(config)
+		if err != nil {
+			// This error shouldn't fail. It lives like this as a legacy.
+			logger.Error(err, "Failed to create Gateway API client")
+			cancel()
+			return nil, err
+		}
+
+		sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
+		gwClassInformer := sharedGwInformers.Gateway().V1().GatewayClasses()
+		gwInformer := sharedGwInformers.Gateway().V1().Gateways()
+		httpRouteInformer := sharedGwInformers.Gateway().V1().HTTPRoutes()
+		grpcRouteInformer := sharedGwInformers.Gateway().V1().GRPCRoutes()
+		referenceGrantInformer := sharedGwInformers.Gateway().V1beta1().ReferenceGrants()
+
+		gatewayController, err = gateway.New(
+			clusterName,
+			kubeClient,
+			gwClient,
+			namespacesInformer,
+			servicesInformer,
+			secretsInformer,
+			gwClassInformer,
+			gwInformer,
+			httpRouteInformer,
+			grpcRouteInformer,
+			referenceGrantInformer,
+		)
+		if err != nil {
+			logger.Error(err, "Failed to start gateway controller")
+			cancel()
+			return nil, err
+		}
+
+		// Ingress to Gateway controller migration
+		ingressController, err := ingress.NewController(
+			kubeClient,
+			gwClient,
+			gateway.GWClassName,
+			ingressInformer,
+			ingressClassInformer,
+			servicesInformer,
+			secretsInformer,
+			httpRouteInformer,
+			gwInformer,
+		)
+		if err != nil {
+			logger.Error(err, "Failed to create Ingress controller")
+			cancel()
+			return nil, err
+		}
+
+		sharedInformers.Start(ctx.Done())
+		sharedGwInformers.Start(ctx.Done())
+
+		err = gatewayController.Init(ctx)
+		if err != nil {
+			logger.Error(err, "Failed to initialize gateway controller")
+			cancel()
+			return nil, err
+		}
+
+		go func() {
+			_ = gatewayController.Run(ctx)
+		}()
+
+		err = ingressController.Init(ctx)
+		if err != nil {
+			logger.Error(err, "Failed to initialize ingress controller")
+			cancel()
+			return nil, err
+		}
+
+		go ingressController.Run(ctx, 5)
+	} else {
+		logger.Info("Gateway API controllers skipped (disabled)")
+		// Start only the core informers, not gateway informers
+		sharedInformers.Start(ctx.Done())
 	}
-
-	sharedGwInformers := gatewayinformers.NewSharedInformerFactory(gwClient, 60*time.Second)
-	gwClassInformer := sharedGwInformers.Gateway().V1().GatewayClasses()
-	gwInformer := sharedGwInformers.Gateway().V1().Gateways()
-	httpRouteInformer := sharedGwInformers.Gateway().V1().HTTPRoutes()
-	grpcRouteInformer := sharedGwInformers.Gateway().V1().GRPCRoutes()
-	referenceGrantInformer := sharedGwInformers.Gateway().V1beta1().ReferenceGrants()
-
-	gatewayController, err := gateway.New(
-		clusterName,
-		kubeClient,
-		gwClient,
-		namespacesInformer,
-		servicesInformer,
-		secretsInformer,
-		gwClassInformer,
-		gwInformer,
-		httpRouteInformer,
-		grpcRouteInformer,
-		referenceGrantInformer,
-	)
-	if err != nil {
-		logger.Error(err, "Failed to start gateway controller")
-		cancel()
-		return nil, err
-	}
-
-	// Ingress to Gateway controller migration
-	ingressController, err := ingress.NewController(
-		kubeClient,
-		gwClient,
-		gateway.GWClassName,
-		ingressInformer,
-		ingressClassInformer,
-		servicesInformer,
-		secretsInformer,
-		httpRouteInformer,
-		gwInformer,
-	)
-	if err != nil {
-		logger.Error(err, "Failed to create Ingress controller")
-		cancel()
-		return nil, err
-	}
-
-	sharedInformers.Start(ctx.Done())
-	sharedGwInformers.Start(ctx.Done())
-
-	err = gatewayController.Init(ctx)
-	if err != nil {
-		logger.Error(err, "Failed to initialize gateway controller")
-		cancel()
-		return nil, err
-	}
-
-	go func() {
-		_ = gatewayController.Run(ctx)
-	}()
-
-	err = ingressController.Init(ctx)
-	if err != nil {
-		logger.Error(err, "Failed to initialize ingress controller")
-		cancel()
-		return nil, err
-	}
-
-	go ingressController.Run(ctx, 5)
 
 	// This has to cleanup all the resources allocated by the cloud provider in this cluster
 	// - containers as loadbalancers
