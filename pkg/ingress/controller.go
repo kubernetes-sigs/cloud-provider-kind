@@ -173,8 +173,10 @@ func NewController(
 }
 
 func (c *Controller) Init(ctx context.Context) error {
+	logger := klog.FromContext(ctx).WithValues("controller", "ingress", "ingressClass", IngressClassName)
+
 	// Wait for the caches to be synced before starting workers
-	klog.Info("Waiting for informer caches to sync")
+	logger.Info("Waiting for informer caches to sync")
 	if !cache.WaitForCacheSync(ctx.Done(),
 		c.ingressSynced,
 		c.classSynced,
@@ -188,14 +190,14 @@ func (c *Controller) Init(ctx context.Context) error {
 
 	_, err := c.classLister.Get(IngressClassName)
 	if err == nil {
-		klog.Infof("IngressClass '%s' already exists", IngressClassName)
+		logger.Info("IngressClass already exists")
 		return nil
 	}
 	if !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to get IngressClass '%s': %v", IngressClassName, err)
 	}
 
-	klog.Infof("IngressClass '%s' not found, creating...", IngressClassName)
+	logger.Info("IngressClass not found, creating...")
 	ingressClass := &networkingv1.IngressClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: IngressClassName,
@@ -216,19 +218,22 @@ func (c *Controller) Init(ctx context.Context) error {
 // Run will set up the event handlers for types we are interested in, as well
 // as start processing components for the specified number of workers.
 func (c *Controller) Run(ctx context.Context, workers int) {
+	logger := klog.FromContext(ctx).WithName("ingress")
+	ctx = klog.NewContext(ctx, logger)
+
 	defer runtime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	klog.Info("Starting Ingress controller")
+	logger.Info("Starting Ingress controller")
 
-	klog.Info("Starting workers")
+	logger.Info("Starting workers")
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
 	}
 
-	klog.Info("Started workers")
+	logger.Info("Started workers")
 	<-ctx.Done()
-	klog.Info("Shutting down workers")
+	logger.Info("Shutting down workers")
 }
 
 func (c *Controller) runWorker(ctx context.Context) {
@@ -269,6 +274,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		runtime.HandleError(fmt.Errorf("invalid resource key: %s", key))
 		return nil
 	}
+	logger := klog.FromContext(ctx).WithValues("ingress", klog.KRef(namespace, name))
 
 	// Get the Ingress resource
 	ingress, err := c.ingressLister.Ingresses(namespace).Get(name)
@@ -277,7 +283,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 			// Kubernetes Garbage Collection will delete child HTTPRoutes due to OwnerReference.
 			// We only need to reconcile the Gateway in case this Ingress
 			// was the last one providing a particular TLS secret.
-			klog.V(4).Infof("Ingress %s/%s deleted. Reconciling Gateway.", namespace, name)
+			logger.V(4).Info("Ingress deleted. Reconciling Gateway.")
 			if _, err := c.reconcileNamespaceGateway(ctx, namespace); err != nil {
 				// We still return an error to requeue, as Gateway reconciliation
 				// might fail temporarily (e.g., API server issues).
@@ -290,7 +296,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	// Check if this Ingress is for us
 	if !c.isIngressForUs(ingress) {
-		klog.V(4).Infof("Skipping Ingress %s/%s: not for this controller", namespace, name)
+		logger.V(4).Info("Skipping Ingress: not for this controller")
 		// TODO: If we *used* to own it, we should delete the HTTPRoutes
 		// and reconcile the Gateway. For now, we assume GC handles routes.
 		return nil
@@ -304,7 +310,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// === 2. Reconcile HTTPRoutes (1-to-Many) ===
-	klog.V(4).Infof("Reconciling HTTPRoutes for Ingress %s/%s", namespace, name)
+	logger.V(4).Info("Reconciling HTTPRoutes for Ingress")
 
 	// Generate the desired state
 	desiredRoutes, err := c.generateDesiredHTTPRoutes(ingress, gateway.Name, gateway.Namespace)
@@ -327,26 +333,27 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	// Reconcile: Create/Update
 	for routeName, desiredRoute := range desiredRoutes {
+		logger = logger.WithValues("httpRoute", klog.KRef(desiredRoute.Namespace, desiredRoute.Name))
 		existingRoute, exists := existingRoutes[routeName]
 		if !exists {
 			// Create
-			klog.V(2).Infof("Creating HTTPRoute %s/%s", desiredRoute.Namespace, desiredRoute.Name)
+			logger.V(2).Info("Creating HTTPRoute")
 			_, createErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Create(ctx, desiredRoute, metav1.CreateOptions{})
 			if createErr != nil {
-				klog.Errorf("Failed to create HTTPRoute %s/%s: %v", desiredRoute.Namespace, desiredRoute.Name, createErr)
+				logger.Error(createErr, "Failed to create HTTPRoute")
 				return fmt.Errorf("failed to create HTTPRoute: %w", createErr)
 			}
 		} else if !reflect.DeepEqual(existingRoute.Spec, desiredRoute.Spec) ||
 			!reflect.DeepEqual(existingRoute.OwnerReferences, desiredRoute.OwnerReferences) {
 
-			klog.V(2).Infof("Updating HTTPRoute %s/%s", desiredRoute.Namespace, desiredRoute.Name)
+			logger.V(2).Info("Updating HTTPRoute")
 			routeCopy := existingRoute.DeepCopy()
 			routeCopy.Spec = desiredRoute.Spec
 			routeCopy.OwnerReferences = desiredRoute.OwnerReferences
 
 			_, updateErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Update(ctx, routeCopy, metav1.UpdateOptions{})
 			if updateErr != nil {
-				klog.Errorf("Failed to update HTTPRoute %s/%s: %v", desiredRoute.Namespace, desiredRoute.Name, updateErr)
+				logger.Error(updateErr, "Failed to update HTTPRoute")
 				return fmt.Errorf("failed to update HTTPRoute: %w", updateErr)
 			}
 		}
@@ -356,10 +363,11 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 	// Reconcile: Delete (stale routes)
 	for routeName, routeToDelete := range existingRoutes {
-		klog.V(2).Infof("Deleting stale HTTPRoute %s/%s", routeToDelete.Namespace, routeName)
+		logger = logger.WithValues("httpRoute", klog.KRef(routeToDelete.Namespace, routeName))
+		logger.V(2).Info("Deleting stale HTTPRoute")
 		deleteErr := c.gwClientset.GatewayV1().HTTPRoutes(namespace).Delete(ctx, routeName, metav1.DeleteOptions{})
 		if deleteErr != nil && !errors.IsNotFound(deleteErr) {
-			klog.Errorf("Failed to delete stale HTTPRoute %s/%s: %v", routeToDelete.Namespace, routeName, deleteErr)
+			logger.Error(deleteErr, "Failed to delete stale HTTPRoute")
 			return fmt.Errorf("failed to delete stale HTTPRoute: %w", deleteErr)
 		}
 	}
@@ -441,6 +449,11 @@ func (c *Controller) reconcileNamespaceGateway(ctx context.Context, namespace st
 		})
 	}
 
+	logger := klog.FromContext(ctx).WithValues(
+		"gateway", klog.KRef(namespace, GatewayName),
+		"gatewayClass", c.gatewayClassName,
+	)
+
 	// 4. Get or Create the Gateway
 	gw, err := c.gatewayLister.Gateways(namespace).Get(GatewayName)
 	if err != nil {
@@ -449,7 +462,7 @@ func (c *Controller) reconcileNamespaceGateway(ctx context.Context, namespace st
 		}
 
 		// Not found, create it
-		klog.V(2).Infof("Creating Gateway %s/%s for class %s", namespace, GatewayName, c.gatewayClassName)
+		logger.V(2).Info("Creating Gateway for class")
 		newGw := &gatewayv1.Gateway{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      GatewayName,
@@ -465,7 +478,7 @@ func (c *Controller) reconcileNamespaceGateway(ctx context.Context, namespace st
 
 	// 5. Gateway exists, check if update is needed
 	if !reflect.DeepEqual(gw.Spec.Listeners, desiredListeners) {
-		klog.V(2).Infof("Updating Gateway %s/%s with new listener configuration", namespace, GatewayName)
+		logger.V(2).Info("Updating Gateway with new listener configuration")
 		// This avoids conflicts with the gateway-controller updating status.
 		patch := map[string]interface{}{
 			"spec": map[string]interface{}{
@@ -734,6 +747,7 @@ func (c *Controller) generateDesiredHTTPRoutes(ingress *networkingv1.Ingress, ga
 
 // updateIngressStatus updates the Ingress status with the Gateway's IP
 func (c *Controller) updateIngressStatus(ctx context.Context, ingress *networkingv1.Ingress, gateway *gatewayv1.Gateway) error {
+	logger := klog.FromContext(ctx).WithValues("ingress", klog.KObj(ingress))
 
 	// Get the *latest* version of the Ingress to avoid update conflicts
 	latestIngress, err := c.clientset.NetworkingV1().Ingresses(ingress.Namespace).Get(ctx, ingress.Name, metav1.GetOptions{})
@@ -774,7 +788,7 @@ func (c *Controller) updateIngressStatus(ctx context.Context, ingress *networkin
 
 	// Check if status is already up-to-date
 	if reflect.DeepEqual(latestIngress.Status.LoadBalancer, *lbStatus) {
-		klog.V(4).Infof("Ingress %s/%s status already up to date.", ingress.Namespace, ingress.Name)
+		logger.V(4).Info("Ingress status already up to date.")
 		return nil
 	}
 
@@ -785,7 +799,7 @@ func (c *Controller) updateIngressStatus(ctx context.Context, ingress *networkin
 	if err != nil {
 		return fmt.Errorf("failed to update ingress status: %w", err)
 	}
-	klog.V(2).Infof("Successfully updated status for Ingress %s/%s with IPs %v and Hostnames: %v", ingress.Namespace, ingress.Name, ips, hostnames)
+	logger.V(2).Info("Successfully updated status for Ingress", "IPs", ips, "hostNames", hostnames)
 	return nil
 }
 
