@@ -37,4 +37,5 @@ type GatewayReleaseChannel string
 const (
 	Standard     GatewayReleaseChannel = "standard"
 	Experimental GatewayReleaseChannel = "experimental"
+	Disabled     GatewayReleaseChannel = "disabled"
 )
