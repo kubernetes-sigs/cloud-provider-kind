@@ -398,9 +398,11 @@ func (c *Controller) syncGatewayClass(key string) {
 }
 
 func (c *Controller) Run(ctx context.Context) error {
+	logger := klog.FromContext(ctx).WithName("gateway")
+	ctx = klog.NewContext(ctx, logger)
 	defer runtime.HandleCrashWithContext(ctx)
 
-	klog.Info("Starting Envoy proxy controller")
+	logger.Info("Starting Envoy proxy controller")
 	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
 	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{})
 
@@ -445,22 +447,25 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.xdsLocalAddress = address
 	c.xdsLocalPort = tcpAddr.Port
 	go func() {
-		klog.Infof("XDS management server listening on %s %d\n", c.xdsLocalAddress, c.xdsLocalPort)
+		logger.Info(
+			"XDS management server listening",
+			"address", c.xdsLocalAddress,
+			"port", c.xdsLocalPort)
 		if err = grpcServer.Serve(listener); err != nil {
-			klog.Errorln("gRPC server error:", err)
+			logger.Error(err, "gRPC server error:")
 		}
 		grpcServer.Stop()
 	}()
 
 	defer c.gatewayqueue.ShutDown()
-	klog.Info("Starting Gateway API controller")
+	logger.Info("Starting Gateway API controller")
 
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runGatewayWorker, time.Second)
 	}
 
 	<-ctx.Done()
-	klog.Info("Stopping Gateway API controller")
+	logger.Info("Stopping Gateway API controller")
 	return nil
 }
 
@@ -728,7 +733,8 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 	if err := c.xdscache.SetSnapshot(ctx, nodeid, snapshot); err != nil {
 		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
 	}
-	klog.V(4).Infof("Updated snapshot cache with resource snapshot...")
+	logger := klog.FromContext(ctx).WithValues("nodeID", nodeid)
+	logger.V(4).Info("Updated snapshot cache with resource snapshot...")
 	return nil
 }
 
