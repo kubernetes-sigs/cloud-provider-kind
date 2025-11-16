@@ -39,7 +39,7 @@ func init() {
 	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
-	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard,experimental), by default is standard")
+	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	flag.BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
 
 	flag.Usage = func() {
@@ -119,10 +119,12 @@ func Main() {
 
 	config.DefaultConfig.IngressDefault = enableDefaultIngress
 
-	if config.GatewayReleaseChannel(gatewayChannel) == "" {
-		klog.Fatalf("Unknown Gateway API release channel %s", gatewayChannel)
+	// Validate gateway channel
+	channel := config.GatewayReleaseChannel(gatewayChannel)
+	if channel != config.Standard && channel != config.Experimental && channel != config.Disabled {
+		klog.Fatalf("Unknown Gateway API release channel %q", gatewayChannel)
 	}
-	config.DefaultConfig.GatewayReleaseChannel = config.GatewayReleaseChannel(gatewayChannel)
+	config.DefaultConfig.GatewayReleaseChannel = channel
 
 	// initialize log directory
 	if enableLogDump {
