@@ -13,6 +13,9 @@ updates:
       k8s-deps:
         patterns:
           - "*k8s.io*"
+      envoy-deps:
+        patterns:
+          - "*envoyproxy*"
     labels:
       - "area/dependency"
       - "ok-to-test"
