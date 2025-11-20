@@ -142,6 +142,29 @@ I0416 19:58:18.500460 2526219 shared_informer.go:280] Caches are synced for serv
 ...
 ```
 
+### Configuring Proxy Image
+
+> [!WARNING]
+> Using a custom mirror URL and/or different Envoy version is not supported by `cloud-provider-kind` and should be used at your own risk.
+
+This allows you to use different versions or custom builds of the Envoy proxy.
+
+By default, `cloud-provider-kind` uses the --proxy-image=[`DefaultProxyImage`](pkg/constants/constants.go#L8)
+You can specify a custom proxy image using the `--proxy-image` as below
+
+Example of different envoy version (example v1.36.2). Note: Use at your own risk
+
+```sh
+bin/cloud-provider-kind --proxy-image docker.io/envoyproxy/envoy:v1.36.2
+```
+
+Example of use mirror registry. Note: Use at your own risk
+
+```sh
+MIRROR_REGISTRY_URL="<your-mirror-registry-url>"
+bin/cloud-provider-kind --proxy-image $MIRROR_REGISTRY_URL/envoyproxy/envoy:v1.33.2
+```
+
 ### Creating a Service and exposing it via a LoadBalancer
 
 Let's create an application that listens on port 8080 and expose it in the port 80 using a LoadBalancer.
