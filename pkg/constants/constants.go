@@ -4,6 +4,8 @@ const (
 	ProviderName = "kind"
 	// cloud-provider-kind
 	ContainerPrefix = "kindccm"
+	// DefaultProxyImage is the default Envoy proxy image
+	DefaultProxyImage = "docker.io/envoyproxy/envoy:v1.33.2"
 	// KIND constants
 	FixedNetworkName = "kind"
 	// NodeCCMLabelKey
