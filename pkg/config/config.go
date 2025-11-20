@@ -5,6 +5,7 @@ package config
 var DefaultConfig = &Config{
 	GatewayReleaseChannel: Standard,
 	IngressDefault:        true,
+	ProxyImage:            "docker.io/envoyproxy/envoy:v1.33.2",
 }
 
 type Config struct {
@@ -21,6 +22,7 @@ type Config struct {
 	// https://gateway-api.sigs.k8s.io/concepts/versioning/
 	GatewayReleaseChannel GatewayReleaseChannel
 	IngressDefault        bool
+	ProxyImage            string
 }
 
 type Connectivity int

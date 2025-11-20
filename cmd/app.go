@@ -28,6 +28,7 @@ var (
 	enableLBPortMapping  bool
 	gatewayChannel       string
 	enableDefaultIngress bool
+	proxyImage           string
 )
 
 func init() {
@@ -41,6 +42,7 @@ func init() {
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	flag.BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
+	flag.StringVar(&proxyImage, "proxy-image", "docker.io/envoyproxy/envoy:v1.33.2", "proxy image to use for load balancers")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [subcommand] [options]\n\n")
@@ -53,21 +55,24 @@ func init() {
 }
 
 func Main() {
+	// Parse command line flags and arguments
+	flag.Parse()
+	flag.VisitAll(func(flag *flag.Flag) {
+		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
+	})
+
+	config.DefaultConfig.ProxyImage = proxyImage
+	images.Images["proxy"] = proxyImage
+
 	// Parse subcommands if exist
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if len(flag.Args()) > 0 {
+		switch flag.Args()[0] {
 		case "list-images":
 			listImages()
 			return
 		default:
 		}
 	}
-
-	// Parse command line flags and arguments
-	flag.Parse()
-	flag.VisitAll(func(flag *flag.Flag) {
-		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
-	})
 
 	// don't allow subcommands after flags
 	if len(flag.Args()) > 0 {
