@@ -55,11 +55,6 @@ func init() {
 }
 
 func Main() {
-	// Parse command line flags and arguments
-	flag.Parse()
-	flag.VisitAll(func(flag *flag.Flag) {
-		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
-	})
 
 	// Validate Proxy Image
 	if proxyImage == "" {
@@ -76,6 +71,12 @@ func Main() {
 		default:
 		}
 	}
+
+	// Parse command line flags and arguments
+	flag.Parse()
+	flag.VisitAll(func(flag *flag.Flag) {
+		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
+	})
 
 	// don't allow subcommands after flags
 	if len(flag.Args()) > 0 {
