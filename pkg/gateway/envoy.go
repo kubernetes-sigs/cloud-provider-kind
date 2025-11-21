@@ -11,9 +11,9 @@ import (
 	"text/template"
 
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
-	"sigs.k8s.io/cloud-provider-kind/pkg/images"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -210,7 +210,7 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 	startupCmd.WriteString(fmt.Sprintf("echo -en '%s' > %s && ", dynamicFilesystemConfig, proxyConfigPath))
 	startupCmd.WriteString(fmt.Sprintf("while true; do envoy -c %s && break; sleep 1; done", proxyConfigPath))
 
-	args = append(args, images.Images["proxy"])
+	args = append(args, config.DefaultConfig.ProxyImage)
 	cmd := []string{"bash", "-c", startupCmd.String()}
 	args = append(args, cmd...)
 

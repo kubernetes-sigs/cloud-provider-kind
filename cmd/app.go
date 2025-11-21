@@ -15,8 +15,8 @@ import (
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
+	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
-	"sigs.k8s.io/cloud-provider-kind/pkg/images"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
@@ -28,6 +28,7 @@ var (
 	enableLBPortMapping  bool
 	gatewayChannel       string
 	enableDefaultIngress bool
+	proxyImage           string
 )
 
 func init() {
@@ -41,6 +42,7 @@ func init() {
 	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	flag.BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
+	flag.StringVar(&proxyImage, "proxy-image", constants.DefaultProxyImage, "proxy image to use for load balancers")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [subcommand] [options]\n\n")
@@ -53,9 +55,16 @@ func init() {
 }
 
 func Main() {
+
+	// Validate Proxy Image
+	if proxyImage == "" {
+		klog.Fatalf("proxy image can not be empty")
+	}
+	config.DefaultConfig.ProxyImage = proxyImage
+
 	// Parse subcommands if exist
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if len(flag.Args()) > 0 {
+		switch flag.Args()[0] {
 		case "list-images":
 			listImages()
 			return
@@ -181,9 +190,7 @@ func printSubcommands(subcommands [][]string) {
 }
 
 func listImages() {
-	for _, img := range images.Images {
-		fmt.Println(img)
-	}
+	fmt.Println(config.DefaultConfig.ProxyImage)
 }
 
 func isWSL2() bool {
