@@ -11,11 +11,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
-	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
@@ -28,65 +29,65 @@ var (
 	enableLBPortMapping  bool
 	gatewayChannel       string
 	enableDefaultIngress bool
-	proxyImage           string
 )
 
-func init() {
-	subcommands := [][]string{
-		{"list-images", "list images used by cloud-provider-kind"},
-	}
-
-	flag.IntVar(&flagV, "v", 2, "Verbosity level")
-	flag.BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
-	flag.StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
-	flag.BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
-	flag.StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
-	flag.BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
-	flag.StringVar(&proxyImage, "proxy-image", constants.DefaultProxyImage, "proxy image to use for load balancers")
-
-	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: cloud-provider-kind [subcommand] [options]\n\n")
-		fmt.Fprintln(os.Stderr, "Subcommands:")
-		printSubcommands(subcommands)
-		fmt.Fprint(os.Stderr, "\n")
-		fmt.Fprintln(os.Stderr, "Options:")
-		flag.PrintDefaults()
+func Main() {
+	cmd := NewCommand()
+	if err := cmd.Execute(); err != nil {
+		os.Exit(1)
 	}
 }
 
-func Main() {
-
-	// Validate Proxy Image
-	if proxyImage == "" {
-		klog.Fatalf("proxy image can not be empty")
-	}
-	config.DefaultConfig.ProxyImage = proxyImage
-
-	// Parse subcommands if exist
-	if len(flag.Args()) > 0 {
-		switch flag.Args()[0] {
-		case "list-images":
-			listImages()
-			return
-		default:
-		}
+func NewCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cloud-provider-kind",
+		Short: "cloud-provider-kind is a cloud provider for kind clusters",
+		RunE:  runE,
+		// We silence usage on error because we don't want to print usage
+		// when the command fails due to a runtime error.
+		SilenceUsage: true,
 	}
 
-	// Parse command line flags and arguments
-	flag.Parse()
-	flag.VisitAll(func(flag *flag.Flag) {
+	// Register flags
+	cmd.Flags().IntVar(&flagV, "v", 2, "Verbosity level")
+	cmd.Flags().BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
+	cmd.Flags().StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
+	cmd.Flags().BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
+	cmd.Flags().StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
+	cmd.Flags().BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
+
+	// Add go flags (for klog)
+	// We need to parse them first if we want to use them, but cobra handles parsing.
+	// However, klog flags are standard go flags.
+	// We can add them to the pflag set.
+	fs := flag.NewFlagSet("", flag.PanicOnError)
+	klog.InitFlags(fs)
+	cmd.Flags().AddGoFlagSet(fs)
+
+	cmd.AddCommand(newListImagesCommand())
+
+	return cmd
+}
+
+func newListImagesCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list-images",
+		Short: "list images used by cloud-provider-kind",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(config.DefaultConfig.ProxyImage)
+		},
+	}
+}
+
+func runE(cmd *cobra.Command, args []string) error {
+	// Log flags
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
 	})
 
-	// don't allow subcommands after flags
-	if len(flag.Args()) > 0 {
-		flag.Usage()
-		os.Exit(1)
-	}
-
 	// Process on macOS must run using sudo
 	if runtime.GOOS == "darwin" && syscall.Geteuid() != 0 {
-		klog.Fatalf("Please run this again with `sudo`.")
+		return fmt.Errorf("please run this again with `sudo`")
 	}
 
 	// trap Ctrl+C and call cancel on the context
@@ -131,7 +132,7 @@ func Main() {
 	// Validate gateway channel
 	channel := config.GatewayReleaseChannel(gatewayChannel)
 	if channel != config.Standard && channel != config.Experimental && channel != config.Disabled {
-		klog.Fatalf("Unknown Gateway API release channel %q", gatewayChannel)
+		return fmt.Errorf("unknown Gateway API release channel %q", gatewayChannel)
 	}
 	config.DefaultConfig.GatewayReleaseChannel = channel
 
@@ -140,14 +141,14 @@ func Main() {
 		if logDumpDir == "" {
 			dir, err := os.MkdirTemp(os.TempDir(), "kind-provider-")
 			if err != nil {
-				klog.Fatal(err)
+				return err
 			}
 			logDumpDir = dir
 		}
 
 		if _, err := os.Stat(logDumpDir); os.IsNotExist(err) {
 			if err := os.MkdirAll(logDumpDir, 0755); err != nil {
-				klog.Fatalf("directory %s does not exist: %v", logDumpDir, err)
+				return fmt.Errorf("directory %s does not exist: %v", logDumpDir, err)
 			}
 		}
 		config.DefaultConfig.EnableLogDump = true
@@ -173,24 +174,14 @@ func Main() {
 	// initialize kind provider
 	option, err := cluster.DetectNodeProvider()
 	if err != nil {
-		klog.Fatalf("can not detect cluster provider: %v", err)
+		return fmt.Errorf("can not detect cluster provider: %v", err)
 	}
 	kindProvider := cluster.NewProvider(
 		option,
 		cluster.ProviderWithLogger(logger),
 	)
 	controller.New(kindProvider).Run(ctx)
-}
-
-func printSubcommands(subcommands [][]string) {
-	for _, subcmd := range subcommands {
-		fmt.Fprintf(os.Stderr, "  %s\n", subcmd[0])
-		fmt.Fprintf(os.Stderr, "        %s\n", subcmd[1])
-	}
-}
-
-func listImages() {
-	fmt.Println(config.DefaultConfig.ProxyImage)
+	return nil
 }
 
 func isWSL2() bool {
