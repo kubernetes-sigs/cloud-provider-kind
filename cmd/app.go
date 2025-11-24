@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -49,20 +48,13 @@ func NewCommand() *cobra.Command {
 	}
 
 	// Register flags
-	cmd.Flags().IntVar(&flagV, "v", 2, "Verbosity level")
+	cmd.Flags().IntVarP(&flagV, "verbosity", "v", 2, "Verbosity level")
 	cmd.Flags().BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	cmd.Flags().StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	cmd.Flags().BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 	cmd.Flags().StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	cmd.Flags().BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
 
-	// Add go flags (for klog)
-	// We need to parse them first if we want to use them, but cobra handles parsing.
-	// However, klog flags are standard go flags.
-	// We can add them to the pflag set.
-	fs := flag.NewFlagSet("", flag.PanicOnError)
-	klog.InitFlags(fs)
-	cmd.Flags().AddGoFlagSet(fs)
 
 	cmd.AddCommand(newListImagesCommand())
 
