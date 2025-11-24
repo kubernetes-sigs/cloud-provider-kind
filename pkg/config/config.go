@@ -1,16 +1,30 @@
 package config
 
 import (
+	"os"
+
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
 )
 
-// DefaultConfig is a global variable that is initialized at startup with the flags options.
-// It can not be modified after that.
-var DefaultConfig = &Config{
-	GatewayReleaseChannel: Standard,
-	IngressDefault:        true,
-	ProxyImage:            constants.DefaultProxyImage,
+// DefaultConfig is a global variable that is initialized at startup.
+// Note: Its fields are modified by command-line flags in cmd/app.go.
+var DefaultConfig = newDefaultConfig()
+
+func newDefaultConfig() *Config {
+	c := &Config{
+		GatewayReleaseChannel: Standard,
+		IngressDefault:        true,
+		ProxyImage:            constants.DefaultProxyImageRegistry + "/" + constants.DefaultProxyImageName,
+	}
+
+	if registry := os.Getenv("CLOUD_PROVIDER_KIND_REGISTRY_URL"); registry != "" {
+		c.ProxyImage = registry + "/" + constants.DefaultProxyImageName
+	}
+
+	return c
 }
+
+
 
 type Config struct {
 	EnableLogDump bool

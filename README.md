@@ -142,27 +142,26 @@ I0416 19:58:18.500460 2526219 shared_informer.go:280] Caches are synced for serv
 ...
 ```
 
-### Configuring Proxy Image
+### Configuring Proxy Image Registry
 
 > [!WARNING]
-> Using a custom mirror URL and/or different Envoy version is not supported by `cloud-provider-kind` and should be used at your own risk.
+> The proxy image is an implementation detail of `cloud-provider-kind` and it is not guaranteed to be stable.
+> Changing the image version or tag is not supported and may break the cloud provider.
+> Use the following instructions only for mirroring the image to a private registry.
 
-This allows you to use different versions or custom builds of the Envoy proxy.
-
-By default, `cloud-provider-kind` uses the --proxy-image=[`DefaultProxyImage`](pkg/constants/constants.go#L8)
-You can specify a custom proxy image using the `--proxy-image` as below
-
-Example of different envoy version (example v1.36.2). Note: Use at your own risk
+You can check the image used by the current version of `cloud-provider-kind` running:
 
 ```sh
-bin/cloud-provider-kind --proxy-image docker.io/envoyproxy/envoy:v1.36.2
+bin/cloud-provider-kind list-images
 ```
 
-Example of use mirror registry. Note: Use at your own risk
+If you need to mirror the image to a private registry, you can override the registry URL using the `CLOUD_PROVIDER_KIND_REGISTRY_URL` environment variable.
+This will use the same image name and tag but with the specified registry.
+
+Example of use mirror registry:
 
 ```sh
-MIRROR_REGISTRY_URL="<your-mirror-registry-url>"
-bin/cloud-provider-kind --proxy-image $MIRROR_REGISTRY_URL/envoyproxy/envoy:v1.33.2
+CLOUD_PROVIDER_KIND_REGISTRY_URL="<your-mirror-registry-url>" bin/cloud-provider-kind
 ```
 
 ### Creating a Service and exposing it via a LoadBalancer
