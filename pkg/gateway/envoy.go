@@ -204,7 +204,6 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 			}
 		}
 	}
-	args = append(args, fmt.Sprintf("--publish=%d/tcp", envoyAdminPort))
 	args = append(args, "--publish-all")
 
 	// Construct the multi-step command
