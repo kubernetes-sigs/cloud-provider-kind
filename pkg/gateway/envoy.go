@@ -193,7 +193,9 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		"--sysctl=net.ipv6.conf.all.forwarding=1",
 	}...)
 
-	if enableTunnel {
+	if enableTunnel ||
+		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
+		// Forward the Listener Ports to the host so they are accessible on Mac and Windows
 		for _, listener := range gateway.Spec.Listeners {
 			if listener.Protocol == gatewayv1.UDPProtocolType {
 				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, "udp"))
