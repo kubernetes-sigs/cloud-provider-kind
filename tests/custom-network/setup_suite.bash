@@ -18,16 +18,9 @@ function setup_suite {
   --subnet=172.20.0.0/16 $KIND_EXPERIMENTAL_DOCKER_NETWORK
 
   # create cluster
-  cat <<EOF | kind create cluster \
+  kind create cluster \
   --name $CLUSTER_NAME           \
-  -v7 --wait 1m --retain --config=-
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-- role: worker
-- role: worker
-EOF
+  -v7 --wait 1m --retain --config="$BATS_TEST_DIRNAME/../kind.yaml"
 
   # build & run cloud-provider-kind
   cd "$BATS_TEST_DIRNAME"/../.. && make
