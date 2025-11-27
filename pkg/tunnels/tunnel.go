@@ -41,14 +41,31 @@ func (t *TunnelManager) SetupTunnels(containerName string) error {
 	}
 
 	klog.V(0).Infof("setting IPv4 address %s associated to container %s", ipv4, containerName)
-	output, err := AddIPToLocalInterface(ipv4)
-	if err != nil {
-		return fmt.Errorf("error adding IP to local interface: %w - %s", err, output)
+	// check if the IP is already assigned to the local interface
+	if !ipOnHost(ipv4) {
+		output, err := AddIPToLocalInterface(ipv4)
+		if err != nil {
+			return fmt.Errorf("error adding IP to local interface: %w - %s", err, output)
+		}
 	}
 
 	// create tunnel from the ip:svcport to the localhost:portmap
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	_, ok := t.tunnels[containerName]
+	if !ok {
+		t.tunnels[containerName] = map[string]*tunnel{}
+	}
+
+	// Reconcile: Remove tunnels that are not in portmaps
+	for containerPort, tun := range t.tunnels[containerName] {
+		if _, ok := portmaps[containerPort]; !ok {
+			klog.V(0).Infof("removing tunnel for %s %s as it is no longer in portmaps", containerName, containerPort)
+			tun.Stop() // nolint: errcheck
+			delete(t.tunnels[containerName], containerPort)
+		}
+	}
+
 	// There is one IP per Service and a tunnel per Service Port
 	for containerPort, hostPort := range portmaps {
 		parts := strings.Split(containerPort, "/")
@@ -56,15 +73,16 @@ func (t *TunnelManager) SetupTunnels(containerName string) error {
 			return fmt.Errorf("expected format port/protocol for container port, got %s", containerPort)
 		}
 
+		if _, ok := t.tunnels[containerName][containerPort]; ok {
+			klog.V(2).Infof("tunnel for %s %s already exists", containerName, containerPort)
+			continue
+		}
+
 		tun := NewTunnel(ipv4, parts[0], parts[1], "localhost", hostPort)
 		// TODO check if we can leak tunnels
 		err = tun.Start()
 		if err != nil {
 			return err
-		}
-		_, ok := t.tunnels[containerName]
-		if !ok {
-			t.tunnels[containerName] = map[string]*tunnel{}
 		}
 		t.tunnels[containerName][containerPort] = tun
 	}
@@ -88,6 +106,7 @@ func (t *TunnelManager) RemoveTunnels(containerName string) error {
 		}
 		tunnel.Stop() // nolint: errcheck
 	}
+	delete(t.tunnels, containerName)
 
 	klog.V(0).Infof("Removing IPv4 address %s associated to local interface", tunnelIP)
 	output, err := RemoveIPFromLocalInterface(tunnelIP)
@@ -274,4 +293,30 @@ func (t *tunnel) handleUDPConnection(conn *net.UDPConn) error {
 	_, err = conn.WriteToUDP(buf[:nRead], srcAddr)
 
 	return err
+}
+
+func ipOnHost(ip string) bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, i := range ifaces {
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ipAddr net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ipAddr = v.IP
+			case *net.IPAddr:
+				ipAddr = v.IP
+			}
+			if ipAddr != nil && ipAddr.String() == ip {
+				return true
+			}
+		}
+	}
+	return false
 }
