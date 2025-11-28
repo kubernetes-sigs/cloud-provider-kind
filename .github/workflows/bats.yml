@@ -52,13 +52,18 @@ jobs:
             ./_artifacts-custom-network
  
   bats_mac_tests:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     name: Bats e2e tests on Mac
-    # Skip until port forwarding works
+    # Skip until runner does not timeout on kind create cluster
     if: false
     steps:
       - name: Checkout
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      # c.f. https://github.com/actions/runner-images/issues/13358
+      - name: Work around x86 macOS bug for multiple CPU cores
+        run: |
+          sudo defaults -currentHost write /Library/Preferences/com.apple.powerlogd SMCMonitorCadence 0
+          sudo killall PerfPowerServices || true
       - name: Set up environment (download dependencies)
         run: |
           brew install docker colima
@@ -71,7 +76,6 @@ jobs:
         env:
           TERM: linux
         run: |
-          bash --version
           bash -c "time bats -o _artifacts --trace --formatter tap tests/"
       - name: Debug info
         if: always()
@@ -84,5 +88,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
+          name: kind-logs-mac-${{ github.run_id }}
           path: ./_artifacts
