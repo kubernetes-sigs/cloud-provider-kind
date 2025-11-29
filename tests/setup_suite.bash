@@ -12,16 +12,7 @@ function setup_suite {
   rm -rf "$ARTIFACTS_DIR"/*
 
   # create cluster
-  cat <<EOF | kind create cluster \
-  --name $CLUSTER_NAME           \
-  -v7 --wait 1m --retain --config=-
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-- role: worker
-- role: worker
-EOF
+  kind create cluster --name $CLUSTER_NAME -v7 --wait 1m --retain --config="$BATS_TEST_DIRNAME/kind.yaml"
 
   cd "$BATS_TEST_DIRNAME"/.. && make
   nohup "$BATS_TEST_DIRNAME"/../bin/cloud-provider-kind -v 2 --gateway-channel=standard --enable-log-dumping --logs-dir "$ARTIFACTS_DIR" > "$ARTIFACTS_DIR"/ccm-kind.log 2>&1 &
