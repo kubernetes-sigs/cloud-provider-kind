@@ -10,6 +10,8 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/lithammer/dedent v1.1.0
 	github.com/pkg/errors v0.9.1
+	github.com/spf13/cobra v1.10.1
+	github.com/spf13/pflag v1.0.10
 	github.com/vishvananda/netlink v1.3.1
 	google.golang.org/grpc v1.77.0
 	google.golang.org/protobuf v1.36.10
@@ -22,7 +24,7 @@ require (
 	k8s.io/controller-manager v0.34.2
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/utils v0.0.0-20250820121507-0af2bda4dd1d
-	sigs.k8s.io/gateway-api v1.4.0
+	sigs.k8s.io/gateway-api v1.4.1
 	sigs.k8s.io/kind v0.30.0
 )
 
@@ -71,8 +73,6 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
-	github.com/spf13/cobra v1.10.1 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
