@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -59,7 +59,8 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayR
 		Resource: crdResource,
 	}
 
-	targetDir := filepath.Join(crdsDir, string(channelDir))
+	// embed.FS always uses Unix path names
+	targetDir := path.Join(crdsDir, string(channelDir))
 
 	klog.Infof("Walking embedded directory for channel %q: %s", channelDir, targetDir)
 	err := fs.WalkDir(crdFS, targetDir, func(path string, d fs.DirEntry, err error) error {
@@ -124,7 +125,6 @@ func (m *CRDManager) InstallCRDs(ctx context.Context, channelDir config.GatewayR
 		}
 		return nil
 	})
-
 	if err != nil {
 		return fmt.Errorf("error processing embedded CRDs from %s: %w", targetDir, err)
 	}
