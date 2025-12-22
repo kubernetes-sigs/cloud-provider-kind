@@ -27,3 +27,12 @@ updates:
     labels:
       - "area/dependency"
       - "ok-to-test"
+
+  - package-ecosystem: "docker"
+    directories:
+      - "**/*"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "area/dependency"
+      - "ok-to-test"
