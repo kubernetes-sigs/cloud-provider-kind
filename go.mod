@@ -1,8 +1,6 @@
 module sigs.k8s.io/cloud-provider-kind
 
-go 1.24.0
-
-toolchain go1.24.2
+go 1.25.5
 
 require (
 	github.com/envoyproxy/go-control-plane v0.14.0
