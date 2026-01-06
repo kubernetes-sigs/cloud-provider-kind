@@ -9,6 +9,6 @@ ARG TARGETARCH
 RUN GOARCH=$TARGETARCH make build
 
 # build real cloud-provider-kind image
-FROM docker:28-cli
+FROM docker:29-cli
 COPY --from=0 --chown=root:root ./go/src/bin/cloud-provider-kind /bin/cloud-provider-kind
 ENTRYPOINT ["/bin/cloud-provider-kind"]
