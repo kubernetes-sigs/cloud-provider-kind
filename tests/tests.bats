@@ -160,3 +160,102 @@
     # Cleanup: Delete the applied manifests
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/ingress_foo_bar.yaml
 }
+
+@test "Ingress WebSocket Support" {
+    # 1. Deploy a WebSocket-capable echo server
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ws-echo
+  labels:
+    app: ws-echo
+spec:
+  selector:
+    matchLabels:
+      app: ws-echo
+  template:
+    metadata:
+      labels:
+        app: ws-echo
+    spec:
+      containers:
+      - name: echo
+        image: jmalloc/echo-server
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-service
+spec:
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: ws-echo
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ws-ingress
+spec:
+  rules:
+  - host: ws.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ws-service
+            port:
+              number: 80
+EOF
+
+    # 2. Wait for the pod to be ready
+    kubectl wait --for=condition=ready pod -l app=ws-echo --timeout=60s
+
+    # 3. Get Ingress IP
+    echo "Waiting for Ingress IP..."
+    for i in {1..30}; do
+        IP=$(kubectl get ingress ws-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        [[ ! -z "$IP" ]] && break || sleep 1
+    done
+    echo "Ingress IP: $IP"
+    [[ ! -z "$IP" ]]
+
+    # 4. Verify WebSocket Upgrade from the HOST (with retry)
+    echo "Verifying WebSocket handshake..."
+    FOUND=0
+    for i in {1..10}; do
+        # Use --max-time 3 to prevent hanging if the IP is not yet reachable
+        OUTPUT=$(curl -i -N -s --max-time 3 \
+            -H "Host: ws.example.com" \
+            -H "Connection: Upgrade" \
+            -H "Upgrade: websocket" \
+            -H "Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==" \
+            -H "Sec-WebSocket-Version: 13" \
+            "http://$IP/" || true)
+        
+        if [[ "$OUTPUT" == *"101 Switching Protocols"* ]]; then
+            echo "Success: 101 Switching Protocols found"
+            FOUND=1
+            break
+        fi
+        echo "Attempt $i failed or not ready. Retrying..."
+        sleep 1
+    done
+
+    if [ "$FOUND" -eq 0 ]; then
+        echo "Failed to establish WebSocket connection. Last output:"
+        echo "$OUTPUT"
+        return 1
+    fi
+
+    # Cleanup
+    kubectl delete deployment ws-echo
+    kubectl delete service ws-service
+    kubectl delete ingress ws-ingress
+}

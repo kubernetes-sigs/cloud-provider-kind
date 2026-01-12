@@ -227,6 +227,11 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 			// Enable X-Forwarded-For header
 			// https://github.com/kubernetes-sigs/cloud-provider-kind/issues/296
 			UseRemoteAddress: &wrapperspb.BoolValue{Value: true},
+			// Support websocket upgrade
+			// https://github.com/kubernetes-sigs/cloud-provider-kind/issues/355
+			UpgradeConfigs: []*hcm.HttpConnectionManager_UpgradeConfig{{
+				UpgradeType: "websocket",
+			}},
 			RouteSpecifier: &hcm.HttpConnectionManager_Rds{
 				Rds: &hcm.Rds{
 					ConfigSource: &corev3.ConfigSource{
