@@ -298,8 +298,8 @@ func Test_generateConfig(t *testing.T) {
 					},
 				},
 				SourceRanges: []sourceRange{
-					{ Prefix: "10.0.0.0", Length: 8},
-					{ Prefix: "192.168.0.0", Length: 16},
+					{Prefix: "10.0.0.0", Length: 8},
+					{Prefix: "192.168.0.0", Length: 16},
 				},
 			},
 		},
@@ -343,6 +343,9 @@ func Test_proxyConfig(t *testing.T) {
 				  name: cluster_IPv4_443
 				  connect_timeout: 5s
 				  type: STATIC
+				  common_lb_config:
+				    healthy_panic_threshold:
+				      value: 0
 				  lb_policy: RANDOM
 				  health_checks:
 				  - timeout: 5s
@@ -380,6 +383,9 @@ func Test_proxyConfig(t *testing.T) {
 				  name: cluster_IPv4_80
 				  connect_timeout: 5s
 				  type: STATIC
+				  common_lb_config:
+				    healthy_panic_threshold:
+				      value: 0
 				  lb_policy: RANDOM
 				  health_checks:
 				  - timeout: 5s
@@ -490,6 +496,9 @@ func Test_proxyConfig(t *testing.T) {
 				  name: cluster_IPv4_80
 				  connect_timeout: 5s
 				  type: STATIC
+				  common_lb_config:
+				    healthy_panic_threshold:
+				      value: 0
 				  lb_policy: RING_HASH
 				  health_checks:
 				  - timeout: 5s
@@ -574,8 +583,8 @@ func Test_proxyConfig(t *testing.T) {
 					},
 				},
 				SourceRanges: []sourceRange{
-					{ Prefix: "10.0.0.0", Length: 8},
-					{ Prefix: "192.168.0.0", Length: 16},
+					{Prefix: "10.0.0.0", Length: 8},
+					{Prefix: "192.168.0.0", Length: 16},
 				},
 			},
 			wantConfig: `
