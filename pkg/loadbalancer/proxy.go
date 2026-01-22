@@ -152,6 +152,9 @@ resources:
   name: cluster_{{$index}}
   connect_timeout: 5s
   type: STATIC
+  common_lb_config:
+    healthy_panic_threshold:
+      value: 0
   {{- if eq $.SessionAffinity "ClientIP"}}
   lb_policy: RING_HASH
   {{- else}}

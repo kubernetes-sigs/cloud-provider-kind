@@ -16,6 +16,7 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -655,6 +656,11 @@ func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backe
 	cluster := &clusterv3.Cluster{
 		Name:           clusterName,
 		ConnectTimeout: durationpb.New(5 * time.Second),
+		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
+			HealthyPanicThreshold: &typev3.Percent{
+				Value: 0,
+			},
+		},
 	}
 
 	if service.Spec.ClusterIP == corev1.ClusterIPNone {
