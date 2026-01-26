@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"sort"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -67,6 +67,7 @@ import (
 const (
 	controllerName = "kind.sigs.k8s.io/gateway-controller"
 	GWClassName    = "cloud-provider-kind"
+	GWSocketName   = "/var/run/cloudproviderkind.sock"
 	maxRetries     = 5
 	workers        = 5
 )
@@ -120,11 +121,9 @@ type Controller struct {
 	referenceGrantLister       gatewaylistersv1beta1.ReferenceGrantLister
 	referenceGrantListerSynced cache.InformerSynced
 
-	xdscache        cachev3.SnapshotCache
-	xdsserver       serverv3.Server
-	xdsLocalAddress string
-	xdsLocalPort    int
-	xdsVersion      atomic.Uint64
+	xdscache   cachev3.SnapshotCache
+	xdsserver  serverv3.Server
+	xdsVersion atomic.Uint64
 
 	tunnelManager *tunnels.TunnelManager
 }
@@ -428,29 +427,35 @@ func (c *Controller) Run(ctx context.Context) error {
 	secretv3.RegisterSecretDiscoveryServiceServer(grpcServer, c.xdsserver)
 	runtimev3.RegisterRuntimeDiscoveryServiceServer(grpcServer, c.xdsserver)
 
-	address, err := GetControlPlaneAddress()
+	// Cleanup any existing socket file remaining incase from previous crash.
+	if err := os.RemoveAll(GWSocketName); err != nil {
+		return fmt.Errorf("failed to remove old socket: %s", err.Error())
+	}
+
+	// Start a Unix Domain Socket
+	listener, err := net.Listen("unix", GWSocketName)
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", address))
-	if err != nil {
+
+	defer func() {
+		listener.Close()
+		logger.Info("Cleaning up socket")
+		if err := os.RemoveAll(GWSocketName); err != nil {
+			logger.Error(err, "failed to cleanup socket")
+		}
+	}()
+
+	if err := os.Chmod(GWSocketName, 0666); err != nil {
+		listener.Close()
 		return err
 	}
-	defer listener.Close()
 
-	addr := listener.Addr()
-	tcpAddr, ok := addr.(*net.TCPAddr)
-	if !ok {
-		return fmt.Errorf("could not assert listener address to TCPAddr: %s", addr.String())
-	}
-
-	c.xdsLocalAddress = address
-	c.xdsLocalPort = tcpAddr.Port
 	go func() {
 		logger.Info(
 			"XDS management server listening",
-			"address", c.xdsLocalAddress,
-			"port", c.xdsLocalPort)
+			"Unix Domain Socket", GWSocketName,
+		)
 		if err = grpcServer.Serve(listener); err != nil {
 			logger.Error(err, "gRPC server error:")
 		}
@@ -650,7 +655,6 @@ func (c *Controller) processNextGatewayItem(ctx context.Context) bool {
 		return false
 	}
 	defer c.gatewayqueue.Done(key)
-
 	err := c.syncGateway(ctx, key)
 	c.handleGatewayErr(err, key)
 	return true
@@ -671,54 +675,6 @@ func (c *Controller) handleGatewayErr(err error, key string) {
 	c.gatewayqueue.Forget(key)
 	runtime.HandleError(err)
 	klog.Infof("Dropping Gateway %q out of the queue: %v", key, err)
-}
-
-func GetControlPlaneAddress() (string, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	sort.Slice(interfaces, func(i, j int) bool {
-		nameI := interfaces[i].Name
-		nameJ := interfaces[j].Name
-
-		if nameI == "docker0" {
-			return true
-		}
-		if nameJ == "docker0" {
-			return false
-		}
-
-		if nameI == "eth0" {
-			return nameJ != "docker0"
-		}
-		if nameJ == "eth0" {
-			return false
-		}
-
-		return nameI < nameJ
-	})
-
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLinkLocalUnicast() && !ipNet.IP.IsLoopback() {
-				return ipNet.IP.String(), nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("no suitable global unicast IPv4 address found on any active non-loopback interface")
 }
 
 func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resources map[resourcev3.Type][]envoyproxytypes.Resource) error {
