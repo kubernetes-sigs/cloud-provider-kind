@@ -332,8 +332,8 @@ When running `cloud-provider-kind` in a container on Windows or macOS, accessing
 `LoadBalancer` services can be challenging. Similar problems occur when running
 Podman as root, since Podman does not allow binding to privileged ports (e.g.,
 1-1024). The `--enable-lb-port-mapping` flag provides a solution by enabling the
-necessary port mapping, allowing host access to these services and is
-automatically enabled on platforms where this is required, see [Mac, Windows and
+necessary port mapping, allowing host access to these services. It is
+automatically enabled on platforms where this is required. See [Mac, Windows and
 WSL2 support](#mac-windows-and-wsl2-support) section for more details.
 
 To connect to your service in these cases, run `cloud-provider-kind` with the
