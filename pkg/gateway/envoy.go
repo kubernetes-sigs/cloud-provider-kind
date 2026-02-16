@@ -21,6 +21,7 @@ import (
 const (
 	proxyConfigPath = "/home/envoy/envoy.yaml"
 	envoyAdminPort  = 10000
+	envoySocketName = "/var/run/envoy.sock"
 
 	// well known dns to reach host from containers
 	// https://github.com/containerd/nerdctl/issues/747
@@ -46,7 +47,7 @@ dynamic_resources:
 
 static_resources:
   clusters:
-  - type: STRICT_DNS
+  - type: STATIC
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -59,19 +60,8 @@ static_resources:
       - lb_endpoints:
         - endpoint:
             address:
-              socket_address:
-                address: {{ .ControlPlaneAddress }}
-                port_value: {{ .ControlPlanePort }}
-        - endpoint:
-            address:
-              socket_address:
-                address: host.docker.internal
-                port_value: {{ .ControlPlanePort }}
-        - endpoint:
-            address:
-              socket_address:
-                address: host.lima.internal
-                port_value: {{ .ControlPlanePort }}
+              pipe:
+                path: {{ .EnvoySocket }}
 
 admin:
   access_log_path: /dev/stdout
@@ -82,20 +72,17 @@ admin:
 `
 
 type configData struct {
-	Cluster             string
-	ID                  string
-	AdminPort           int
-	ControlPlaneAddress string
-	ControlPlanePort    int
+	Cluster     string
+	ID          string
+	AdminPort   int
+	EnvoySocket string
 }
 
 // generateEnvoyConfig returns an envoy config generated from config data
 func generateEnvoyConfig(data *configData) (string, error) {
 	if data.Cluster == "" ||
 		data.ID == "" ||
-		data.AdminPort == 0 ||
-		data.ControlPlaneAddress == "" ||
-		data.ControlPlanePort == 0 {
+		data.AdminPort == 0 {
 		return "", fmt.Errorf("missing parameters")
 	}
 
@@ -128,15 +115,14 @@ func gatewaySimpleName(clusterName, namespace, name string) string {
 }
 
 // createGateway create a docker container with a gateway
-func createGateway(clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
+func createGateway(clusterName string, nameserver string, gateway *gatewayv1.Gateway, enableTunnel bool) error {
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfigData := &configData{
-		ID:                  name,
-		Cluster:             simpleName,
-		AdminPort:           envoyAdminPort,
-		ControlPlaneAddress: localAddress,
-		ControlPlanePort:    localPort,
+		ID:          name,
+		Cluster:     simpleName,
+		AdminPort:   envoyAdminPort,
+		EnvoySocket: envoySocketName,
 	}
 	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfigData)
 	if err != nil {
@@ -153,6 +139,8 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		"--user=0",
 		"--label", fmt.Sprintf("%s=%s", constants.NodeCCMLabelKey, clusterName),
 		"--label", fmt.Sprintf("%s=%s", constants.GatewayNameLabelKey, simpleName),
+		"--env", "ENVOY_UID=0",
+		"--volume", fmt.Sprintf("%s:%s", GWSocketName, envoySocketName),
 		"--net", networkName,
 		"--dns", nameserver,
 		"--init=false",

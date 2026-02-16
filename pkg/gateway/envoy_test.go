@@ -12,11 +12,10 @@ func TestGenerateEnvoyConfigTable(t *testing.T) {
 		{
 			name: "Default Configuration",
 			configData: &configData{
-				Cluster:             "test-cluster",
-				ID:                  "test-id",
-				AdminPort:           9000,
-				ControlPlaneAddress: "192.168.1.10",
-				ControlPlanePort:    8080,
+				Cluster:     "test-cluster",
+				ID:          "test-id",
+				AdminPort:   9000,
+				EnvoySocket: "/var/run/test-envoy-1.sock",
 			},
 			expectedConfig: `node:
   cluster: test-cluster
@@ -35,7 +34,7 @@ dynamic_resources:
 
 static_resources:
   clusters:
-  - type: STRICT_DNS
+  - type: STATIC
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -48,19 +47,8 @@ static_resources:
       - lb_endpoints:
         - endpoint:
             address:
-              socket_address:
-                address: 192.168.1.10
-                port_value: 8080
-        - endpoint:
-            address:
-              socket_address:
-                address: host.docker.internal
-                port_value: 8080
-        - endpoint:
-            address:
-              socket_address:
-                address: host.lima.internal
-                port_value: 8080
+              pipe:
+                path: /var/run/test-envoy-1.sock
 
 admin:
   access_log_path: /dev/stdout
@@ -74,11 +62,10 @@ admin:
 		{
 			name: "Different Ports and Addresses",
 			configData: &configData{
-				Cluster:             "another-cluster",
-				ID:                  "instance-01",
-				AdminPort:           12345,
-				ControlPlaneAddress: "10.0.1.5",
-				ControlPlanePort:    50051,
+				Cluster:     "another-cluster",
+				ID:          "instance-01",
+				AdminPort:   12345,
+				EnvoySocket: "/var/run/test-envoy-2.sock",
 			},
 			expectedConfig: `node:
   cluster: another-cluster
@@ -97,7 +84,7 @@ dynamic_resources:
 
 static_resources:
   clusters:
-  - type: STRICT_DNS
+  - type: STATIC
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -110,19 +97,8 @@ static_resources:
       - lb_endpoints:
         - endpoint:
             address:
-              socket_address:
-                address: 10.0.1.5
-                port_value: 50051
-        - endpoint:
-            address:
-              socket_address:
-                address: host.docker.internal
-                port_value: 50051
-        - endpoint:
-            address:
-              socket_address:
-                address: host.lima.internal
-                port_value: 50051
+              pipe:
+                path: /var/run/test-envoy-2.sock
 
 admin:
   access_log_path: /dev/stdout
@@ -136,11 +112,10 @@ admin:
 		{
 			name: "Empty Cluster and ID",
 			configData: &configData{
-				Cluster:             "",
-				ID:                  "",
-				AdminPort:           80,
-				ControlPlaneAddress: "localhost",
-				ControlPlanePort:    8080,
+				Cluster:     "",
+				ID:          "",
+				AdminPort:   80,
+				EnvoySocket: "/var/run/test-envoy-3",
 			},
 			wantErr: true,
 		},
