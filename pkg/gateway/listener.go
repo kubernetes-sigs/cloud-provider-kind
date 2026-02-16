@@ -24,7 +24,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 // setListenerCondition is a helper to safely set a condition on a listener's status
@@ -154,12 +153,12 @@ func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) map[gatewayv1
 			}
 
 			if secretNamespace != gateway.Namespace {
-				from := gatewayv1beta1.ReferenceGrantFrom{
+				from := gatewayv1.ReferenceGrantFrom{
 					Group:     gatewayv1.GroupName,
 					Kind:      "Gateway",
 					Namespace: gatewayv1.Namespace(gateway.Namespace),
 				}
-				to := gatewayv1beta1.ReferenceGrantTo{
+				to := gatewayv1.ReferenceGrantTo{
 					Group: "", // Core group for Secret
 					Kind:  "Secret",
 					Name:  &certRef.Name,

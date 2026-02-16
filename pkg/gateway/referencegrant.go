@@ -3,17 +3,17 @@ package gateway
 import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
-	gatewayv1beta1listers "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1listers "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
 )
 
 // isCrossNamespaceRefAllowed checks if a cross-namespace reference from a 'from' object
 // to a 'to' object is permitted by a ReferenceGrant in the 'to' object's namespace.
 func isCrossNamespaceRefAllowed(
-	from gatewayv1beta1.ReferenceGrantFrom, // Describes the referencing object (e.g., an HTTPRoute)
-	to gatewayv1beta1.ReferenceGrantTo, // Describes the referenced object (e.g., a Service)
+	from gatewayv1.ReferenceGrantFrom, // Describes the referencing object (e.g., an HTTPRoute)
+	to gatewayv1.ReferenceGrantTo, // Describes the referenced object (e.g., a Service)
 	toNamespace string, // The namespace of the referenced object
-	referenceGrantLister gatewayv1beta1listers.ReferenceGrantLister,
+	referenceGrantLister gatewayv1listers.ReferenceGrantLister,
 ) bool {
 	// List all ReferenceGrants in the target namespace.
 	grants, err := referenceGrantLister.ReferenceGrants(toNamespace).List(labels.Everything())

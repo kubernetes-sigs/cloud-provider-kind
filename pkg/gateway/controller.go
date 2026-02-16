@@ -56,12 +56,9 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/tunnels"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
-	gatewayinformersv1beta1 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1beta1"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
-	gatewaylistersv1beta1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 )
 
 const (
@@ -117,7 +114,7 @@ type Controller struct {
 	grpcrouteLister       gatewaylisters.GRPCRouteLister
 	grpcrouteListerSynced cache.InformerSynced
 
-	referenceGrantLister       gatewaylistersv1beta1.ReferenceGrantLister
+	referenceGrantLister       gatewaylisters.ReferenceGrantLister
 	referenceGrantListerSynced cache.InformerSynced
 
 	xdscache        cachev3.SnapshotCache
@@ -140,7 +137,7 @@ func New(
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
-	referenceGrantInformer gatewayinformersv1beta1.ReferenceGrantInformer,
+	referenceGrantInformer gatewayinformers.ReferenceGrantInformer,
 ) (*Controller, error) {
 	c := &Controller{
 		clusterName:              clusterName,
@@ -494,14 +491,14 @@ func (c *Controller) processGateways(references []gatewayv1.ParentReference, loc
 // for both cross-namespace BackendRefs (from Routes) and cross-namespace
 // SecretRefs (from Gateways).
 func (c *Controller) processReferenceGrant(obj interface{}) {
-	grant, ok := obj.(*gatewayv1beta1.ReferenceGrant)
+	grant, ok := obj.(*gatewayv1.ReferenceGrant)
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
 			klog.Errorf("error decoding object, invalid type")
 			return
 		}
-		grant, ok = tombstone.Obj.(*gatewayv1beta1.ReferenceGrant)
+		grant, ok = tombstone.Obj.(*gatewayv1.ReferenceGrant)
 		if !ok {
 			klog.Errorf("error decoding object tombstone, invalid type")
 			return
