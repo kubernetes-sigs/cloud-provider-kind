@@ -316,7 +316,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		gwInformer := sharedGwInformers.Gateway().V1().Gateways()
 		httpRouteInformer := sharedGwInformers.Gateway().V1().HTTPRoutes()
 		grpcRouteInformer := sharedGwInformers.Gateway().V1().GRPCRoutes()
-		referenceGrantInformer := sharedGwInformers.Gateway().V1beta1().ReferenceGrants()
+		referenceGrantInformer := sharedGwInformers.Gateway().V1().ReferenceGrants()
 
 		gatewayController, err = gateway.New(
 			clusterName,

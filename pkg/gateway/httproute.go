@@ -14,8 +14,7 @@ import (
 
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
-	gatewaylistersv1beta1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
+	gatewaylistersv1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
 )
 
 // translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
@@ -23,7 +22,7 @@ import (
 func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
-	referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister,
+	referenceGrantLister gatewaylistersv1.ReferenceGrantLister,
 ) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
 
 	var envoyRoutes []*routev3.Route
@@ -152,7 +151,7 @@ func translateHTTPRouteToEnvoyRoutes(
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
-func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendRef, serviceLister corev1listers.ServiceLister, referenceGrantLister gatewaylistersv1beta1.ReferenceGrantLister) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
+func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendRef, serviceLister corev1listers.ServiceLister, referenceGrantLister gatewaylistersv1.ReferenceGrantLister) (*routev3.RouteAction, []gatewayv1.BackendRef, error) {
 	weightedClusters := &routev3.WeightedCluster{}
 	var validBackendRefs []gatewayv1.BackendRef
 
@@ -166,12 +165,12 @@ func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendR
 
 		// If it's a cross-namespace reference, we must check for a ReferenceGrant.
 		if ns != namespace {
-			from := gatewayv1beta1.ReferenceGrantFrom{
+			from := gatewayv1.ReferenceGrantFrom{
 				Group:     gatewayv1.GroupName,
 				Kind:      "HTTPRoute",
 				Namespace: gatewayv1.Namespace(namespace),
 			}
-			to := gatewayv1beta1.ReferenceGrantTo{
+			to := gatewayv1.ReferenceGrantTo{
 				Group: "", // Core group for Service
 				Kind:  "Service",
 				Name:  &backendRef.Name,

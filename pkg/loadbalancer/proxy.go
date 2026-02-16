@@ -150,7 +150,7 @@ resources:
 {{- range $index, $servicePort := .ServicePorts }}
 - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
   name: cluster_{{$index}}
-  connect_timeout: 5s
+  connect_timeout: 3s
   type: STATIC
   common_lb_config:
     healthy_panic_threshold:
@@ -161,11 +161,12 @@ resources:
   lb_policy: RANDOM
   {{- end}}
   health_checks:
-  - timeout: 5s
-    interval: 3s
+  - timeout: 3s
+    interval: 2s
     unhealthy_threshold: 2
     healthy_threshold: 1
-    no_traffic_interval: 5s
+    initial_jitter: 0s
+    no_traffic_interval: 3s
     always_log_health_check_failures: true
     always_log_health_check_success: true
     event_log_path: /dev/stdout
