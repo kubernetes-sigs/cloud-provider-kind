@@ -13,16 +13,16 @@ require (
 	github.com/vishvananda/netlink v1.3.1
 	google.golang.org/grpc v1.79.1
 	google.golang.org/protobuf v1.36.11
-	k8s.io/api v0.35.1
-	k8s.io/apimachinery v0.35.1
-	k8s.io/apiserver v0.35.1
-	k8s.io/client-go v0.35.1
-	k8s.io/cloud-provider v0.35.1
-	k8s.io/component-base v0.35.1
-	k8s.io/controller-manager v0.35.1
+	k8s.io/api v0.35.2
+	k8s.io/apimachinery v0.35.2
+	k8s.io/apiserver v0.35.2
+	k8s.io/client-go v0.35.2
+	k8s.io/cloud-provider v0.35.2
+	k8s.io/component-base v0.35.2
+	k8s.io/controller-manager v0.35.2
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
-	sigs.k8s.io/gateway-api v1.5.0-rc.1
+	sigs.k8s.io/gateway-api v1.5.0
 	sigs.k8s.io/kind v0.31.0
 )
 
@@ -86,7 +86,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	k8s.io/component-helpers v0.35.1 // indirect
+	k8s.io/component-helpers v0.35.2 // indirect
 	k8s.io/kube-openapi v0.0.0-20260127142750-a19766b6e2d4 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
