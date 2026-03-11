@@ -16,6 +16,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
+	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
@@ -164,9 +165,14 @@ func runE(cmd *cobra.Command, args []string) error {
 	config.DefaultConfig.ControlPlaneConnectivity = config.Portmap
 
 	// initialize kind provider
-	option, err := cluster.DetectNodeProvider()
-	if err != nil {
-		return fmt.Errorf("can not detect cluster provider: %v", err)
+	var option cluster.ProviderOption
+	switch p := container.Runtime(); p {
+	case "podman":
+		option = cluster.ProviderWithPodman()
+	case "nerdctl", "finch", "nerdctl.lima":
+		option = cluster.ProviderWithNerdctl(p)
+	default:
+		option = cluster.ProviderWithDocker()
 	}
 	kindProvider := cluster.NewProvider(
 		option,
