@@ -49,6 +49,11 @@ func nerdctlIsAvailable() bool {
 	return strings.HasPrefix(lines[0], "nerdctl version")
 }
 
+// Runtime returns the detected container runtime name.
+func Runtime() string {
+	return containerRuntime
+}
+
 func init() {
 	// allow to override the container provider as we do in KIND
 	if p := os.Getenv("KIND_EXPERIMENTAL_PROVIDER"); p != "" {
