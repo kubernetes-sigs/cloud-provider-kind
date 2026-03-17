@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -166,7 +167,9 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 
 	// support to specify addresses
 	// only the first of each IP family will be used
-	var ipv4, ipv6 string
+	// listenAddress tracks the host bind address for port publishing: "0.0.0.0" for IPv4-only,
+	// "::" for IPv6-only, or "" for dual-stack/unspecified (publish on all interfaces).
+	var ipv4, ipv6, listenAddress string
 	for _, address := range gateway.Spec.Addresses {
 		if address.Type != nil && *address.Type != gatewayv1.IPAddressType {
 			continue
@@ -179,11 +182,21 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 			if ipv4 == "" {
 				ipv4 = address.Value
 				args = append(args, "--ip", ip.String())
+				if ipv6 == "" {
+					listenAddress = "0.0.0.0"
+				} else {
+					listenAddress = "" // dual-stack
+				}
 			}
 		} else if ip.Is6() {
 			if ipv6 == "" {
 				ipv6 = address.Value
 				args = append(args, "--ip6", ip.String())
+				if ipv4 == "" {
+					listenAddress = "::"
+				} else {
+					listenAddress = "" // dual-stack
+				}
 			}
 		}
 	}
@@ -195,12 +208,22 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 
 	if enableTunnel ||
 		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
-		// Forward the Listener Ports to the host so they are accessible on Mac and Windows
+		// Forward the Listener Ports to the host so they are accessible on Mac and Windows.
+		// For single IP-family gateways, explicitly bind on the matching listen address to avoid
+		// dual-stack host bindings that cause connection resets in environments where IPv6 is
+		// advertised but not functional end-to-end (e.g. some GitHub Actions runners).
+		// For dual-stack or unspecified gateways, publish without an explicit address.
+		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/387
 		for _, listener := range gateway.Spec.Listeners {
+			proto := "tcp"
 			if listener.Protocol == gatewayv1.UDPProtocolType {
-				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, "udp"))
+				proto = "udp"
+			}
+			if listenAddress != "" {
+				hostPortBinding := net.JoinHostPort(listenAddress, fmt.Sprintf("%d", listener.Port))
+				args = append(args, fmt.Sprintf("--publish=%s:%d/%s", hostPortBinding, listener.Port, proto))
 			} else {
-				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, "tcp"))
+				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, proto))
 			}
 		}
 	}
