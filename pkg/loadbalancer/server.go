@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"strings"
@@ -226,12 +227,23 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 
 	if s.tunnelManager != nil ||
 		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
-		// Forward the Service Ports to the host so they are accessible on Mac and Windows
+		// Forward the Service Ports to the host so they are accessible on Mac and Windows.
+		// For single IP-family services, explicitly bind on the matching listen address to avoid
+		// dual-stack host bindings that cause connection resets in environments where IPv6 is
+		// advertised but not functional end-to-end (e.g. some GitHub Actions runners).
+		// For dual-stack or unspecified services, publish without an explicit address.
+		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/387
+		listenAddress := listenAddressForService(service)
 		for _, port := range service.Spec.Ports {
 			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
 				continue
 			}
-			args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, port.Protocol))
+			if listenAddress != "" {
+				hostPortBinding := net.JoinHostPort(listenAddress, fmt.Sprintf("%d", port.Port))
+				args = append(args, fmt.Sprintf("--publish=%s:%d/%s", hostPortBinding, port.Port, port.Protocol))
+			} else {
+				args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, port.Protocol))
+			}
 		}
 	}
 	// publish the admin endpoint
@@ -273,4 +285,28 @@ func isIPv6Service(service *v1.Service) bool {
 		}
 	}
 	return false
+}
+
+// listenAddressForService returns the host listen address to use when publishing
+// ports for a service. For single IP-family services it returns the corresponding
+// wildcard address ("0.0.0.0" or "::") so that Docker does not create spurious
+// dual-stack bindings. For dual-stack or unspecified services it returns "" so
+// the caller falls back to publishing without an explicit address.
+func listenAddressForService(service *v1.Service) string {
+	var hasIPv4, hasIPv6 bool
+	for _, family := range service.Spec.IPFamilies {
+		switch family {
+		case v1.IPv4Protocol:
+			hasIPv4 = true
+		case v1.IPv6Protocol:
+			hasIPv6 = true
+		}
+	}
+	if hasIPv4 && !hasIPv6 {
+		return "0.0.0.0"
+	}
+	if hasIPv6 && !hasIPv4 {
+		return "::"
+	}
+	return ""
 }
