@@ -1,6 +1,7 @@
 - Install 
 
   - [Installation with go ](user/install/install_go.md)
+  - [Installation with a package manager](user/install/install_package_manager.md)
   - [Running with docker](user/install/install_docker.md)
   - [Installation downloading the binary released](user/install/install_downloading_binary.md)
 - Ingress
