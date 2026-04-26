@@ -231,8 +231,8 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 
 	// Construct the multi-step command
 	var startupCmd strings.Builder
-	startupCmd.WriteString(fmt.Sprintf("echo -en '%s' > %s && ", dynamicFilesystemConfig, proxyConfigPath))
-	startupCmd.WriteString(fmt.Sprintf("while true; do envoy -c %s && break; sleep 1; done", proxyConfigPath))
+	startupCmd.WriteString(fmt.Sprintf("echo -en '%s' > %s && ", dynamicFilesystemConfig, proxyConfigPath))    // nolint:staticcheck
+	startupCmd.WriteString(fmt.Sprintf("while true; do envoy -c %s && break; sleep 1; done", proxyConfigPath)) // nolint:staticcheck
 
 	args = append(args, config.DefaultConfig.ProxyImage)
 	cmd := []string{"bash", "-c", startupCmd.String()}
