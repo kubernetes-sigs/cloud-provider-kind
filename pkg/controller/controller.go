@@ -269,6 +269,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 			cloud,
 			30*time.Second,
 			5, // workers
+			5,
 		)
 		if err != nil {
 			// This error shouldn't fail. It lives like this as a legacy.
