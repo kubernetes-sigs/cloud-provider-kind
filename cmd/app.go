@@ -29,6 +29,7 @@ var (
 	enableLBPortMapping  bool
 	gatewayChannel       string
 	enableDefaultIngress bool
+	version              string
 )
 
 func Main() {
@@ -58,6 +59,7 @@ func NewCommand() *cobra.Command {
 
 
 	cmd.AddCommand(newListImagesCommand())
+	cmd.AddCommand(newVersionCommand())
 
 	return cmd
 }
@@ -68,6 +70,16 @@ func newListImagesCommand() *cobra.Command {
 		Short: "list images used by cloud-provider-kind",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(config.DefaultConfig.ProxyImage)
+		},
+	}
+}
+
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use: "version",
+		Short: "print the cloud-provider-kind version",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("cloud-provider-kind", version)
 		},
 	}
 }
