@@ -165,14 +165,38 @@ func runE(cmd *cobra.Command, args []string) error {
 	config.DefaultConfig.ControlPlaneConnectivity = config.Portmap
 
 	// initialize kind provider
+	// Check KIND_EXPERIMENTAL_PROVIDER directly, as the kind CLI does, so it
+	// takes effect regardless of auto-detection results.
 	var option cluster.ProviderOption
-	switch p := container.Runtime(); p {
-	case "podman":
-		option = cluster.ProviderWithPodman()
-	case "nerdctl", "finch", "nerdctl.lima":
-		option = cluster.ProviderWithNerdctl(p)
-	default:
-		option = cluster.ProviderWithDocker()
+	if p := os.Getenv("KIND_EXPERIMENTAL_PROVIDER"); p != "" {
+		switch p {
+		case "podman":
+			klog.Infof("Using podman provider due to KIND_EXPERIMENTAL_PROVIDER")
+			option = cluster.ProviderWithPodman()
+			container.SetRuntime("podman")
+		case "docker":
+			klog.Infof("Using docker provider due to KIND_EXPERIMENTAL_PROVIDER")
+			option = cluster.ProviderWithDocker()
+			container.SetRuntime("docker")
+		case "nerdctl", "finch", "nerdctl.lima":
+			klog.Infof("Using %s provider due to KIND_EXPERIMENTAL_PROVIDER", p)
+			option = cluster.ProviderWithNerdctl(p)
+			container.SetRuntime(p)
+		default:
+			klog.Warningf("Ignoring unknown KIND_EXPERIMENTAL_PROVIDER value %q", p)
+		}
+	}
+	if option == nil {
+		p := container.DetectRuntime()
+		container.SetRuntime(p)
+		switch p {
+		case "podman":
+			option = cluster.ProviderWithPodman()
+		case "nerdctl", "finch", "nerdctl.lima":
+			option = cluster.ProviderWithNerdctl(p)
+		default:
+			option = cluster.ProviderWithDocker()
+		}
 	}
 	kindProvider := cluster.NewProvider(
 		option,
