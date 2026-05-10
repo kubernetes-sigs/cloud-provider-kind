@@ -166,7 +166,7 @@ func (c *Controller) getRestConfig(ctx context.Context, cluster string) (*rest.C
 			logger.Error(err, "Failed to connect to any address", "addresses", addresses)
 			time.Sleep(time.Second * time.Duration(i))
 		} else {
-			logger.Info("Connected succesfully", "host", host)
+			logger.Info("Connected successfully", "host", host)
 			break
 		}
 	}
