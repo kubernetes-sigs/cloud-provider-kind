@@ -3,7 +3,7 @@ options:
   substitution_option: ALLOW_LOOSE
   machineType: E2_HIGHCPU_32
 steps:
-- name: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20240718-5ef92b5c36
+- name: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20260205-38cfa9523f
   entrypoint: make
   env:
   - REGISTRY=us-central1-docker.pkg.dev/k8s-staging-images/cloud-provider-kind
