@@ -2,8 +2,8 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    api-approved.kubernetes.io: https://github.com/kubernetes-sigs/gateway-api/pull/3328
-    gateway.networking.k8s.io/bundle-version: v1.4.1
+    api-approved.kubernetes.io: https://github.com/kubernetes-sigs/gateway-api/pull/4530
+    gateway.networking.k8s.io/bundle-version: v1.5.0
     gateway.networking.k8s.io/channel: standard
   name: httproutes.gateway.networking.k8s.io
 spec:
@@ -630,12 +630,12 @@ spec:
                                         description: |-
                                           The CORSOrigin MUST NOT be a relative URI, and it MUST follow the URI syntax and
                                           encoding rules specified in RFC3986.  The CORSOrigin MUST include both a
-                                          scheme (e.g., "http" or "spiffe") and a scheme-specific-part, or it should be a single '*' character.
+                                          scheme ("http" or "https") and a scheme-specific-part, or it should be a single '*' character.
                                           URIs that include an authority MUST include a fully qualified domain name or
                                           IP address as the host.
                                         maxLength: 253
                                         minLength: 1
-                                        pattern: (^\*$)|(^([a-zA-Z][a-zA-Z0-9+\-.]+):\/\/([^:/?#]+)(:([0-9]{1,5}))?$)
+                                        pattern: (^\*$)|(^(http(s)?):\/\/(((\*\.)?([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9-]+|\*)(:([0-9]{1,5}))?)$)
                                         type: string
                                       maxItems: 64
                                       type: array
@@ -1885,12 +1885,12 @@ spec:
                                   description: |-
                                     The CORSOrigin MUST NOT be a relative URI, and it MUST follow the URI syntax and
                                     encoding rules specified in RFC3986.  The CORSOrigin MUST include both a
-                                    scheme (e.g., "http" or "spiffe") and a scheme-specific-part, or it should be a single '*' character.
+                                    scheme ("http" or "https") and a scheme-specific-part, or it should be a single '*' character.
                                     URIs that include an authority MUST include a fully qualified domain name or
                                     IP address as the host.
                                   maxLength: 253
                                   minLength: 1
-                                  pattern: (^\*$)|(^([a-zA-Z][a-zA-Z0-9+\-.]+):\/\/([^:/?#]+)(:([0-9]{1,5}))?$)
+                                  pattern: (^\*$)|(^(http(s)?):\/\/(((\*\.)?([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9-]+|\*)(:([0-9]{1,5}))?)$)
                                   type: string
                                 maxItems: 64
                                 type: array
@@ -4078,12 +4078,12 @@ spec:
                                         description: |-
                                           The CORSOrigin MUST NOT be a relative URI, and it MUST follow the URI syntax and
                                           encoding rules specified in RFC3986.  The CORSOrigin MUST include both a
-                                          scheme (e.g., "http" or "spiffe") and a scheme-specific-part, or it should be a single '*' character.
+                                          scheme ("http" or "https") and a scheme-specific-part, or it should be a single '*' character.
                                           URIs that include an authority MUST include a fully qualified domain name or
                                           IP address as the host.
                                         maxLength: 253
                                         minLength: 1
-                                        pattern: (^\*$)|(^([a-zA-Z][a-zA-Z0-9+\-.]+):\/\/([^:/?#]+)(:([0-9]{1,5}))?$)
+                                        pattern: (^\*$)|(^(http(s)?):\/\/(((\*\.)?([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9-]+|\*)(:([0-9]{1,5}))?)$)
                                         type: string
                                       maxItems: 64
                                       type: array
@@ -5333,12 +5333,12 @@ spec:
                                   description: |-
                                     The CORSOrigin MUST NOT be a relative URI, and it MUST follow the URI syntax and
                                     encoding rules specified in RFC3986.  The CORSOrigin MUST include both a
-                                    scheme (e.g., "http" or "spiffe") and a scheme-specific-part, or it should be a single '*' character.
+                                    scheme ("http" or "https") and a scheme-specific-part, or it should be a single '*' character.
                                     URIs that include an authority MUST include a fully qualified domain name or
                                     IP address as the host.
                                   maxLength: 253
                                   minLength: 1
-                                  pattern: (^\*$)|(^([a-zA-Z][a-zA-Z0-9+\-.]+):\/\/([^:/?#]+)(:([0-9]{1,5}))?$)
+                                  pattern: (^\*$)|(^(http(s)?):\/\/(((\*\.)?([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9-]+|\*)(:([0-9]{1,5}))?)$)
                                   type: string
                                 maxItems: 64
                                 type: array
