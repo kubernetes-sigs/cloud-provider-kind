@@ -7,7 +7,7 @@ on:
 
 env:
   GO_VERSION: "1.26"
-  GATEWAY_VERSION: "v1.4.1"
+  GATEWAY_VERSION: "v1.5.0"
   K8S_VERSION: "v1.35.0"
   KIND_VERSION: "v0.31.0"
   KIND_CLUSTER_NAME: "kind-cloud"
