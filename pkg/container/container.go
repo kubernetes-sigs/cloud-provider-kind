@@ -15,38 +15,27 @@ import (
 // TODO we can do it as in KIND
 var containerRuntime = "docker"
 
-// dockerIsAvailable checks if docker is available in the system
+// dockerIsAvailable checks if docker is available and the daemon is running
 func dockerIsAvailable() bool {
-	cmd := kindexec.Command("docker", "-v")
-	lines, err := kindexec.OutputLines(cmd)
-	if err != nil || len(lines) != 1 {
-		return false
-	}
-	return strings.HasPrefix(lines[0], "Docker version")
+	cmd := kindexec.Command("docker", "info")
+	_, err := kindexec.OutputLines(cmd)
+	return err == nil
 }
 
 func podmanIsAvailable() bool {
-	cmd := kindexec.Command("podman", "-v")
-	lines, err := kindexec.OutputLines(cmd)
-	if err != nil || len(lines) != 1 {
-		return false
-	}
-	return strings.HasPrefix(lines[0], "podman version")
+	cmd := kindexec.Command("podman", "info")
+	_, err := kindexec.OutputLines(cmd)
+	return err == nil
 }
 
 func nerdctlIsAvailable() bool {
-	cmd := kindexec.Command("nerdctl", "-v")
-	lines, err := kindexec.OutputLines(cmd)
-	if err != nil || len(lines) != 1 {
-		// check finch
-		cmd = kindexec.Command("finch", "-v")
-		lines, err = kindexec.OutputLines(cmd)
-		if err != nil || len(lines) != 1 {
-			return false
-		}
-		return strings.HasPrefix(lines[0], "finch version")
+	cmd := kindexec.Command("nerdctl", "info")
+	if _, err := kindexec.OutputLines(cmd); err == nil {
+		return true
 	}
-	return strings.HasPrefix(lines[0], "nerdctl version")
+	cmd = kindexec.Command("finch", "info")
+	_, err := kindexec.OutputLines(cmd)
+	return err == nil
 }
 
 // Runtime returns the detected container runtime name.
