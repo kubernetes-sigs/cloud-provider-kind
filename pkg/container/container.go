@@ -43,28 +43,28 @@ func Runtime() string {
 	return containerRuntime
 }
 
-func init() {
-	// allow to override the container provider as we do in KIND
-	if p := os.Getenv("KIND_EXPERIMENTAL_PROVIDER"); p != "" {
-		containerRuntime = p
-		return
-	}
+// SetRuntime overrides the auto-detected container runtime.
+func SetRuntime(name string) {
+	containerRuntime = name
+}
 
+// DetectRuntime probes the system for an available container runtime.
+func DetectRuntime() string {
 	if dockerIsAvailable() {
-		return
+		return "docker"
 	}
 	if podmanIsAvailable() {
-		containerRuntime = "podman"
-		return
+		return "podman"
 	}
 	if nerdctlIsAvailable() {
-		containerRuntime = "nerdctl"
 		if _, err := exec.LookPath("nerdctl"); err != nil {
 			if _, err := exec.LookPath("finch"); err == nil {
-				containerRuntime = "finch"
+				return "finch"
 			}
 		}
+		return "nerdctl"
 	}
+	return "docker"
 }
 
 func Logs(name string, w io.Writer) error {
