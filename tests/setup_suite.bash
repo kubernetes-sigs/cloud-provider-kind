@@ -15,7 +15,7 @@ function setup_suite {
   kind create cluster --name $CLUSTER_NAME -v7 --wait 1m --retain --config="$BATS_TEST_DIRNAME/kind.yaml"
 
   cd "$BATS_TEST_DIRNAME"/.. && make
-  nohup "$BATS_TEST_DIRNAME"/../bin/cloud-provider-kind -v 2 --gateway-channel=standard --enable-log-dumping --logs-dir "$ARTIFACTS_DIR" > "$ARTIFACTS_DIR"/ccm-kind.log 2>&1 &
+  nohup "$BATS_TEST_DIRNAME"/../bin/cloud-provider-kind -v 2 --gateway-channel=standard --enable-lb-port-mapping --enable-log-dumping --logs-dir "$ARTIFACTS_DIR" > "$ARTIFACTS_DIR"/ccm-kind.log 2>&1 &
   export CCM_PID=$!
 
   # test depend on external connectivity that can be very flaky

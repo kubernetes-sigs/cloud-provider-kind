@@ -214,17 +214,27 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		// advertised but not functional end-to-end (e.g. some GitHub Actions runners).
 		// For dual-stack or unspecified gateways, publish without an explicit address.
 		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/387
+		seen := make(map[string]struct{})
 		for _, listener := range gateway.Spec.Listeners {
 			proto := "tcp"
 			if listener.Protocol == gatewayv1.UDPProtocolType {
 				proto = "udp"
 			}
+
+			var publishArg string
 			if listenAddress != "" {
 				hostPortBinding := net.JoinHostPort(listenAddress, fmt.Sprintf("%d", listener.Port))
-				args = append(args, fmt.Sprintf("--publish=%s:%d/%s", hostPortBinding, listener.Port, proto))
+				publishArg = fmt.Sprintf("--publish=%s:%d/%s", hostPortBinding, listener.Port, proto)
 			} else {
-				args = append(args, fmt.Sprintf("--publish=%d/%s", listener.Port, proto))
+				publishArg = fmt.Sprintf("--publish=%d/%s", listener.Port, proto)
 			}
+
+			if _, exists := seen[publishArg]; exists {
+				continue
+			}
+
+			seen[publishArg] = struct{}{}
+			args = append(args, publishArg)
 		}
 	}
 	args = append(args, "--publish-all")
