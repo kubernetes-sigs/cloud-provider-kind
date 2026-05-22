@@ -119,6 +119,42 @@
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
 }
 
+@test "Gateway: Multiple HTTP Listeners on Same Port with enable-lb-port-mapping" {
+    # Reproduces duplicate --publish=80/tcp causing Docker exit status 125.
+    kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_http_multi_listener.yaml
+
+    # Wait for the backend application pod to be ready
+    kubectl wait --for=condition=ready pods -l app=MultiListenerApp --timeout=60s
+
+    # Retry loop to get the Gateway's external IP address
+    for i in {1..10}
+    do
+        IP=$(kubectl get gateway multi-listener-gateway --output jsonpath='{.status.addresses[0].value}' 2>/dev/null)
+        [[ ! -z "$IP" ]] && break || sleep 1
+    done
+    if [[ -z "$IP" ]]; then
+      echo "Failed to get Gateway IP address"
+      return 1
+    fi
+    echo "Gateway IP: $IP"
+
+    # Verify the gateway container is reachable (if duplicates existed, container creation would have failed)
+    for i in {1..10}
+    do
+        HOSTNAME=$(curl -s --connect-timeout 5 http://${IP}/hostname -H "Host: route.multi-listener.test" || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    if [[ -z "$HOSTNAME" ]]; then
+      echo "Failed to get hostname via Gateway"
+      return 1
+    fi
+    echo "Hostname via Gateway: $HOSTNAME"
+
+    # Cleanup
+    kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_http_multi_listener.yaml
+}
+
+
 
 @test "Ingress to Gateway Migration and X-Forwarded-For Header" {
     # Apply the Gateway and HTTPRoute manifests
