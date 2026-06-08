@@ -113,6 +113,34 @@ func TestListenAddressForService(t *testing.T) {
 	}
 }
 
+func TestAdminPortPublishArg(t *testing.T) {
+	tests := []struct {
+		name        string
+		ipv6Enabled bool
+		expected    string
+	}{
+		{
+			name:        "ipv4 only",
+			ipv6Enabled: false,
+			expected:    "--publish=127.0.0.1::10000/tcp",
+		},
+		{
+			name:        "ipv6 enabled",
+			ipv6Enabled: true,
+			expected:    "--publish=10000/tcp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := adminPortPublishArg(tt.ipv6Enabled, envoyAdminPort)
+			if actual != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, actual)
+			}
+		})
+	}
+}
+
 func TestLoadBalancerName(t *testing.T) {
 	tests := []struct {
 		name        string

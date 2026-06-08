@@ -2,6 +2,7 @@ package loadbalancer
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -309,6 +310,77 @@ func Test_generateConfig(t *testing.T) {
 			if got := generateConfig(tt.service, tt.nodes); !reflect.DeepEqual(got, tt.want) {
 				t.Logf("diff %+v", cmp.Diff(got, tt.want))
 				t.Errorf("generateConfig() = %+v,\n want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdminConfigForService(t *testing.T) {
+	tests := []struct {
+		name    string
+		service *v1.Service
+		want    adminConfigData
+	}{
+		{
+			name:    "ipv4 only",
+			service: &v1.Service{Spec: v1.ServiceSpec{IPFamilies: []v1.IPFamily{v1.IPv4Protocol}}},
+			want:    adminConfigData{Address: "0.0.0.0"},
+		},
+		{
+			name:    "ipv6 only",
+			service: &v1.Service{Spec: v1.ServiceSpec{IPFamilies: []v1.IPFamily{v1.IPv6Protocol}}},
+			want:    adminConfigData{Address: "::", IPv4Compat: true},
+		},
+		{
+			name:    "dual stack",
+			service: &v1.Service{Spec: v1.ServiceSpec{IPFamilies: []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol}}},
+			want:    adminConfigData{Address: "::", IPv4Compat: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := adminConfigForService(tt.service)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("unexpected admin config (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRenderDynamicFilesystemConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    adminConfigData
+		contains []string
+	}{
+		{
+			name:  "ipv4",
+			input: adminConfigData{Address: "0.0.0.0"},
+			contains: []string{
+				"address: 0.0.0.0",
+			},
+		},
+		{
+			name:  "dual stack",
+			input: adminConfigData{Address: "::", IPv4Compat: true},
+			contains: []string{
+				`address: "::"`,
+				"ipv4_compat: true",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := renderDynamicFilesystemConfig(tt.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(config, want) {
+					t.Fatalf("expected config to contain %q, got:\n%s", want, config)
+				}
 			}
 		})
 	}

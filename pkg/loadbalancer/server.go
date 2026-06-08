@@ -194,6 +194,11 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		networkName = n
 	}
 
+	bootstrapConfig, err := renderDynamicFilesystemConfig(adminConfigForService(service))
+	if err != nil {
+		return err
+	}
+
 	args := []string{
 		"--detach", // run the container detached
 		"--tty",    // allocate a tty for entrypoint logs
@@ -246,8 +251,10 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 			}
 		}
 	}
-	// publish the admin endpoint
-	args = append(args, fmt.Sprintf("--publish=%d/%s", envoyAdminPort, v1.ProtocolTCP))
+	// Publish the admin endpoint according to the container's IP-family support. IPv4-only
+	// services keep the admin port on IPv4 localhost, while services with IPv6 enabled publish
+	// the dual-stack-capable admin listener on both host families.
+	args = append(args, adminPortPublishArg(isIPv6Service(service), envoyAdminPort))
 	// Publish all ports in the host in random ports
 	args = append(args, "--publish-all")
 
@@ -264,10 +271,10 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 	// https://github.com/envoyproxy/envoy/issues/34195
 	cmd := []string{"bash", "-c",
 		fmt.Sprintf(`echo -en '%s' > %s && touch %s && touch %s && while true; do envoy -c %s && break; sleep 1; done`,
-			dynamicFilesystemConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, proxyConfigPath)}
+			bootstrapConfig, proxyConfigPath, proxyConfigPathCDS, proxyConfigPathLDS, proxyConfigPath)}
 	args = append(args, cmd...)
 	klog.V(2).Infof("creating loadbalancer with parameters: %v", args)
-	err := container.Create(name, args)
+	err = container.Create(name, args)
 	if err != nil {
 		return fmt.Errorf("failed to create continers %s %v: %w", name, args, err)
 	}
@@ -309,4 +316,11 @@ func listenAddressForService(service *v1.Service) string {
 		return "::"
 	}
 	return ""
+}
+
+func adminPortPublishArg(ipv6Enabled bool, port int) string {
+	if ipv6Enabled {
+		return fmt.Sprintf("--publish=%d/tcp", port)
+	}
+	return fmt.Sprintf("--publish=127.0.0.1::%d/tcp", port)
 }
