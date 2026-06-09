@@ -48,7 +48,7 @@ admin:
   access_log_path: /dev/stdout
   address:
     socket_address:
-      address: {{ if eq .Address "::" }}"::"{{ else }}{{ .Address }}{{ end }}
+      address: "{{ .Address }}"
       port_value: 10000
       {{- if .IPv4Compat }}
       ipv4_compat: true

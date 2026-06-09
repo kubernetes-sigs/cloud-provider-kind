@@ -122,7 +122,7 @@ func TestAdminPortPublishArg(t *testing.T) {
 		{
 			name:        "ipv4 only",
 			ipv6Enabled: false,
-			expected:    "--publish=127.0.0.1::10000/tcp",
+			expected:    "--publish=127.0.0.1:10000/tcp",
 		},
 		{
 			name:        "ipv6 enabled",

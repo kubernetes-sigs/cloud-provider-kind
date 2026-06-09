@@ -322,5 +322,5 @@ func adminPortPublishArg(ipv6Enabled bool, port int) string {
 	if ipv6Enabled {
 		return fmt.Sprintf("--publish=%d/tcp", port)
 	}
-	return fmt.Sprintf("--publish=127.0.0.1::%d/tcp", port)
+	return fmt.Sprintf("--publish=127.0.0.1:%d/tcp", port)
 }
