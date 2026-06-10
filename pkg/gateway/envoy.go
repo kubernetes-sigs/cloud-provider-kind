@@ -78,14 +78,19 @@ admin:
   access_log_path: /dev/stdout
   address:
     socket_address:
-      address: 0.0.0.0
+      address: "{{ .AdminAddress }}"
       port_value: {{ .AdminPort }}
+      {{- if .AdminIPv4Compat }}
+      ipv4_compat: true
+      {{- end }}
 `
 
 type configData struct {
 	Cluster             string
 	ID                  string
 	AdminPort           int
+	AdminAddress        string
+	AdminIPv4Compat     bool
 	ControlPlaneAddress string
 	ControlPlanePort    int
 }
@@ -98,6 +103,9 @@ func generateEnvoyConfig(data *configData) (string, error) {
 		data.ControlPlaneAddress == "" ||
 		data.ControlPlanePort == 0 {
 		return "", fmt.Errorf("missing parameters")
+	}
+	if data.AdminAddress == "" {
+		data.AdminAddress = "0.0.0.0"
 	}
 
 	t, err := template.New("gateway-config").Parse(dynamicControlPlaneConfig)
@@ -132,17 +140,6 @@ func gatewaySimpleName(clusterName, namespace, name string) string {
 func createGateway(clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
-	envoyConfigData := &configData{
-		ID:                  name,
-		Cluster:             simpleName,
-		AdminPort:           envoyAdminPort,
-		ControlPlaneAddress: localAddress,
-		ControlPlanePort:    localPort,
-	}
-	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfigData)
-	if err != nil {
-		return err
-	}
 	networkName := constants.FixedNetworkName
 	if n := os.Getenv("KIND_EXPERIMENTAL_DOCKER_NETWORK"); n != "" {
 		networkName = n
@@ -205,6 +202,20 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		"--sysctl=net.ipv6.conf.all.disable_ipv6=0",
 		"--sysctl=net.ipv6.conf.all.forwarding=1",
 	}...)
+	adminAddress, adminIPv4Compat := adminConfigForGateway(listenAddress)
+	envoyConfigData := &configData{
+		ID:                  name,
+		Cluster:             simpleName,
+		AdminPort:           envoyAdminPort,
+		AdminAddress:        adminAddress,
+		AdminIPv4Compat:     adminIPv4Compat,
+		ControlPlaneAddress: localAddress,
+		ControlPlanePort:    localPort,
+	}
+	dynamicFilesystemConfig, err := generateEnvoyConfig(envoyConfigData)
+	if err != nil {
+		return err
+	}
 
 	if enableTunnel ||
 		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
@@ -237,6 +248,10 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 			args = append(args, publishArg)
 		}
 	}
+	// Publish the admin endpoint according to the gateway's IP-family support. IPv4-only
+	// gateways keep the admin port on IPv4 localhost, while gateways with IPv6 enabled
+	// publish the dual-stack-capable admin listener on both host families.
+	args = append(args, adminPortPublishArg(adminIPv4Compat, envoyAdminPort))
 	args = append(args, "--publish-all")
 
 	// Construct the multi-step command
@@ -255,4 +270,18 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 	}
 
 	return nil
+}
+
+func adminConfigForGateway(listenAddress string) (string, bool) {
+	if listenAddress == "0.0.0.0" {
+		return "0.0.0.0", false
+	}
+	return "::", true
+}
+
+func adminPortPublishArg(ipv6Enabled bool, port int) string {
+	if ipv6Enabled {
+		return fmt.Sprintf("--publish=%d/tcp", port)
+	}
+	return fmt.Sprintf("--publish=127.0.0.1:%d/tcp", port)
 }

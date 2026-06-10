@@ -48,9 +48,17 @@ admin:
   access_log_path: /dev/stdout
   address:
     socket_address:
-      address: 0.0.0.0
+      address: "{{ .Address }}"
       port_value: 10000
+      {{- if .IPv4Compat }}
+      ipv4_compat: true
+      {{- end }}
 `
+
+type adminConfigData struct {
+	Address    string
+	IPv4Compat bool
+}
 
 // proxyConfigData is supplied to the loadbalancer config template
 type proxyConfigData struct {
@@ -203,6 +211,28 @@ func proxyConfig(configTemplate string, data *proxyConfigData) (config string, e
 		return "", errors.Wrap(err, "error executing config template")
 	}
 	return buff.String(), nil
+}
+
+func renderDynamicFilesystemConfig(data adminConfigData) (string, error) {
+	if data.Address == "" {
+		data.Address = "0.0.0.0"
+	}
+	t, err := template.New("loadbalancer-bootstrap").Parse(dynamicFilesystemConfig)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to parse bootstrap config template")
+	}
+	var buff bytes.Buffer
+	if err := t.Execute(&buff, data); err != nil {
+		return "", errors.Wrap(err, "error executing bootstrap config template")
+	}
+	return buff.String(), nil
+}
+
+func adminConfigForService(service *v1.Service) adminConfigData {
+	if isIPv6Service(service) {
+		return adminConfigData{Address: "::", IPv4Compat: true}
+	}
+	return adminConfigData{Address: "0.0.0.0"}
 }
 
 func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
