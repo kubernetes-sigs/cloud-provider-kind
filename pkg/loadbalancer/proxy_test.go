@@ -358,7 +358,7 @@ func TestRenderDynamicFilesystemConfig(t *testing.T) {
 			name:  "ipv4",
 			input: adminConfigData{Address: "0.0.0.0"},
 			contains: []string{
-				"address: 0.0.0.0",
+				"address: \"0.0.0.0\"",
 			},
 		},
 		{

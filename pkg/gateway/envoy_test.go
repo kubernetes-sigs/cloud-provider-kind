@@ -66,7 +66,7 @@ admin:
   access_log_path: /dev/stdout
   address:
     socket_address:
-      address: 0.0.0.0
+      address: "0.0.0.0"
       port_value: 9000
 `,
 			wantErr: false,
@@ -128,7 +128,7 @@ admin:
   access_log_path: /dev/stdout
   address:
     socket_address:
-      address: 0.0.0.0
+      address: "0.0.0.0"
       port_value: 12345
 `,
 			wantErr: false,
