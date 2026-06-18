@@ -48,8 +48,9 @@ admin:
   access_log_path: /dev/stdout
   address:
     socket_address:
-      address: 0.0.0.0
+      address: "::"
       port_value: 10000
+      ipv4_compat: true
 `
 
 // proxyConfigData is supplied to the loadbalancer config template

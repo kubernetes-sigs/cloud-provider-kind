@@ -246,9 +246,9 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 			}
 		}
 	}
-	// publish the admin endpoint
+	// explicitely publish the admin endpoint
 	args = append(args, fmt.Sprintf("--publish=%d/%s", envoyAdminPort, v1.ProtocolTCP))
-	// Publish all ports in the host in random ports
+	// publish all ports in the host on random ports
 	args = append(args, "--publish-all")
 
 	if service.Spec.LoadBalancerIP != "" {
