@@ -171,23 +171,28 @@ func (c *Controller) getRestConfig(ctx context.Context, cluster string) (*rest.C
 		}
 	}
 
-	var config *rest.Config
-	switch host {
-	case internalConfig.Host:
-		config = internalConfig
+	return selectRestConfig(internalConfig, externalConfig, host)
+}
+
+// selectRestConfig returns the rest.Config whose Host matches the host that was
+// successfully probed. internalConfig or externalConfig may be nil when the
+// corresponding kubeconfig could not be obtained, so their Host is only
+// compared when they are set to avoid a nil pointer dereference.
+func selectRestConfig(internalConfig, externalConfig *rest.Config, host string) (*rest.Config, error) {
+	switch {
+	case internalConfig != nil && host == internalConfig.Host:
 		// the first cluster will give us the type of connectivity between
 		// cloud-provider-kind and the clusters and load balancer containers.
 		// In Linux or containerized cloud-provider-kind this will be direct.
 		once.Do(func() {
 			cpkconfig.DefaultConfig.ControlPlaneConnectivity = cpkconfig.Direct
 		})
-	case externalConfig.Host:
-		config = externalConfig
+		return internalConfig, nil
+	case externalConfig != nil && host == externalConfig.Host:
+		return externalConfig, nil
 	default:
 		return nil, fmt.Errorf("restConfig for host %s not avaliable", host)
 	}
-
-	return config, nil
 }
 
 // TODO: implement leader election to not have problems with multiple providers
