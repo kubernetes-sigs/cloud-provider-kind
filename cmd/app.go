@@ -199,7 +199,11 @@ func runE(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if option == nil {
-		p := container.DetectRuntime()
+		p, err := container.DetectRuntime()
+		if err != nil {
+			return err
+		}
+
 		container.SetRuntime(p)
 		switch p {
 		case "podman":

@@ -49,22 +49,23 @@ func SetRuntime(name string) {
 }
 
 // DetectRuntime probes the system for an available container runtime.
-func DetectRuntime() string {
+// It returns an error if no supported runtime is installed and running.
+func DetectRuntime() (string, error) {
 	if dockerIsAvailable() {
-		return "docker"
+		return "docker", nil
 	}
 	if podmanIsAvailable() {
-		return "podman"
+		return "podman", nil
 	}
 	if nerdctlIsAvailable() {
 		if _, err := exec.LookPath("nerdctl"); err != nil {
 			if _, err := exec.LookPath("finch"); err == nil {
-				return "finch"
+				return "finch", nil
 			}
 		}
-		return "nerdctl"
+		return "nerdctl", nil
 	}
-	return "docker"
+	return "", fmt.Errorf("no supported container runtime found")
 }
 
 func Logs(name string, w io.Writer) error {
