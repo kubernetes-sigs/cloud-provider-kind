@@ -7,7 +7,7 @@ on:
 
 env:
   GO_VERSION: "1.26"
-  GATEWAY_VERSION: "v1.5.0"
+  GATEWAY_VERSION: "v1.6.0"
   K8S_VERSION: "v1.35.0"
   KIND_VERSION: "v0.31.0"
   KIND_CLUSTER_NAME: "kind-cloud"
@@ -110,7 +110,7 @@ jobs:
 
     - name: Run tests
       run: |
-        /usr/local/bin/conformance.test -test.run TestConformance \
+        /usr/local/bin/conformance.test -test.run 'TestConformance$' \
             --debug=true \
             --kubeconfig=_artifacts/kubeconfig.conf \
             --organization=sigs.k8s.io \
