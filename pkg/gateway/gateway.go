@@ -250,14 +250,16 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// Process HTTPRoutes
 				// Get the routes that were pre-validated for this specific listener.
 				for _, httpRoute := range routesByListener[listener.Name] {
-					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
+					routes, validBackendRefs, routeConditions := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
 
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
 					currentParentStatuses := httpRouteStatuses[key]
 					for i := range currentParentStatuses {
-						// Only add the ResolvedRefs condition if the parent was Accepted.
+						// Only add route conditions if the parent was Accepted by the listener.
 						if meta.IsStatusConditionTrue(currentParentStatuses[i].Conditions, string(gatewayv1.RouteConditionAccepted)) {
-							meta.SetStatusCondition(&currentParentStatuses[i].Conditions, resolvedRefsCondition)
+							for _, cond := range routeConditions {
+								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, cond)
+							}
 						}
 					}
 					httpRouteStatuses[key] = currentParentStatuses

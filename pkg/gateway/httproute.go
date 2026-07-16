@@ -18,18 +18,26 @@ import (
 )
 
 // translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
-// It now correctly handles RequestHeaderModifier filters.
 func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
 	referenceGrantLister gatewaylistersv1.ReferenceGrantLister,
-) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
+) ([]*routev3.Route, []gatewayv1.BackendRef, []metav1.Condition) {
 
 	var envoyRoutes []*routev3.Route
 	var allValidBackendRefs []gatewayv1.BackendRef
-	overallCondition := createSuccessCondition(httpRoute.Generation)
+	resolvedRefsCondition := createSuccessCondition(httpRoute.Generation)
+
+	totalRules := len(httpRoute.Spec.Rules)
+	var droppedRuleMessages []string
 
 	for ruleIndex, rule := range httpRoute.Spec.Rules {
+		if unsupportedType, found := findUnsupportedFilter(rule.Filters); found {
+			droppedRuleMessages = append(droppedRuleMessages,
+				fmt.Sprintf("rule[%d] has unsupported filter type %q", ruleIndex, unsupportedType))
+			continue
+		}
+
 		var redirectAction *routev3.RedirectAction
 		var headersToAdd []*corev3.HeaderValueOption
 		var headersToRemove []string
@@ -99,7 +107,7 @@ func translateHTTPRouteToEnvoyRoutes(
 		buildRoutesForRule := func(match gatewayv1.HTTPRouteMatch, matchIndex int) {
 			routeMatch, matchCondition := translateHTTPRouteMatch(match, httpRoute.Generation)
 			if matchCondition.Status == metav1.ConditionFalse {
-				overallCondition = matchCondition
+				resolvedRefsCondition = matchCondition
 				return
 			}
 
@@ -125,7 +133,7 @@ func translateHTTPRouteToEnvoyRoutes(
 				)
 				var controllerErr *ControllerError
 				if errors.As(err, &controllerErr) {
-					overallCondition = createFailureCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
+					resolvedRefsCondition = createFailureCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
 					envoyRoute.Action = &routev3.Route_DirectResponse{
 						DirectResponse: &routev3.DirectResponseAction{Status: 500},
 					}
@@ -147,7 +155,35 @@ func translateHTTPRouteToEnvoyRoutes(
 			}
 		}
 	}
-	return envoyRoutes, allValidBackendRefs, overallCondition
+
+	invalidRuleCount := len(droppedRuleMessages)
+	if invalidRuleCount > 0 && invalidRuleCount == totalRules {
+		msg := fmt.Sprintf("no rules could be translated: %s", strings.Join(droppedRuleMessages, "; "))
+		return nil, nil, []metav1.Condition{
+			createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation),
+		}
+	}
+
+	conditions := []metav1.Condition{resolvedRefsCondition}
+	if invalidRuleCount > 0 {
+		msg := fmt.Sprintf("Dropped Rule(s): %s", strings.Join(droppedRuleMessages, "; "))
+		conditions = append(conditions, createPartiallyInvalidCondition(msg, httpRoute.Generation))
+	}
+	return envoyRoutes, allValidBackendRefs, conditions
+}
+
+// findUnsupportedFilter returns the first filter type in the list that is not
+// implemented by this controller.
+func findUnsupportedFilter(filters []gatewayv1.HTTPRouteFilter) (gatewayv1.HTTPRouteFilterType, bool) {
+	for _, filter := range filters {
+		switch filter.Type {
+		case gatewayv1.HTTPRouteFilterRequestRedirect,
+			gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+		default:
+			return filter.Type, true
+		}
+	}
+	return "", false
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
@@ -330,6 +366,16 @@ func createFailureCondition(reason gatewayv1.RouteConditionReason, message strin
 		Type:               string(gatewayv1.RouteConditionResolvedRefs),
 		Status:             metav1.ConditionFalse,
 		Reason:             string(reason),
+		Message:            message,
+		ObservedGeneration: generation,
+	}
+}
+
+func createPartiallyInvalidCondition(message string, generation int64) metav1.Condition {
+	return metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionPartiallyInvalid),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.RouteReasonUnsupportedValue),
 		Message:            message,
 		ObservedGeneration: generation,
 	}
