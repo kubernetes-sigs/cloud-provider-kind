@@ -117,7 +117,7 @@ func urlRewriteFilter() gatewayv1.HTTPRouteFilter {
 	}
 }
 
-func responsHeaderFilter() gatewayv1.HTTPRouteFilter {
+func responseHeaderFilter() gatewayv1.HTTPRouteFilter {
 	return gatewayv1.HTTPRouteFilter{
 		Type:                   gatewayv1.HTTPRouteFilterResponseHeaderModifier,
 		ResponseHeaderModifier: &gatewayv1.HTTPHeaderFilter{},
@@ -170,7 +170,7 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 			name: "all rules have unsupported filters - fully invalid",
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(urlRewriteFilter()),
-				makeRuleWithFilters(responsHeaderFilter()),
+				makeRuleWithFilters(responseHeaderFilter()),
 			},
 			wantRoutes:             0,
 			wantResolvedRefsStatus: metav1.ConditionFalse,
@@ -201,7 +201,7 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(redirectFilter()),
 				makeRuleWithFilters(urlRewriteFilter()),
-				makeRuleWithFilters(responsHeaderFilter()),
+				makeRuleWithFilters(responseHeaderFilter()),
 			},
 			wantRoutes:             1,
 			wantResolvedRefsStatus: metav1.ConditionTrue,
