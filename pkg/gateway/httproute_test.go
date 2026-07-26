@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -94,6 +95,22 @@ func makeRuleWithFilters(filters ...gatewayv1.HTTPRouteFilter) gatewayv1.HTTPRou
 	}
 }
 
+func makeRuleWithMatch(match gatewayv1.HTTPRouteMatch) gatewayv1.HTTPRouteRule {
+	return gatewayv1.HTTPRouteRule{
+		Matches: []gatewayv1.HTTPRouteMatch{match},
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{
+				BackendRef: gatewayv1.BackendRef{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Name: "svc",
+						Port: ptr.To(gatewayv1.PortNumber(80)),
+					},
+				},
+			},
+		},
+	}
+}
+
 func redirectFilter() gatewayv1.HTTPRouteFilter {
 	return gatewayv1.HTTPRouteFilter{
 		Type:            gatewayv1.HTTPRouteFilterRequestRedirect,
@@ -124,7 +141,7 @@ func responseHeaderFilter() gatewayv1.HTTPRouteFilter {
 	}
 }
 
-func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
+func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 	svc := makeService("default", "svc", 80)
 	svcLister := newMockServiceLister(svc)
 	noGrants := newFakeReferenceGrantLister(nil, nil)
@@ -138,33 +155,113 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                   string
-		rules                  []gatewayv1.HTTPRouteRule
-		wantRoutes             int
-		wantCondTypes          []string
-		wantResolvedRefsStatus metav1.ConditionStatus
+		name       string
+		rules      []gatewayv1.HTTPRouteRule
+		wantRoutes int
+		// wantAcceptedFalse: the route spec is invalid (unsupported filter or match);
+		// expect Accepted=False (UnsupportedValue) and no ResolvedRefs condition.
+		wantAcceptedFalse      bool
+		wantResolvedRefsStatus metav1.ConditionStatus // only checked when wantAcceptedFalse=false
 		wantPartiallyInvalid   bool
 	}{
+		// --- match validation ---
+		{
+			name: "two rules with valid matches",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchExact),
+						Value: ptr.To("/foo"),
+					},
+				}),
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchPathPrefix),
+						Value: ptr.To("/bar"),
+					},
+				}),
+			},
+			wantRoutes:             2,
+			wantResolvedRefsStatus: metav1.ConditionTrue,
+		},
+		{
+			name: "one valid match, one unsupported match type - partially invalid",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchExact),
+						Value: ptr.To("/foo"),
+					},
+				}),
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchType("UnsupportedType")),
+						Value: ptr.To("/bar"),
+					},
+				}),
+			},
+			wantRoutes:             1,
+			wantResolvedRefsStatus: metav1.ConditionTrue,
+			wantPartiallyInvalid:   true,
+		},
+		{
+			name: "nil path value - fully invalid",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchExact),
+						Value: nil,
+					},
+				}),
+			},
+			wantAcceptedFalse: true,
+		},
+		// This test is hypothetical since CRD validation would stop this one today,
+		// but we want to be sure that a future addition to the spec will produce the
+		// correct result
+		{
+			name: "unsupported path match type - fully invalid",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchType("UnsupportedType")),
+						Value: ptr.To("/foo"),
+					},
+				}),
+			},
+			wantAcceptedFalse: true,
+		},
+		{
+			name: "unsupported header match type - fully invalid",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithMatch(gatewayv1.HTTPRouteMatch{
+					Headers: []gatewayv1.HTTPHeaderMatch{
+						{
+							Type:  ptr.To(gatewayv1.HeaderMatchType("UnsupportedType")),
+							Name:  "X-Foo",
+							Value: "bar",
+						},
+					},
+				}),
+			},
+			wantAcceptedFalse: true,
+		},
+		// --- filter validation ---
 		{
 			name: "all supported filters - no PartiallyInvalid",
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(redirectFilter()),
 				makeRuleWithFilters(headerModifierFilter()),
 			},
-			// redirect rules produce routes (redirect action); header-modifier rule also produces a route.
-			// Both rules are valid, so at least 2 routes.
 			wantRoutes:             2,
 			wantResolvedRefsStatus: metav1.ConditionTrue,
-			wantPartiallyInvalid:   false,
 		},
 		{
 			name: "single rule with unsupported filter - fully invalid",
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(urlRewriteFilter()),
 			},
-			wantRoutes:             0,
-			wantResolvedRefsStatus: metav1.ConditionFalse,
-			wantPartiallyInvalid:   false,
+			wantAcceptedFalse: true,
 		},
 		{
 			name: "all rules have unsupported filters - fully invalid",
@@ -172,22 +269,20 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 				makeRuleWithFilters(urlRewriteFilter()),
 				makeRuleWithFilters(responseHeaderFilter()),
 			},
-			wantRoutes:             0,
-			wantResolvedRefsStatus: metav1.ConditionFalse,
-			wantPartiallyInvalid:   false,
+			wantAcceptedFalse: true,
 		},
 		{
-			name: "first rule unsupported, second rule supported - partially invalid",
+			name: "first rule unsupported filter, second rule supported - partially invalid",
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(urlRewriteFilter()),
 				makeRuleWithFilters(redirectFilter()),
 			},
-			wantRoutes:             1, // only the redirect rule produces a route
+			wantRoutes:             1,
 			wantResolvedRefsStatus: metav1.ConditionTrue,
 			wantPartiallyInvalid:   true,
 		},
 		{
-			name: "first rule supported, second rule unsupported - partially invalid",
+			name: "first rule supported, second rule unsupported filter - partially invalid",
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(redirectFilter()),
 				makeRuleWithFilters(urlRewriteFilter()),
@@ -197,7 +292,7 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 			wantPartiallyInvalid:   true,
 		},
 		{
-			name: "mix of supported and unsupported across three rules",
+			name: "mix of supported and unsupported filters across three rules",
 			rules: []gatewayv1.HTTPRouteRule{
 				makeRuleWithFilters(redirectFilter()),
 				makeRuleWithFilters(urlRewriteFilter()),
@@ -210,9 +305,7 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 		{
 			name:                   "no rules at all",
 			rules:                  []gatewayv1.HTTPRouteRule{},
-			wantRoutes:             0,
 			wantResolvedRefsStatus: metav1.ConditionTrue,
-			wantPartiallyInvalid:   false,
 		},
 	}
 
@@ -223,33 +316,40 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 
 			routes, _, conditions := translateHTTPRouteToEnvoyRoutes(route, svcLister, noGrants)
 
-			// Check route count.
-			if tt.wantRoutes == 0 && len(routes) != 0 {
-				t.Errorf("expected nil/empty routes, got %d", len(routes))
-			} else if tt.wantRoutes > 0 && len(routes) != tt.wantRoutes {
-				t.Errorf("expected %d routes, got %d", tt.wantRoutes, len(routes))
+			if len(routes) != tt.wantRoutes {
+				t.Errorf("got %d routes, want %d", len(routes), tt.wantRoutes)
 			}
 
-			// Index conditions by type for easy lookup.
 			condByType := make(map[string]metav1.Condition)
 			for _, c := range conditions {
 				condByType[c.Type] = c
 			}
 
-			// Check ResolvedRefs condition.
-			resolvedRefs, ok := condByType[string(gatewayv1.RouteConditionResolvedRefs)]
-			if !ok {
-				t.Fatalf("ResolvedRefs condition missing from returned conditions")
-			}
-			if resolvedRefs.Status != tt.wantResolvedRefsStatus {
-				t.Errorf("ResolvedRefs.Status = %q, want %q", resolvedRefs.Status, tt.wantResolvedRefsStatus)
-			}
-			if tt.wantResolvedRefsStatus == metav1.ConditionFalse &&
-				resolvedRefs.Reason != string(gatewayv1.RouteReasonUnsupportedValue) {
-				t.Errorf("ResolvedRefs.Reason = %q, want %q", resolvedRefs.Reason, gatewayv1.RouteReasonUnsupportedValue)
+			if tt.wantAcceptedFalse {
+				// Route spec is invalid: expect Accepted=False (UnsupportedValue) and no ResolvedRefs.
+				accepted, ok := condByType[string(gatewayv1.RouteConditionAccepted)]
+				if !ok {
+					t.Fatalf("Accepted condition missing, want Accepted=False")
+				}
+				if accepted.Status != metav1.ConditionFalse {
+					t.Errorf("Accepted.Status = %q, want False", accepted.Status)
+				}
+				if accepted.Reason != string(gatewayv1.RouteReasonUnsupportedValue) {
+					t.Errorf("Accepted.Reason = %q, want %q", accepted.Reason, gatewayv1.RouteReasonUnsupportedValue)
+				}
+				if _, hasRR := condByType[string(gatewayv1.RouteConditionResolvedRefs)]; hasRR {
+					t.Errorf("unexpected ResolvedRefs condition when route is fully rejected")
+				}
+			} else {
+				resolvedRefs, ok := condByType[string(gatewayv1.RouteConditionResolvedRefs)]
+				if !ok {
+					t.Fatalf("ResolvedRefs condition missing from returned conditions")
+				}
+				if resolvedRefs.Status != tt.wantResolvedRefsStatus {
+					t.Errorf("ResolvedRefs.Status = %q, want %q", resolvedRefs.Status, tt.wantResolvedRefsStatus)
+				}
 			}
 
-			// Check PartiallyInvalid condition.
 			partiallyInvalid, hasPICondition := condByType[string(gatewayv1.RouteConditionPartiallyInvalid)]
 			if tt.wantPartiallyInvalid {
 				if !hasPICondition {
@@ -261,12 +361,11 @@ func TestTranslateHTTPRouteToEnvoyRoutes_FilterValidation(t *testing.T) {
 				if partiallyInvalid.Reason != string(gatewayv1.RouteReasonUnsupportedValue) {
 					t.Errorf("PartiallyInvalid.Reason = %q, want %q", partiallyInvalid.Reason, gatewayv1.RouteReasonUnsupportedValue)
 				}
-				// Per the spec the message must start with "Dropped Rule".
-				if len(partiallyInvalid.Message) < 12 || partiallyInvalid.Message[:12] != "Dropped Rule" {
+				if !strings.HasPrefix(partiallyInvalid.Message, "Dropped Rule") {
 					t.Errorf("PartiallyInvalid.Message = %q, want prefix \"Dropped Rule\"", partiallyInvalid.Message)
 				}
 			} else if hasPICondition {
-				t.Errorf("PartiallyInvalid condition present but not expected (status=%q)", partiallyInvalid.Status)
+				t.Errorf("unexpected PartiallyInvalid condition (status=%q)", partiallyInvalid.Status)
 			}
 		})
 	}

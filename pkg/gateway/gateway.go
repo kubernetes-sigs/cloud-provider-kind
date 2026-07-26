@@ -255,9 +255,9 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
 					currentParentStatuses := httpRouteStatuses[key]
 					for i := range currentParentStatuses {
-						// Only add route conditions if the parent was Accepted by the listener.
-						if meta.IsStatusConditionTrue(currentParentStatuses[i].Conditions, string(gatewayv1.RouteConditionAccepted)) {
-							for _, cond := range routeConditions {
+						isAccepted := meta.IsStatusConditionTrue(currentParentStatuses[i].Conditions, string(gatewayv1.RouteConditionAccepted))
+						for _, cond := range routeConditions {
+							if isAccepted || cond.Type == string(gatewayv1.RouteConditionAccepted) {
 								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, cond)
 							}
 						}
