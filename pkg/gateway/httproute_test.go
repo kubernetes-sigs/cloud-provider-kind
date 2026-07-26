@@ -95,6 +95,21 @@ func makeRuleWithFilters(filters ...gatewayv1.HTTPRouteFilter) gatewayv1.HTTPRou
 	}
 }
 
+func makeRuleWithBackend(svcName string) gatewayv1.HTTPRouteRule {
+	return gatewayv1.HTTPRouteRule{
+		BackendRefs: []gatewayv1.HTTPBackendRef{
+			{
+				BackendRef: gatewayv1.BackendRef{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Name: gatewayv1.ObjectName(svcName),
+						Port: ptr.To(gatewayv1.PortNumber(80)),
+					},
+				},
+			},
+		},
+	}
+}
+
 func makeRuleWithMatch(match gatewayv1.HTTPRouteMatch) gatewayv1.HTTPRouteRule {
 	return gatewayv1.HTTPRouteRule{
 		Matches: []gatewayv1.HTTPRouteMatch{match},
@@ -302,6 +317,33 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 			name:  "no rules at all",
 			rules: []gatewayv1.HTTPRouteRule{},
 		},
+		// --- backend validation ---
+		{
+			name: "backend found - no ResolvedRefs failure",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithBackend("svc"),
+			},
+			wantRoutes: 1,
+		},
+		{
+			name: "backend not found - ResolvedRefs=False",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithBackend("missing-svc"),
+			},
+			// The route is still programmed (with a 500 direct-response), so one route is produced.
+			wantRoutes:            1,
+			wantResolvedRefsFalse: true,
+		},
+		{
+			name: "one rule dropped by unsupported filter, one rule with missing backend - partially invalid and ResolvedRefs=False",
+			rules: []gatewayv1.HTTPRouteRule{
+				makeRuleWithFilters(urlRewriteFilter()),
+				makeRuleWithBackend("missing-svc"),
+			},
+			wantRoutes:            1,
+			wantResolvedRefsFalse: true,
+			wantPartiallyInvalid:  true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -331,7 +373,13 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 				if partiallyInvalid != nil {
 					t.Errorf("unexpected PartiallyInvalid condition when route is fully rejected")
 				}
-			} else if tt.wantResolvedRefsFalse {
+			} else {
+				if notAccepted != nil {
+					t.Errorf("unexpected Accepted=False condition")
+				}
+			}
+
+			if tt.wantResolvedRefsFalse {
 				if resolvedRefsFailure == nil {
 					t.Fatalf("ResolvedRefs condition is nil, want ResolvedRefs=False")
 				}
