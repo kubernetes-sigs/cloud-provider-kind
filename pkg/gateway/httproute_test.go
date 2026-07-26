@@ -158,11 +158,13 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 		name       string
 		rules      []gatewayv1.HTTPRouteRule
 		wantRoutes int
-		// wantAcceptedFalse: the route spec is invalid (unsupported filter or match);
-		// expect Accepted=False (UnsupportedValue) and no ResolvedRefs condition.
-		wantAcceptedFalse      bool
-		wantResolvedRefsStatus metav1.ConditionStatus // only checked when wantAcceptedFalse=false
-		wantPartiallyInvalid   bool
+		// wantAcceptedFalse: the route spec is invalid;
+		// expect Accepted=False and resolvedRefs=nil.
+		wantAcceptedFalse bool
+		// wantResolvedRefsFalse: a backend ref could not be resolved;
+		// expect resolvedRefs non-nil with ResolvedRefs=False.
+		wantResolvedRefsFalse bool
+		wantPartiallyInvalid  bool
 	}{
 		// --- match validation ---
 		{
@@ -181,8 +183,7 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 					},
 				}),
 			},
-			wantRoutes:             2,
-			wantResolvedRefsStatus: metav1.ConditionTrue,
+			wantRoutes: 2,
 		},
 		{
 			name: "one valid match, one unsupported match type - partially invalid",
@@ -200,9 +201,8 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 					},
 				}),
 			},
-			wantRoutes:             1,
-			wantResolvedRefsStatus: metav1.ConditionTrue,
-			wantPartiallyInvalid:   true,
+			wantRoutes:           1,
+			wantPartiallyInvalid: true,
 		},
 		{
 			name: "nil path value - fully invalid",
@@ -253,8 +253,7 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 				makeRuleWithFilters(redirectFilter()),
 				makeRuleWithFilters(headerModifierFilter()),
 			},
-			wantRoutes:             2,
-			wantResolvedRefsStatus: metav1.ConditionTrue,
+			wantRoutes: 2,
 		},
 		{
 			name: "single rule with unsupported filter - fully invalid",
@@ -277,9 +276,8 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 				makeRuleWithFilters(urlRewriteFilter()),
 				makeRuleWithFilters(redirectFilter()),
 			},
-			wantRoutes:             1,
-			wantResolvedRefsStatus: metav1.ConditionTrue,
-			wantPartiallyInvalid:   true,
+			wantRoutes:           1,
+			wantPartiallyInvalid: true,
 		},
 		{
 			name: "first rule supported, second rule unsupported filter - partially invalid",
@@ -287,9 +285,8 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 				makeRuleWithFilters(redirectFilter()),
 				makeRuleWithFilters(urlRewriteFilter()),
 			},
-			wantRoutes:             1,
-			wantResolvedRefsStatus: metav1.ConditionTrue,
-			wantPartiallyInvalid:   true,
+			wantRoutes:           1,
+			wantPartiallyInvalid: true,
 		},
 		{
 			name: "mix of supported and unsupported filters across three rules",
@@ -298,14 +295,12 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 				makeRuleWithFilters(urlRewriteFilter()),
 				makeRuleWithFilters(responseHeaderFilter()),
 			},
-			wantRoutes:             1,
-			wantResolvedRefsStatus: metav1.ConditionTrue,
-			wantPartiallyInvalid:   true,
+			wantRoutes:           1,
+			wantPartiallyInvalid: true,
 		},
 		{
-			name:                   "no rules at all",
-			rules:                  []gatewayv1.HTTPRouteRule{},
-			wantResolvedRefsStatus: metav1.ConditionTrue,
+			name:  "no rules at all",
+			rules: []gatewayv1.HTTPRouteRule{},
 		},
 	}
 
@@ -314,46 +309,44 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 			route := baseRoute.DeepCopy()
 			route.Spec.Rules = tt.rules
 
-			routes, _, conditions := translateHTTPRouteToEnvoyRoutes(route, svcLister, noGrants)
+			routes, _, notAccepted, resolvedRefsFailure, partiallyInvalid := translateHTTPRouteToEnvoyRoutes(route, svcLister, noGrants)
 
 			if len(routes) != tt.wantRoutes {
 				t.Errorf("got %d routes, want %d", len(routes), tt.wantRoutes)
 			}
 
-			condByType := make(map[string]metav1.Condition)
-			for _, c := range conditions {
-				condByType[c.Type] = c
-			}
-
 			if tt.wantAcceptedFalse {
-				// Route spec is invalid: expect Accepted=False (UnsupportedValue) and no ResolvedRefs.
-				accepted, ok := condByType[string(gatewayv1.RouteConditionAccepted)]
-				if !ok {
+				if notAccepted == nil {
 					t.Fatalf("Accepted condition missing, want Accepted=False")
 				}
-				if accepted.Status != metav1.ConditionFalse {
-					t.Errorf("Accepted.Status = %q, want False", accepted.Status)
+				if notAccepted.Status != metav1.ConditionFalse {
+					t.Errorf("Accepted.Status = %q, want False", notAccepted.Status)
 				}
-				if accepted.Reason != string(gatewayv1.RouteReasonUnsupportedValue) {
-					t.Errorf("Accepted.Reason = %q, want %q", accepted.Reason, gatewayv1.RouteReasonUnsupportedValue)
+				if notAccepted.Reason != string(gatewayv1.RouteReasonUnsupportedValue) {
+					t.Errorf("Accepted.Reason = %q, want %q", notAccepted.Reason, gatewayv1.RouteReasonUnsupportedValue)
 				}
-				if _, hasRR := condByType[string(gatewayv1.RouteConditionResolvedRefs)]; hasRR {
+				if resolvedRefsFailure != nil {
 					t.Errorf("unexpected ResolvedRefs condition when route is fully rejected")
 				}
-			} else {
-				resolvedRefs, ok := condByType[string(gatewayv1.RouteConditionResolvedRefs)]
-				if !ok {
-					t.Fatalf("ResolvedRefs condition missing from returned conditions")
+				if partiallyInvalid != nil {
+					t.Errorf("unexpected PartiallyInvalid condition when route is fully rejected")
 				}
-				if resolvedRefs.Status != tt.wantResolvedRefsStatus {
-					t.Errorf("ResolvedRefs.Status = %q, want %q", resolvedRefs.Status, tt.wantResolvedRefsStatus)
+			} else if tt.wantResolvedRefsFalse {
+				if resolvedRefsFailure == nil {
+					t.Fatalf("ResolvedRefs condition is nil, want ResolvedRefs=False")
+				}
+				if resolvedRefsFailure.Status != metav1.ConditionFalse {
+					t.Errorf("ResolvedRefs.Status = %q, want False", resolvedRefsFailure.Status)
+				}
+			} else {
+				if resolvedRefsFailure != nil {
+					t.Errorf("unexpected ResolvedRefs condition (status=%q): success should be signalled by absence", resolvedRefsFailure.Status)
 				}
 			}
 
-			partiallyInvalid, hasPICondition := condByType[string(gatewayv1.RouteConditionPartiallyInvalid)]
 			if tt.wantPartiallyInvalid {
-				if !hasPICondition {
-					t.Fatalf("PartiallyInvalid condition missing, want it present")
+				if partiallyInvalid == nil {
+					t.Fatalf("PartiallyInvalid condition missing, want PartiallyInvalid=True")
 				}
 				if partiallyInvalid.Status != metav1.ConditionTrue {
 					t.Errorf("PartiallyInvalid.Status = %q, want True", partiallyInvalid.Status)
@@ -364,7 +357,10 @@ func TestTranslateHTTPRouteToEnvoyRoutes(t *testing.T) {
 				if !strings.HasPrefix(partiallyInvalid.Message, "Dropped Rule") {
 					t.Errorf("PartiallyInvalid.Message = %q, want prefix \"Dropped Rule\"", partiallyInvalid.Message)
 				}
-			} else if hasPICondition {
+				if notAccepted != nil {
+					t.Errorf("unexpected Accepted=False with PartiallyInvalid=True")
+				}
+			} else if partiallyInvalid != nil {
 				t.Errorf("unexpected PartiallyInvalid condition (status=%q)", partiallyInvalid.Status)
 			}
 		})

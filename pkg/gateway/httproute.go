@@ -18,15 +18,20 @@ import (
 )
 
 // translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
+// It returns the translated routes, the valid backend refs, and up to three conditions:
+//   - notAccepted: non-nil (Accepted=False) when the entire route is rejected
+//   - resolvedRefsFailure: non-nil (ResolvedRefs=False) only when a backend ref could not be resolved;
+//     nil signals success and the caller is responsible for setting ResolvedRefs=True
+//   - partiallyInvalid: non-nil (PartiallyInvalid=True) when some rules were dropped
 func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
 	referenceGrantLister gatewaylistersv1.ReferenceGrantLister,
-) ([]*routev3.Route, []gatewayv1.BackendRef, []metav1.Condition) {
+) ([]*routev3.Route, []gatewayv1.BackendRef, *metav1.Condition, *metav1.Condition, *metav1.Condition) {
 
 	var envoyRoutes []*routev3.Route
 	var allValidBackendRefs []gatewayv1.BackendRef
-	resolvedRefsCondition := createResolvedCondition(httpRoute.Generation)
+	var resolvedRefsFailure *metav1.Condition
 
 	var droppedRuleMessages []string
 
@@ -133,7 +138,8 @@ func translateHTTPRouteToEnvoyRoutes(
 				)
 				var controllerErr *ControllerError
 				if errors.As(err, &controllerErr) {
-					resolvedRefsCondition = createNotResolvedCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
+					cond := createNotResolvedCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
+					resolvedRefsFailure = &cond
 					envoyRoute.Action = &routev3.Route_DirectResponse{
 						DirectResponse: &routev3.DirectResponseAction{Status: 500},
 					}
@@ -158,17 +164,17 @@ func translateHTTPRouteToEnvoyRoutes(
 
 	if len(droppedRuleMessages) > 0 && len(envoyRoutes) == 0 {
 		msg := fmt.Sprintf("no rules could be translated: %s", strings.Join(droppedRuleMessages, "; "))
-		return nil, nil, []metav1.Condition{
-			createNotAcceptedCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation),
-		}
+		notAccepted := createNotAcceptedCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation)
+		return nil, nil, &notAccepted, nil, nil
 	}
 
-	conditions := []metav1.Condition{resolvedRefsCondition}
+	var partiallyInvalid *metav1.Condition
 	if len(droppedRuleMessages) > 0 {
 		msg := fmt.Sprintf("Dropped Rule(s): %s", strings.Join(droppedRuleMessages, "; "))
-		conditions = append(conditions, createPartiallyInvalidCondition(msg, httpRoute.Generation))
+		cond := createPartiallyInvalidCondition(msg, httpRoute.Generation)
+		partiallyInvalid = &cond
 	}
-	return envoyRoutes, allValidBackendRefs, conditions
+	return envoyRoutes, allValidBackendRefs, nil, resolvedRefsFailure, partiallyInvalid
 }
 
 // findUnsupportedFilter returns the first filter type in the list that is not
