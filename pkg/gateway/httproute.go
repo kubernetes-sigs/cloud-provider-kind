@@ -27,11 +27,13 @@ func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
 	referenceGrantLister gatewaylistersv1.ReferenceGrantLister,
-) ([]*routev3.Route, []gatewayv1.BackendRef, *metav1.Condition, *metav1.Condition, *metav1.Condition) {
-
-	var envoyRoutes []*routev3.Route
-	var allValidBackendRefs []gatewayv1.BackendRef
-	var resolvedRefsFailure *metav1.Condition
+) (
+	envoyRoutes []*routev3.Route,
+	allValidBackendRefs []gatewayv1.BackendRef,
+	notAccepted *metav1.Condition,
+	resolvedRefsFailure *metav1.Condition,
+	partiallyInvalid *metav1.Condition,
+) {
 
 	var droppedRuleMessages []string
 
@@ -164,11 +166,11 @@ func translateHTTPRouteToEnvoyRoutes(
 
 	if len(droppedRuleMessages) > 0 && len(envoyRoutes) == 0 {
 		msg := fmt.Sprintf("no rules could be translated: %s", strings.Join(droppedRuleMessages, "; "))
-		notAccepted := createNotAcceptedCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation)
-		return nil, nil, &notAccepted, nil, nil
+		cond := createNotAcceptedCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation)
+		notAccepted = &cond
+		return nil, nil, notAccepted, nil, nil
 	}
 
-	var partiallyInvalid *metav1.Condition
 	if len(droppedRuleMessages) > 0 {
 		msg := fmt.Sprintf("Dropped Rule(s): %s", strings.Join(droppedRuleMessages, "; "))
 		cond := createPartiallyInvalidCondition(msg, httpRoute.Generation)
