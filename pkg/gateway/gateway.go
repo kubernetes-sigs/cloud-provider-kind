@@ -310,7 +310,15 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// TODO: Process GRPCRoutes
 
 			default:
-				klog.Warningf("Unsupported listener protocol for route processing: %s", listener.Protocol)
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionAccepted),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(gatewayv1.ListenerReasonUnsupportedProtocol),
+					Message:            fmt.Sprintf("Protocol %q is not supported; supported protocols are HTTP and HTTPS.", listener.Protocol),
+					ObservedGeneration: gateway.Generation,
+				})
+				allListenerStatuses[listener.Name] = listenerStatus
+				continue
 			}
 
 			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
@@ -811,11 +819,29 @@ func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1
 	}
 	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
 
-	meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+	var invalidListeners int
+	for _, listenerStatus := range listenerStatuses {
+		if meta.IsStatusConditionFalse(listenerStatus.Conditions, string(gatewayv1.ListenerConditionAccepted)) {
+			invalidListeners++
+		}
+	}
+	acceptedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(gatewayv1.GatewayReasonAccepted),
-		Message:            "Gateway is accepted",
 		ObservedGeneration: newGw.Generation,
-	})
+	}
+	switch {
+	case invalidListeners == 0:
+		acceptedCondition.Status = metav1.ConditionTrue
+		acceptedCondition.Reason = string(gatewayv1.GatewayReasonAccepted)
+		acceptedCondition.Message = "Gateway is accepted"
+	case invalidListeners < len(listenerStatuses):
+		acceptedCondition.Status = metav1.ConditionTrue
+		acceptedCondition.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+		acceptedCondition.Message = "One or more listeners are not valid"
+	default:
+		acceptedCondition.Status = metav1.ConditionFalse
+		acceptedCondition.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
+		acceptedCondition.Message = "All listeners are invalid"
+	}
+	meta.SetStatusCondition(&newGw.Status.Conditions, acceptedCondition)
 }
