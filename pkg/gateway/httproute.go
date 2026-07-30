@@ -18,18 +18,32 @@ import (
 )
 
 // translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
-// It now correctly handles RequestHeaderModifier filters.
+// It returns the translated routes, the valid backend refs, and up to three conditions:
+//   - notAccepted: non-nil (Accepted=False) when the entire route is rejected
+//   - resolvedRefsFailure: non-nil (ResolvedRefs=False) only when a backend ref could not be resolved;
+//     nil signals success and the caller is responsible for setting ResolvedRefs=True
+//   - partiallyInvalid: non-nil (PartiallyInvalid=True) when some rules were dropped
 func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
 	referenceGrantLister gatewaylistersv1.ReferenceGrantLister,
-) ([]*routev3.Route, []gatewayv1.BackendRef, metav1.Condition) {
+) (
+	envoyRoutes []*routev3.Route,
+	allValidBackendRefs []gatewayv1.BackendRef,
+	notAccepted *metav1.Condition,
+	resolvedRefsFailure *metav1.Condition,
+	partiallyInvalid *metav1.Condition,
+) {
 
-	var envoyRoutes []*routev3.Route
-	var allValidBackendRefs []gatewayv1.BackendRef
-	overallCondition := createSuccessCondition(httpRoute.Generation)
+	var droppedRuleMessages []string
 
 	for ruleIndex, rule := range httpRoute.Spec.Rules {
+		if unsupportedType, found := findUnsupportedFilter(rule.Filters); found {
+			droppedRuleMessages = append(droppedRuleMessages,
+				fmt.Sprintf("rule[%d] has unsupported filter type %q", ruleIndex, unsupportedType))
+			continue
+		}
+
 		var redirectAction *routev3.RedirectAction
 		var headersToAdd []*corev3.HeaderValueOption
 		var headersToRemove []string
@@ -97,9 +111,10 @@ func translateHTTPRouteToEnvoyRoutes(
 		}
 
 		buildRoutesForRule := func(match gatewayv1.HTTPRouteMatch, matchIndex int) {
-			routeMatch, matchCondition := translateHTTPRouteMatch(match, httpRoute.Generation)
-			if matchCondition.Status == metav1.ConditionFalse {
-				overallCondition = matchCondition
+			routeMatch, dropReason := translateHTTPRouteMatch(match, httpRoute.Generation)
+			if dropReason != nil {
+				droppedRuleMessages = append(droppedRuleMessages,
+					fmt.Sprintf("rule[%d] match[%d]: %s", ruleIndex, matchIndex, *dropReason))
 				return
 			}
 
@@ -125,7 +140,8 @@ func translateHTTPRouteToEnvoyRoutes(
 				)
 				var controllerErr *ControllerError
 				if errors.As(err, &controllerErr) {
-					overallCondition = createFailureCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
+					cond := createNotResolvedCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
+					resolvedRefsFailure = &cond
 					envoyRoute.Action = &routev3.Route_DirectResponse{
 						DirectResponse: &routev3.DirectResponseAction{Status: 500},
 					}
@@ -147,7 +163,34 @@ func translateHTTPRouteToEnvoyRoutes(
 			}
 		}
 	}
-	return envoyRoutes, allValidBackendRefs, overallCondition
+
+	if len(droppedRuleMessages) > 0 && len(envoyRoutes) == 0 {
+		msg := fmt.Sprintf("no rules could be translated: %s", strings.Join(droppedRuleMessages, "; "))
+		cond := createNotAcceptedCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation)
+		notAccepted = &cond
+		return nil, nil, notAccepted, nil, nil
+	}
+
+	if len(droppedRuleMessages) > 0 {
+		msg := fmt.Sprintf("Dropped Rule(s): %s", strings.Join(droppedRuleMessages, "; "))
+		cond := createPartiallyInvalidCondition(msg, httpRoute.Generation)
+		partiallyInvalid = &cond
+	}
+	return envoyRoutes, allValidBackendRefs, nil, resolvedRefsFailure, partiallyInvalid
+}
+
+// findUnsupportedFilter returns the first filter type in the list that is not
+// implemented by this controller.
+func findUnsupportedFilter(filters []gatewayv1.HTTPRouteFilter) (gatewayv1.HTTPRouteFilterType, bool) {
+	for _, filter := range filters {
+		switch filter.Type {
+		case gatewayv1.HTTPRouteFilterRequestRedirect,
+			gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+		default:
+			return filter.Type, true
+		}
+	}
+	return "", false
 }
 
 // buildHTTPRouteAction returns an action, a list of *valid* BackendRefs, and a structured error.
@@ -226,7 +269,7 @@ func buildHTTPRouteAction(namespace string, backendRefs []gatewayv1.HTTPBackendR
 
 // translateHTTPRouteMatch translates a Gateway API HTTPRouteMatch into an Envoy RouteMatch.
 // It returns the result and a condition indicating success or failure.
-func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (*routev3.RouteMatch, metav1.Condition) {
+func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (*routev3.RouteMatch, *string) {
 	routeMatch := &routev3.RouteMatch{}
 
 	if match.Path != nil {
@@ -236,7 +279,7 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 		}
 		if match.Path.Value == nil {
 			msg := "path match value cannot be nil"
-			return nil, createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, generation)
+			return nil, &msg
 		}
 		pathValue := *match.Path.Value
 
@@ -259,7 +302,7 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 			}
 		default:
 			msg := fmt.Sprintf("unsupported path match type: %s", pathType)
-			return nil, createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, generation)
+			return nil, &msg
 		}
 	} else {
 		// As per Gateway API spec, a nil path match defaults to matching everything.
@@ -292,7 +335,7 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 			}
 		default:
 			msg := fmt.Sprintf("unsupported header match type: %s", matchType)
-			return nil, createFailureCondition(gatewayv1.RouteReasonUnsupportedValue, msg, generation)
+			return nil, &msg
 		}
 		routeMatch.Headers = append(routeMatch.Headers, headerMatcher)
 	}
@@ -311,11 +354,11 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 		routeMatch.QueryParameters = append(routeMatch.QueryParameters, queryMatcher)
 	}
 
-	// If all translations were successful, return the final object and a success condition.
-	return routeMatch, createSuccessCondition(generation)
+	// If all translations were successful, return the final object.
+	return routeMatch, nil
 }
 
-func createSuccessCondition(generation int64) metav1.Condition {
+func createResolvedCondition(generation int64) metav1.Condition {
 	return metav1.Condition{
 		Type:               string(gatewayv1.RouteConditionResolvedRefs),
 		Status:             metav1.ConditionTrue,
@@ -325,11 +368,31 @@ func createSuccessCondition(generation int64) metav1.Condition {
 	}
 }
 
-func createFailureCondition(reason gatewayv1.RouteConditionReason, message string, generation int64) metav1.Condition {
+func createNotAcceptedCondition(reason gatewayv1.RouteConditionReason, message string, generation int64) metav1.Condition {
+	return metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionAccepted),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(reason),
+		Message:            message,
+		ObservedGeneration: generation,
+	}
+}
+
+func createNotResolvedCondition(reason gatewayv1.RouteConditionReason, message string, generation int64) metav1.Condition {
 	return metav1.Condition{
 		Type:               string(gatewayv1.RouteConditionResolvedRefs),
 		Status:             metav1.ConditionFalse,
 		Reason:             string(reason),
+		Message:            message,
+		ObservedGeneration: generation,
+	}
+}
+
+func createPartiallyInvalidCondition(message string, generation int64) metav1.Condition {
+	return metav1.Condition{
+		Type:               string(gatewayv1.RouteConditionPartiallyInvalid),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.RouteReasonUnsupportedValue),
 		Message:            message,
 		ObservedGeneration: generation,
 	}

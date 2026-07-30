@@ -250,14 +250,23 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// Process HTTPRoutes
 				// Get the routes that were pre-validated for this specific listener.
 				for _, httpRoute := range routesByListener[listener.Name] {
-					routes, validBackendRefs, resolvedRefsCondition := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
+					routes, validBackendRefs, notAccepted, resolvedRefsFailure, partiallyInvalidCond := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
 
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
 					currentParentStatuses := httpRouteStatuses[key]
 					for i := range currentParentStatuses {
-						// Only add the ResolvedRefs condition if the parent was Accepted.
+						if notAccepted != nil {
+							meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *notAccepted)
+						}
 						if meta.IsStatusConditionTrue(currentParentStatuses[i].Conditions, string(gatewayv1.RouteConditionAccepted)) {
-							meta.SetStatusCondition(&currentParentStatuses[i].Conditions, resolvedRefsCondition)
+							if resolvedRefsFailure != nil {
+								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *resolvedRefsFailure)
+							} else {
+								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, createResolvedCondition(httpRoute.Generation))
+							}
+							if partiallyInvalidCond != nil {
+								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *partiallyInvalidCond)
+							}
 						}
 					}
 					httpRouteStatuses[key] = currentParentStatuses
