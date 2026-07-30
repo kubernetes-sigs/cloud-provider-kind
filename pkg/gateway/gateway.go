@@ -83,8 +83,14 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 		return nil
 	}
 
+	newGw := gw.DeepCopy()
+	var (
+		httpRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus
+		grpcRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus
+		xdsErr            error
+	)
+
 	if gw.Spec.Infrastructure != nil && gw.Spec.Infrastructure.ParametersRef != nil {
-		newGw := gw.DeepCopy()
 		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.GatewayConditionAccepted),
 			Status:             metav1.ConditionFalse,
@@ -92,72 +98,62 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			Message:            "infrastructure.parametersRef is not supported",
 			ObservedGeneration: newGw.Generation,
 		})
-		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.GatewayConditionProgrammed),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(gatewayv1.GatewayReasonInvalid),
-			Message:            "Gateway cannot be programmed due to unsupported infrastructure.parametersRef",
-			ObservedGeneration: newGw.Generation,
-		})
-		if !reflect.DeepEqual(gw.Status, newGw.Status) {
-			if _, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{}); err != nil {
-				klog.Errorf("Failed to update gateway status: %v", err)
+	} else {
+		containerName := gatewayName(c.clusterName, namespace, name)
+		klog.Infof("Syncing Gateway %s, container %s", key, containerName)
+
+		err = c.ensureGatewayContainer(ctx, gw)
+		if err != nil {
+			return fmt.Errorf("failed to ensure gateway container %s: %w", containerName, err)
+		}
+
+		ipv4, ipv6, err := container.IPs(containerName)
+		if err != nil {
+			if strings.Contains(err.Error(), "failed to get container details") {
 				return err
 			}
-		}
-		return nil
-	}
-
-	containerName := gatewayName(c.clusterName, namespace, name)
-	klog.Infof("Syncing Gateway %s, container %s", key, containerName)
-
-	err = c.ensureGatewayContainer(ctx, gw)
-	if err != nil {
-		return fmt.Errorf("failed to ensure gateway container %s: %w", containerName, err)
-	}
-
-	newGw := gw.DeepCopy()
-	ipv4, ipv6, err := container.IPs(containerName)
-	if err != nil {
-		if strings.Contains(err.Error(), "failed to get container details") {
 			return err
 		}
-		return err
-	}
 
-	newGw.Status.Addresses = []gatewayv1.GatewayStatusAddress{}
-	if net.ParseIP(ipv4) != nil {
-		newGw.Status.Addresses = append(newGw.Status.Addresses,
-			gatewayv1.GatewayStatusAddress{
-				Type:  ptr.To(gatewayv1.IPAddressType),
-				Value: ipv4,
-			})
-	}
-	if net.ParseIP(ipv6) != nil {
-		newGw.Status.Addresses = append(newGw.Status.Addresses,
-			gatewayv1.GatewayStatusAddress{
-				Type:  ptr.To(gatewayv1.IPAddressType),
-				Value: ipv6,
-			})
-	}
+		newGw.Status.Addresses = []gatewayv1.GatewayStatusAddress{}
+		if net.ParseIP(ipv4) != nil {
+			newGw.Status.Addresses = append(newGw.Status.Addresses,
+				gatewayv1.GatewayStatusAddress{
+					Type:  ptr.To(gatewayv1.IPAddressType),
+					Value: ipv4,
+				})
+		}
+		if net.ParseIP(ipv6) != nil {
+			newGw.Status.Addresses = append(newGw.Status.Addresses,
+				gatewayv1.GatewayStatusAddress{
+					Type:  ptr.To(gatewayv1.IPAddressType),
+					Value: ipv6,
+				})
+		}
 
-	// Get the desired state
-	envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses := c.buildEnvoyResourcesForGateway(newGw)
+		// Get the desired state
+		var (
+			envoyResources   map[resourcev3.Type][]envoyproxytypes.Resource
+			listenerStatuses []gatewayv1.ListenerStatus
+		)
+		envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses = c.buildEnvoyResourcesForGateway(newGw)
+		newGw.Status.Listeners = listenerStatuses
 
-	// Apply the desired state to the data plane (Envoy).
-	newGw.Status.Listeners = listenerStatuses
-	err = c.UpdateXDSServer(ctx, containerName, envoyResources)
+		setAcceptedCondition(newGw)
 
-	// forward traffic from the host on Mac and Windows
-	if c.tunnelManager != nil {
-		err := c.tunnelManager.SetupTunnels(containerName)
-		if err != nil {
-			klog.Errorf("failed to set up tunnels for gateway %s: %v", key, err)
+		// Apply the desired state to the data plane (Envoy).
+		xdsErr = c.UpdateXDSServer(ctx, containerName, envoyResources)
+
+		// forward traffic from the host on Mac and Windows
+		if c.tunnelManager != nil {
+			err := c.tunnelManager.SetupTunnels(containerName)
+			if err != nil {
+				klog.Errorf("failed to set up tunnels for gateway %s: %v", key, err)
+			}
 		}
 	}
 
-	// Calculate and set the Gateway's own status conditions based on the build results.
-	setGatewayConditions(newGw, listenerStatuses, err)
+	setProgrammedCondition(newGw, xdsErr)
 
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
 		_, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
@@ -822,28 +818,71 @@ func getRouteHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.L
 	return []string{"*"}
 }
 
-// setGatewayConditions calculates and sets the final status conditions for the Gateway
-// based on the results of the reconciliation loop.
-func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1.ListenerStatus, err error) {
+// setAcceptedCondition sets the Accepted condition on the Gateway based on how many
+// of its listeners are valid.
+func setAcceptedCondition(newGw *gatewayv1.Gateway) {
+	var invalidListeners int
+	for _, ls := range newGw.Status.Listeners {
+		if meta.IsStatusConditionFalse(ls.Conditions, string(gatewayv1.ListenerConditionAccepted)) {
+			invalidListeners++
+		}
+	}
+	switch {
+	case invalidListeners == 0:
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.GatewayReasonAccepted),
+			Message:            "Gateway is accepted",
+			ObservedGeneration: newGw.Generation,
+		})
+	case invalidListeners < len(newGw.Status.Listeners):
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.GatewayReasonListenersNotValid),
+			Message:            "One or more listeners are not valid",
+			ObservedGeneration: newGw.Generation,
+		})
+	default:
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionAccepted),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.GatewayReasonListenersNotValid),
+			Message:            "All listeners are invalid",
+			ObservedGeneration: newGw.Generation,
+		})
+	}
+}
+
+// setProgrammedCondition sets the Programmed condition for the Gateway.
+// Accepted is expected to already be set on newGw by the time this is called.
+func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
 	programmedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
 		ObservedGeneration: newGw.Generation,
 	}
-	if err != nil {
+	// A Gateway can never be Programmed=True if Accepted=False.
+	switch {
+	case meta.IsStatusConditionFalse(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)):
+		programmedCondition.Status = metav1.ConditionFalse
+		programmedCondition.Reason = string(gatewayv1.GatewayReasonInvalid)
+		programmedCondition.Message = "Gateway is not accepted"
+	case xdsErr != nil:
 		// If the Envoy update fails, the Gateway is not programmed.
 		programmedCondition.Status = metav1.ConditionFalse
 		programmedCondition.Reason = "ReconciliationError"
-		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", err.Error())
-	} else {
+		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", xdsErr.Error())
+	default:
 		// If the Envoy update succeeds, check if all individual listeners were programmed.
+		total := len(newGw.Status.Listeners)
 		listenersProgrammed := 0
-		for _, listenerStatus := range listenerStatuses {
-			if meta.IsStatusConditionTrue(listenerStatus.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
+		for _, ls := range newGw.Status.Listeners {
+			if meta.IsStatusConditionTrue(ls.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
 				listenersProgrammed++
 			}
 		}
-
-		if listenersProgrammed == len(listenerStatuses) {
+		if listenersProgrammed == total {
 			// The Gateway is only fully programmed if all listeners are programmed.
 			programmedCondition.Status = metav1.ConditionTrue
 			programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
@@ -852,34 +891,8 @@ func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1
 			// If any listener failed, the Gateway as a whole is not fully programmed.
 			programmedCondition.Status = metav1.ConditionFalse
 			programmedCondition.Reason = "ListenersNotProgrammed"
-			programmedCondition.Message = fmt.Sprintf("%d out of %d listeners failed to be programmed", listenersProgrammed, len(listenerStatuses))
+			programmedCondition.Message = fmt.Sprintf("%d out of %d listeners failed to be programmed", listenersProgrammed, total)
 		}
 	}
 	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
-
-	var invalidListeners int
-	for _, listenerStatus := range listenerStatuses {
-		if meta.IsStatusConditionFalse(listenerStatus.Conditions, string(gatewayv1.ListenerConditionAccepted)) {
-			invalidListeners++
-		}
-	}
-	acceptedCondition := metav1.Condition{
-		Type:               string(gatewayv1.GatewayConditionAccepted),
-		ObservedGeneration: newGw.Generation,
-	}
-	switch {
-	case invalidListeners == 0:
-		acceptedCondition.Status = metav1.ConditionTrue
-		acceptedCondition.Reason = string(gatewayv1.GatewayReasonAccepted)
-		acceptedCondition.Message = "Gateway is accepted"
-	case invalidListeners < len(listenerStatuses):
-		acceptedCondition.Status = metav1.ConditionTrue
-		acceptedCondition.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-		acceptedCondition.Message = "One or more listeners are not valid"
-	default:
-		acceptedCondition.Status = metav1.ConditionFalse
-		acceptedCondition.Reason = string(gatewayv1.GatewayReasonListenersNotValid)
-		acceptedCondition.Message = "All listeners are invalid"
-	}
-	meta.SetStatusCondition(&newGw.Status.Conditions, acceptedCondition)
 }
