@@ -120,7 +120,6 @@ jobs:
             --contact=https://github.com/kubernetes-sigs/cloud-provider-kind/issues/new \
             --gateway-class=cloud-provider-kind \
             --conformance-profiles=GATEWAY-HTTP \
-            --supported-features=Gateway,HTTPRoute,ReferenceGrant \
             --report-output=./_artifacts/conformance.yaml
 
     - name: Export logs
