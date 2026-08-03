@@ -387,6 +387,8 @@ func (c *Controller) syncGatewayClass(key string) {
 		Message:            "GatewayClass is accepted by this controller.",
 		ObservedGeneration: gwc.Generation,
 	})
+	// Advertise the features this controller supports (GEP-2162).
+	newGwc.Status.SupportedFeatures = supportedFeatures
 
 	// Update the status on the API server.
 	if _, err := c.gwClient.GatewayV1().GatewayClasses().UpdateStatus(context.Background(), newGwc, metav1.UpdateOptions{}); err != nil {
