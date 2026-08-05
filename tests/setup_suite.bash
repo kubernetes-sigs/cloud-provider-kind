@@ -11,6 +11,9 @@ function setup_suite {
   mkdir -p "$ARTIFACTS_DIR"
   rm -rf "$ARTIFACTS_DIR"/*
 
+  # Clean up any leftover cluster from a previous run
+  kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
+
   # create cluster
   kind create cluster --name $CLUSTER_NAME -v7 --wait 1m --retain --config="$BATS_TEST_DIRNAME/kind.yaml"
 
@@ -23,7 +26,7 @@ function setup_suite {
 }
 
 function teardown_suite {
-    kill "$CCM_PID"
+    kill "${CCM_PID:-}" 2>/dev/null || true
     kind export logs "$ARTIFACTS_DIR" --name "$CLUSTER_NAME"
     kind delete cluster --name "$CLUSTER_NAME"
 }
