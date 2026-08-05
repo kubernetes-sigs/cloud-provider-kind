@@ -21,7 +21,7 @@ test:
 	CGO_ENABLED=1 go test -v -race -count 1 ./...
 
 e2e:
-	cd tests && bats tests.bats
+	bats tests/
 
 # code linters
 lint:
