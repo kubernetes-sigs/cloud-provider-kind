@@ -53,6 +53,12 @@ EOF
     run kubectl get gateway test-gw-params -o 'jsonpath={.status.addresses}'
     [ -z "$output" ]
 
+    # No Envoy container was started
+    run docker ps \
+      --filter label=io.x-k8s.cloud-provider-kind.gateway.name=ccm-kind/default/test-gw-params \
+      --format='{{.ID}}'
+    [ -z "$output" ]
+
     kubectl delete gateway test-gw-params --ignore-not-found
 }
 
@@ -94,6 +100,12 @@ EOF
 
     # Envoy must not be programmed: no address should be assigned.
     run kubectl get gateway test-gw-tcp-only -o 'jsonpath={.status.addresses}'
+    [ -z "$output" ]
+
+    # No Envoy container was started
+    run docker ps \
+      --filter label=io.x-k8s.cloud-provider-kind.gateway.name=ccm-kind/default/test-gw-tcp-only \
+      --format='{{.ID}}'
     [ -z "$output" ]
 
     kubectl delete gateway test-gw-tcp-only --ignore-not-found
@@ -160,6 +172,12 @@ EOF
     run kubectl get gateway test-gw-accepted \
         -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}'
     [ "$output" = "True" ]
+
+    # Envoy container was started
+    run docker ps \
+      --filter label=io.x-k8s.cloud-provider-kind.gateway.name=ccm-kind/default/test-gw-accepted \
+      --format='{{.ID}}'
+    [ -n "$output" ]
 
     # Envoy is programmed ↔ the gateway has been assigned an external IP.
     for i in {1..30}; do
