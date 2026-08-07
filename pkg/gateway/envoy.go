@@ -200,11 +200,17 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 			}
 		}
 	}
-
-	args = append(args, []string{
-		"--sysctl=net.ipv6.conf.all.disable_ipv6=0",
-		"--sysctl=net.ipv6.conf.all.forwarding=1",
-	}...)
+	if len(gateway.Spec.Addresses) > 0 && ipv4 != "" && ipv6 == "" {
+		// Only the explicitly requested addresses should be assigned. Since none of them is IPv6, disable IPv6.
+		args = append(args, []string{
+			"--sysctl=net.ipv6.conf.all.disable_ipv6=1",
+		}...)
+	} else {
+		args = append(args, []string{
+			"--sysctl=net.ipv6.conf.all.disable_ipv6=0",
+			"--sysctl=net.ipv6.conf.all.forwarding=1",
+		}...)
+	}
 
 	if enableTunnel ||
 		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {

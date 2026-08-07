@@ -110,9 +110,12 @@ jobs:
 
     - name: Run tests
       run: |
+        GATEWAY_ADDRESS=$(/usr/local/bin/kubectl get nodes ${{ env.KIND_CLUSTER_NAME }}-control-plane -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' | awk -F. '{print $1"."$2"."$3".100"}')
         /usr/local/bin/conformance.test -test.run 'TestConformance$' \
             --debug=true \
             --kubeconfig=_artifacts/kubeconfig.conf \
+            --usable-address=$GATEWAY_ADDRESS \
+            --unusable-address=invalid.io \
             --organization=sigs.k8s.io \
             --project=cloud-provider-kind \
             --url=https://github.com/kubernetes-sigs/cloud-provider-kind \
