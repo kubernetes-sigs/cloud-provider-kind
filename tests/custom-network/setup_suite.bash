@@ -13,9 +13,13 @@ function setup_suite {
 
   # create custom docker network
   export KIND_EXPERIMENTAL_DOCKER_NETWORK=kind-static
+  docker network rm "$KIND_EXPERIMENTAL_DOCKER_NETWORK" 2>/dev/null || true
   docker network create \
   --driver=bridge \
   --subnet=172.20.0.0/16 $KIND_EXPERIMENTAL_DOCKER_NETWORK
+
+  # Clean up any leftover cluster from a previous run
+  kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
 
   # create cluster
   kind create cluster \
@@ -32,7 +36,7 @@ function setup_suite {
 }
 
 function teardown_suite {
-    kill "$CCM_PID"
+    kill "${CCM_PID:-}" 2>/dev/null || true
     kind export logs "$ARTIFACTS_DIR" --name "$CLUSTER_NAME"
     kind delete cluster --name "$CLUSTER_NAME"
     docker network rm "$KIND_EXPERIMENTAL_DOCKER_NETWORK"

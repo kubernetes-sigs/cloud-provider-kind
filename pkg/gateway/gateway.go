@@ -85,9 +85,9 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 
 	newGw := gw.DeepCopy()
 	var (
+		envoyResources    map[resourcev3.Type][]envoyproxytypes.Resource
 		httpRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus
 		grpcRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus
-		xdsErr            error
 	)
 
 	if gw.Spec.Infrastructure != nil && gw.Spec.Infrastructure.ParametersRef != nil {
@@ -99,6 +99,15 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			ObservedGeneration: newGw.Generation,
 		})
 	} else {
+		// Get the desired state
+		var listenerStatuses []gatewayv1.ListenerStatus
+		envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses = c.buildEnvoyResourcesForGateway(newGw)
+		newGw.Status.Listeners = listenerStatuses
+		setAcceptedCondition(newGw)
+	}
+
+	var xdsErr error
+	if meta.IsStatusConditionTrue(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)) {
 		containerName := gatewayName(c.clusterName, namespace, name)
 		klog.Infof("Syncing Gateway %s, container %s", key, containerName)
 
@@ -130,16 +139,6 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 					Value: ipv6,
 				})
 		}
-
-		// Get the desired state
-		var (
-			envoyResources   map[resourcev3.Type][]envoyproxytypes.Resource
-			listenerStatuses []gatewayv1.ListenerStatus
-		)
-		envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses = c.buildEnvoyResourcesForGateway(newGw)
-		newGw.Status.Listeners = listenerStatuses
-
-		setAcceptedCondition(newGw)
 
 		// Apply the desired state to the data plane (Envoy).
 		xdsErr = c.UpdateXDSServer(ctx, containerName, envoyResources)
