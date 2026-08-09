@@ -114,6 +114,14 @@ func Delete(name string) error {
 	return nil
 }
 
+func State(name string) string {
+	out, err := exec.Command(containerRuntime, "inspect", "--format", "{{.State.Status}}", name).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func IsRunning(name string) bool {
 	cmd := exec.Command(containerRuntime, []string{"ps", "-q", "-f", "name=" + name}...)
 	output, err := cmd.Output()
