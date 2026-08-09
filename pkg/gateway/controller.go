@@ -18,14 +18,18 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sort"
-	"sync/atomic"
+	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/protobuf/proto"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	clusterv3service "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
@@ -121,7 +125,14 @@ type Controller struct {
 	xdsserver       serverv3.Server
 	xdsLocalAddress string
 	xdsLocalPort    int
-	xdsVersion      atomic.Uint64
+
+	// xdsGatewayState maps the xDS node ID (gatewaySimpleName, i.e.
+	// "clusterName/namespace/name") to the gateway's current sync state.
+	// The value is one of:
+	//   string → content hash of a push that Envoy has not yet ACK'd or NACK'd
+	//   error  → the error from Envoy's most recent NACK
+	//   absent → the last push was confirmed by an Envoy ACK (or nothing pushed)
+	xdsGatewayState sync.Map
 
 	tunnelManager *tunnels.TunnelManager
 }
@@ -403,7 +414,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	logger.Info("Starting Envoy proxy controller")
 	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
-	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{})
+	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{ctrl: c})
 
 	var grpcOptions []grpc.ServerOption
 	grpcOptions = append(grpcOptions,
@@ -721,14 +732,10 @@ func GetControlPlaneAddress() (string, error) {
 }
 
 func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resources map[resourcev3.Type][]envoyproxytypes.Resource) error {
-	c.xdsVersion.Add(1)
-
-	snapshot, err := cachev3.NewSnapshot(fmt.Sprintf("%d", c.xdsVersion.Load()), resources)
+	snapshot, err := cachev3.NewSnapshot(computeResourcesHash(resources), resources)
 	if err != nil {
 		return fmt.Errorf("failed to create new snapshot cache: %v", err)
-
 	}
-
 	if err := c.xdscache.SetSnapshot(ctx, nodeid, snapshot); err != nil {
 		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
 	}
@@ -739,7 +746,9 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 
 var _ serverv3.Callbacks = &xdsCallbacks{}
 
-type xdsCallbacks struct{}
+type xdsCallbacks struct {
+	ctrl *Controller
+}
 
 func (cb *xdsCallbacks) OnStreamOpen(ctx context.Context, id int64, typ string) error {
 	klog.V(2).Infof("xDS stream %d opened for type %s", id, typ)
@@ -753,7 +762,31 @@ func (cb *xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
 	klog.V(2).Infof("xDS stream %d closed for node %s", id, nodeID)
 }
 func (cb *xdsCallbacks) OnStreamRequest(id int64, req *discoveryv3.DiscoveryRequest) error {
-	klog.V(5).Infof("xDS stream %d received request for type %s from node %s", id, req.TypeUrl, req.Node.GetId())
+	nodeID := req.Node.GetId()
+	klog.V(5).Infof("xDS stream %d received request for type %s from node %s", id, req.TypeUrl, nodeID)
+
+	requeue := func() {
+		prefix := cb.ctrl.clusterName + "/"
+		if strings.HasPrefix(nodeID, prefix) {
+			cb.ctrl.gatewayqueue.Add(strings.TrimPrefix(nodeID, prefix))
+		}
+	}
+
+	if req.ErrorDetail != nil {
+		nackerr := fmt.Errorf("%s", req.ErrorDetail.Message)
+		prev, _ := cb.ctrl.xdsGatewayState.Swap(nodeID, nackerr)
+		if _, wasAlreadyNACKed := prev.(error); !wasAlreadyNACKed {
+			klog.Warningf("xDS NACK from node %s (type %s): %s", nodeID, req.TypeUrl, req.ErrorDetail.Message)
+			requeue()
+		}
+	} else if v, ok := cb.ctrl.xdsGatewayState.Load(nodeID); ok {
+		if pendingHash, isStr := v.(string); isStr && pendingHash == req.VersionInfo {
+			cb.ctrl.xdsGatewayState.Delete(nodeID)
+			klog.V(4).Infof("xDS ACK from node %s (type %s): config confirmed", nodeID, req.TypeUrl)
+			requeue()
+		}
+	}
+
 	return nil
 }
 func (cb *xdsCallbacks) OnStreamResponse(ctx context.Context, id int64, req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
@@ -774,4 +807,31 @@ func (cb *xdsCallbacks) OnStreamDeltaResponse(id int64, req *discoveryv3.DeltaDi
 func (cb *xdsCallbacks) OnDeltaStreamClosed(int64, *corev3.Node) {}
 func (cb *xdsCallbacks) OnDeltaStreamOpen(context.Context, int64, string) error {
 	return nil
+}
+
+// computeResourcesHash returns a SHA-256 content hash of the given xDS
+// resources, used as the snapshot version string. Within each type the
+// serialised resource bytes are sorted before hashing so the result is stable
+func computeResourcesHash(resources map[resourcev3.Type][]envoyproxytypes.Resource) string {
+	h := sha256.New()
+	typeKeys := make([]string, 0, len(resources))
+	for t := range resources {
+		typeKeys = append(typeKeys, string(t))
+	}
+	sort.Strings(typeKeys)
+	for _, t := range typeKeys {
+		rs := resources[resourcev3.Type(t)]
+		serialised := make([][]byte, len(rs))
+		for i, r := range rs {
+			serialised[i], _ = proto.MarshalOptions{Deterministic: true}.Marshal(r)
+		}
+		sort.Slice(serialised, func(i, j int) bool {
+			return string(serialised[i]) < string(serialised[j])
+		})
+		h.Write([]byte(t))
+		for _, b := range serialised {
+			h.Write(b)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
