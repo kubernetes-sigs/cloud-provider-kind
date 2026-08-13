@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
-
-	"google.golang.org/protobuf/types/known/durationpb"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -20,6 +19,7 @@ import (
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -84,27 +84,11 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	}
 
 	newGw := gw.DeepCopy()
-	var (
-		envoyResources    map[resourcev3.Type][]envoyproxytypes.Resource
-		httpRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus
-		grpcRouteStatuses map[types.NamespacedName][]gatewayv1.RouteParentStatus
-	)
 
-	if gw.Spec.Infrastructure != nil && gw.Spec.Infrastructure.ParametersRef != nil {
-		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.GatewayConditionAccepted),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(gatewayv1.GatewayReasonInvalidParameters),
-			Message:            "infrastructure.parametersRef is not supported",
-			ObservedGeneration: newGw.Generation,
-		})
-	} else {
-		// Get the desired state
-		var listenerStatuses []gatewayv1.ListenerStatus
-		envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses = c.buildEnvoyResourcesForGateway(newGw)
-		newGw.Status.Listeners = listenerStatuses
-		setAcceptedCondition(newGw)
-	}
+	// Get the desired state
+	envoyResources, listenerStatuses, httpRouteStatuses, grpcRouteStatuses := c.buildEnvoyResourcesForGateway(newGw)
+	newGw.Status.Listeners = listenerStatuses
+	setAcceptedCondition(newGw)
 
 	var xdsErr error
 	if meta.IsStatusConditionTrue(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)) {
@@ -802,24 +786,32 @@ func createClusterLoadAssignment(clusterName, serviceHost string, servicePort ui
 	}
 }
 
-// getRouteHostnames determines the effective hostnames for a route.
-func getRouteHostnames(routeHostnames []gatewayv1.Hostname, listener gatewayv1.Listener) []string {
-	if len(routeHostnames) > 0 {
-		hostnames := make([]string, len(routeHostnames))
-		for i, h := range routeHostnames {
-			hostnames[i] = string(h)
-		}
-		return hostnames
-	}
-	if listener.Hostname != nil && *listener.Hostname != "" {
-		return []string{string(*listener.Hostname)}
-	}
-	return []string{"*"}
-}
-
-// setAcceptedCondition sets the Accepted condition on the Gateway based on how many
-// of its listeners are valid.
+// setAcceptedCondition sets the Accepted condition on the Gateway.
 func setAcceptedCondition(newGw *gatewayv1.Gateway) {
+	if newGw.Spec.Infrastructure != nil && newGw.Spec.Infrastructure.ParametersRef != nil {
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionAccepted),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.GatewayReasonInvalidParameters),
+			Message:            "infrastructure.parametersRef is not supported",
+			ObservedGeneration: newGw.Generation,
+		})
+		return
+	}
+
+	for _, address := range newGw.Spec.Addresses {
+		if address.Type != nil && *address.Type != gatewayv1.IPAddressType && *address.Type != gatewayv1.HostnameAddressType {
+			meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1.GatewayConditionAccepted),
+				Status:             metav1.ConditionFalse,
+				Reason:             string(gatewayv1.GatewayReasonUnsupportedAddress),
+				Message:            fmt.Sprintf("Address type %s is not supported", *address.Type),
+				ObservedGeneration: newGw.Generation,
+			})
+			return
+		}
+	}
+
 	var invalidListeners int
 	for _, ls := range newGw.Status.Listeners {
 		if meta.IsStatusConditionFalse(ls.Conditions, string(gatewayv1.ListenerConditionAccepted)) {
@@ -857,41 +849,81 @@ func setAcceptedCondition(newGw *gatewayv1.Gateway) {
 // setProgrammedCondition sets the Programmed condition for the Gateway.
 // Accepted is expected to already be set on newGw by the time this is called.
 func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
-	programmedCondition := metav1.Condition{
-		Type:               string(gatewayv1.GatewayConditionProgrammed),
-		ObservedGeneration: newGw.Generation,
-	}
-	// A Gateway can never be Programmed=True if Accepted=False.
 	switch {
 	case meta.IsStatusConditionFalse(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)):
-		programmedCondition.Status = metav1.ConditionFalse
-		programmedCondition.Reason = string(gatewayv1.GatewayReasonInvalid)
-		programmedCondition.Message = "Gateway is not accepted"
+		// A Gateway can never be Programmed=True if Accepted=False.
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.GatewayReasonInvalid),
+			Message:            "Gateway is not accepted",
+			ObservedGeneration: newGw.Generation,
+		})
 	case xdsErr != nil:
 		// If the Envoy update fails, the Gateway is not programmed.
-		programmedCondition.Status = metav1.ConditionFalse
-		programmedCondition.Reason = "ReconciliationError"
-		programmedCondition.Message = fmt.Sprintf("Failed to program envoy config: %s", xdsErr.Error())
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             "ReconciliationError",
+			Message:            fmt.Sprintf("Failed to program envoy config: %s", xdsErr.Error()),
+			ObservedGeneration: newGw.Generation,
+		})
 	default:
-		// If the Envoy update succeeds, check if all individual listeners were programmed.
-		total := len(newGw.Status.Listeners)
+		// If the Envoy update succeeds:
+
+		// Check if all addresses were assigned.
+		totalAddresses := len(newGw.Spec.Addresses)
+		addressAssigned := 0
+		for _, address := range newGw.Spec.Addresses {
+			if slices.ContainsFunc(newGw.Status.Addresses, func(statusAddress gatewayv1.GatewayStatusAddress) bool {
+				if (statusAddress.Type != nil) != (address.Type != nil) {
+					return false
+				}
+				if statusAddress.Type != nil && address.Type != nil {
+					return *statusAddress.Type == *address.Type && statusAddress.Value == address.Value
+				}
+				return statusAddress.Value == address.Value
+			}) {
+				addressAssigned++
+			}
+		}
+		if addressAssigned != totalAddresses {
+			meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1.GatewayConditionProgrammed),
+				Status:             metav1.ConditionFalse,
+				Reason:             string(gatewayv1.GatewayReasonAddressNotUsable),
+				Message:            fmt.Sprintf("%d out of %d addresses failed to be assigned", totalAddresses-addressAssigned, totalAddresses),
+				ObservedGeneration: newGw.Generation,
+			})
+			return
+		}
+
+		// Check if all individual listeners were programmed.
+		totalListeners := len(newGw.Status.Listeners)
 		listenersProgrammed := 0
 		for _, ls := range newGw.Status.Listeners {
 			if meta.IsStatusConditionTrue(ls.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
 				listenersProgrammed++
 			}
 		}
-		if listenersProgrammed == total {
+		if listenersProgrammed == totalListeners {
 			// The Gateway is only fully programmed if all listeners are programmed.
-			programmedCondition.Status = metav1.ConditionTrue
-			programmedCondition.Reason = string(gatewayv1.GatewayReasonProgrammed)
-			programmedCondition.Message = "Envoy configuration updated successfully"
+			meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1.GatewayConditionProgrammed),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.GatewayReasonProgrammed),
+				Message:            "Envoy configuration updated successfully",
+				ObservedGeneration: newGw.Generation,
+			})
 		} else {
 			// If any listener failed, the Gateway as a whole is not fully programmed.
-			programmedCondition.Status = metav1.ConditionFalse
-			programmedCondition.Reason = "ListenersNotProgrammed"
-			programmedCondition.Message = fmt.Sprintf("%d out of %d listeners failed to be programmed", listenersProgrammed, total)
+			meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1.GatewayConditionProgrammed),
+				Status:             metav1.ConditionFalse,
+				Reason:             "ListenersNotProgrammed",
+				Message:            fmt.Sprintf("%d out of %d listeners failed to be programmed", totalListeners-listenersProgrammed, totalListeners),
+				ObservedGeneration: newGw.Generation,
+			})
 		}
 	}
-	meta.SetStatusCondition(&newGw.Status.Conditions, programmedCondition)
 }

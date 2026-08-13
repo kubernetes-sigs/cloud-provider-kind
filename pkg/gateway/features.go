@@ -33,6 +33,7 @@ var supportedFeatures = buildSupportedFeatures(
 	// Extended
 	features.SupportGatewayAddressEmpty,
 	features.SupportGatewayPort8080,
+	features.SupportGatewayStaticAddresses,
 	features.SupportHTTPRoute303RedirectStatusCode,
 	features.SupportHTTPRoute307RedirectStatusCode,
 	features.SupportHTTPRoute308RedirectStatusCode,

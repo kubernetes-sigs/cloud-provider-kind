@@ -11,6 +11,7 @@ env:
   K8S_VERSION: "v1.35.0"
   KIND_VERSION: "v0.31.0"
   KIND_CLUSTER_NAME: "kind-cloud"
+  KIND_EXPERIMENTAL_DOCKER_NETWORK: "kind-static"
 
 jobs:
   gateway:
@@ -55,6 +56,10 @@ jobs:
         sudo chmod +x /usr/local/bin/kind
         # Create folder to store artifacts
         mkdir -p _artifacts
+        # Create docker network with subnet
+        docker network create \
+        --driver=bridge \
+        --subnet=172.20.0.0/16 $KIND_EXPERIMENTAL_DOCKER_NETWORK
 
     - name: Run cloud-provider-kind
       run: |
@@ -113,6 +118,8 @@ jobs:
         /usr/local/bin/conformance.test -test.run 'TestConformance$' \
             --debug=true \
             --kubeconfig=_artifacts/kubeconfig.conf \
+            --usable-address=172.20.0.100 \
+            --unusable-address=invalid.io \
             --organization=sigs.k8s.io \
             --project=cloud-provider-kind \
             --url=https://github.com/kubernetes-sigs/cloud-provider-kind \
