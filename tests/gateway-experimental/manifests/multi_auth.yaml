@@ -1,0 +1,212 @@
+# A Gateway with three routes sharing one port: two protected by different
+# authorization servers and one left unprotected.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authz-a-conf
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      location / {
+        if ($http_authorization = "") {
+          return 401;
+        }
+        add_header X-Authenticated-User "alice";
+        return 200;
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authz-b-conf
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      location / {
+        if ($http_x_api_key = "") {
+          return 403;
+        }
+        return 200;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz-a
+spec:
+  selector:
+    matchLabels:
+      app: AuthzA
+  template:
+    metadata:
+      labels:
+        app: AuthzA
+    spec:
+      containers:
+      - name: authz
+        image: nginx:1.29-alpine
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: conf
+        configMap:
+          name: authz-a-conf
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz-b
+spec:
+  selector:
+    matchLabels:
+      app: AuthzB
+  template:
+    metadata:
+      labels:
+        app: AuthzB
+    spec:
+      containers:
+      - name: authz
+        image: nginx:1.29-alpine
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: conf
+        configMap:
+          name: authz-b-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authz-a-svc
+spec:
+  selector:
+    app: AuthzA
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authz-b-svc
+spec:
+  selector:
+    app: AuthzB
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  selector:
+    matchLabels:
+      app: MyApp
+  template:
+    metadata:
+      labels:
+        app: MyApp
+    spec:
+      containers:
+      - name: myapp
+        image: registry.k8s.io/e2e-test-images/agnhost:2.66.1
+        args: ["netexec", "--http-port=80"]
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-svc
+spec:
+  selector:
+    app: MyApp
+  ports:
+  - port: 8080
+    targetPort: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: multi-auth-gw
+spec:
+  gatewayClassName: cloud-provider-kind
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-a
+spec:
+  parentRefs:
+  - name: multi-auth-gw
+  hostnames:
+  - a.auth.test
+  rules:
+  - filters:
+    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: authz-a-svc
+          port: 8080
+        http:
+          allowedResponseHeaders:
+          - X-Authenticated-User
+    backendRefs:
+    - name: myapp-svc
+      port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-b
+spec:
+  parentRefs:
+  - name: multi-auth-gw
+  hostnames:
+  - b.auth.test
+  rules:
+  - filters:
+    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: authz-b-svc
+          port: 8080
+        http:
+          allowedHeaders:
+          - X-Api-Key
+    backendRefs:
+    - name: myapp-svc
+      port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: route-open
+spec:
+  parentRefs:
+  - name: multi-auth-gw
+  hostnames:
+  - open.auth.test
+  rules:
+  - backendRefs:
+    - name: myapp-svc
+      port: 8080

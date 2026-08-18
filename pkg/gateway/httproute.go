@@ -9,6 +9,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -25,24 +26,54 @@ func (e *noEffectiveBackendsError) Error() string {
 	return "no effective backends: backendRefs is empty or all weights are zero"
 }
 
-// translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into a slice of Envoy Routes.
-// It returns the translated routes, the valid backend refs, and up to three conditions:
-//   - notAccepted: non-nil (Accepted=False) when the entire route is rejected
-//   - resolvedRefsFailure: non-nil (ResolvedRefs=False) only when a backend ref could not be resolved;
-//     nil signals success and the caller is responsible for setting ResolvedRefs=True
-//   - partiallyInvalid: non-nil (PartiallyInvalid=True) when some rules were dropped
+// directResponse makes a rule answer by itself instead of forwarding, so a rule
+// that cannot be programmed still shadows lower precedence routes.
+func directResponse(status uint32) *routev3.Route_DirectResponse {
+	return &routev3.Route_DirectResponse{
+		DirectResponse: &routev3.DirectResponseAction{Status: status},
+	}
+}
+
+// newEnvoyRoute builds the name and match of an Envoy route. It returns a nil
+// route and the reason to report when the match cannot be translated.
+func newEnvoyRoute(httpRoute *gatewayv1.HTTPRoute, ruleIndex, matchIndex int, match gatewayv1.HTTPRouteMatch) (*routev3.Route, string) {
+	routeMatch, dropReason := translateHTTPRouteMatch(match, httpRoute.Generation)
+	if dropReason != nil {
+		return nil, fmt.Sprintf("rule[%d] match[%d]: %s", ruleIndex, matchIndex, *dropReason)
+	}
+	return &routev3.Route{
+		Name:  fmt.Sprintf("%s-%s-rule%d-match%d", httpRoute.Namespace, httpRoute.Name, ruleIndex, matchIndex),
+		Match: routeMatch,
+	}, ""
+}
+
+// routeTranslationResult is everything a translated HTTPRoute contributes to the
+// Envoy configuration, together with the conditions to report on its status.
+type routeTranslationResult struct {
+	routes      []*routev3.Route
+	backendRefs []gatewayv1.BackendRef
+	// externalAuth is keyed by the Envoy HTTP filter name that the routes
+	// reference in their typed_per_filter_config. Callers must install every
+	// entry on the connection manager or Envoy rejects the route configuration.
+	externalAuth map[string]*externalAuthResources
+
+	// notAccepted is set (Accepted=False) when the entire route is rejected.
+	notAccepted *metav1.Condition
+	// resolvedRefsFailure is set (ResolvedRefs=False) only when a reference could
+	// not be resolved; nil means the caller must set ResolvedRefs=True.
+	resolvedRefsFailure *metav1.Condition
+	// partiallyInvalid is set (PartiallyInvalid=True) when some rules were dropped.
+	partiallyInvalid *metav1.Condition
+}
+
+// translateHTTPRouteToEnvoyRoutes translates a full HTTPRoute into Envoy routes
+// and the extra resources those routes depend on.
 func translateHTTPRouteToEnvoyRoutes(
 	httpRoute *gatewayv1.HTTPRoute,
 	serviceLister corev1listers.ServiceLister,
 	referenceGrantLister gatewaylistersv1.ReferenceGrantLister,
-) (
-	envoyRoutes []*routev3.Route,
-	allValidBackendRefs []gatewayv1.BackendRef,
-	notAccepted *metav1.Condition,
-	resolvedRefsFailure *metav1.Condition,
-	partiallyInvalid *metav1.Condition,
-) {
-
+) routeTranslationResult {
+	var result routeTranslationResult
 	var droppedRuleMessages []string
 
 	for ruleIndex, rule := range httpRoute.Spec.Rules {
@@ -55,6 +86,51 @@ func translateHTTPRouteToEnvoyRoutes(
 		var redirectAction *routev3.RedirectAction
 		var headersToAdd []*corev3.HeaderValueOption
 		var headersToRemove []string
+
+		matches := rule.Matches
+		if len(matches) == 0 {
+			// A rule without matches matches everything.
+			matches = []gatewayv1.HTTPRouteMatch{{}}
+		}
+
+		// GEP-1494: the authorization server has to be resolved before anything
+		// else, because a rule that cannot be authorized must not be programmed.
+		extAuth, extAuthErr := resolveRuleExternalAuth(httpRoute.Namespace, rule.Filters, serviceLister, referenceGrantLister)
+		if extAuthErr != nil {
+			var controllerErr *ControllerError
+			reason := gatewayv1.RouteReasonBackendNotFound
+			if errors.As(extAuthErr, &controllerErr) {
+				reason = gatewayv1.RouteConditionReason(controllerErr.Reason)
+			}
+			cond := createNotResolvedCondition(reason, extAuthErr.Error(), httpRoute.Generation)
+			result.resolvedRefsFailure = &cond
+
+			// The rule still claims its matches, otherwise the request would
+			// fall through to a lower precedence route that has no authorization.
+			for matchIndex, match := range matches {
+				envoyRoute, dropped := newEnvoyRoute(httpRoute, ruleIndex, matchIndex, match)
+				if envoyRoute == nil {
+					droppedRuleMessages = append(droppedRuleMessages, dropped)
+					continue
+				}
+				envoyRoute.Action = directResponse(500)
+				result.routes = append(result.routes, envoyRoute)
+			}
+			continue
+		}
+
+		var extAuthPerRoute map[string]*anypb.Any
+		if len(extAuth) > 0 {
+			extAuthPerRoute = make(map[string]*anypb.Any, len(extAuth))
+			if result.externalAuth == nil {
+				result.externalAuth = make(map[string]*externalAuthResources)
+			}
+			for name, resources := range extAuth {
+				result.externalAuth[name] = resources
+				extAuthPerRoute[name] = enableExtAuthzPerRoute
+			}
+		}
+
 		for _, filter := range rule.Filters {
 			if filter.Type == gatewayv1.HTTPRouteFilterRequestRedirect && filter.RequestRedirect != nil {
 				redirect := filter.RequestRedirect
@@ -118,20 +194,15 @@ func translateHTTPRouteToEnvoyRoutes(
 			}
 		}
 
-		buildRoutesForRule := func(match gatewayv1.HTTPRouteMatch, matchIndex int) {
-			routeMatch, dropReason := translateHTTPRouteMatch(match, httpRoute.Generation)
-			if dropReason != nil {
-				droppedRuleMessages = append(droppedRuleMessages,
-					fmt.Sprintf("rule[%d] match[%d]: %s", ruleIndex, matchIndex, *dropReason))
-				return
+		for matchIndex, match := range matches {
+			envoyRoute, dropped := newEnvoyRoute(httpRoute, ruleIndex, matchIndex, match)
+			if envoyRoute == nil {
+				droppedRuleMessages = append(droppedRuleMessages, dropped)
+				continue
 			}
-
-			envoyRoute := &routev3.Route{
-				Name:                   fmt.Sprintf("%s-%s-rule%d-match%d", httpRoute.Namespace, httpRoute.Name, ruleIndex, matchIndex),
-				Match:                  routeMatch,
-				RequestHeadersToAdd:    headersToAdd,
-				RequestHeadersToRemove: headersToRemove,
-			}
+			envoyRoute.RequestHeadersToAdd = headersToAdd
+			envoyRoute.RequestHeadersToRemove = headersToRemove
+			envoyRoute.TypedPerFilterConfig = extAuthPerRoute
 
 			if redirectAction != nil {
 				// If this is a redirect, set the Redirect action. No backends are needed.
@@ -150,47 +221,34 @@ func translateHTTPRouteToEnvoyRoutes(
 				var noBackendsErr *noEffectiveBackendsError
 				switch {
 				case errors.As(err, &noBackendsErr):
-					envoyRoute.Action = &routev3.Route_DirectResponse{
-						DirectResponse: &routev3.DirectResponseAction{Status: 500},
-					}
+					envoyRoute.Action = directResponse(500)
 				case errors.As(err, &controllerErr):
 					cond := createNotResolvedCondition(gatewayv1.RouteConditionReason(controllerErr.Reason), controllerErr.Message, httpRoute.Generation)
-					resolvedRefsFailure = &cond
-					envoyRoute.Action = &routev3.Route_DirectResponse{
-						DirectResponse: &routev3.DirectResponseAction{Status: 500},
-					}
+					result.resolvedRefsFailure = &cond
+					envoyRoute.Action = directResponse(500)
 				default:
-					allValidBackendRefs = append(allValidBackendRefs, validBackends...)
+					result.backendRefs = append(result.backendRefs, validBackends...)
 					envoyRoute.Action = &routev3.Route_Route{
 						Route: routeAction,
 					}
 				}
 			}
-			envoyRoutes = append(envoyRoutes, envoyRoute)
-		}
-
-		if len(rule.Matches) == 0 {
-			buildRoutesForRule(gatewayv1.HTTPRouteMatch{}, 0)
-		} else {
-			for matchIndex, match := range rule.Matches {
-				buildRoutesForRule(match, matchIndex)
-			}
+			result.routes = append(result.routes, envoyRoute)
 		}
 	}
 
-	if len(droppedRuleMessages) > 0 && len(envoyRoutes) == 0 {
+	if len(droppedRuleMessages) > 0 && len(result.routes) == 0 {
 		msg := fmt.Sprintf("no rules could be translated: %s", strings.Join(droppedRuleMessages, "; "))
 		cond := createNotAcceptedCondition(gatewayv1.RouteReasonUnsupportedValue, msg, httpRoute.Generation)
-		notAccepted = &cond
-		return nil, nil, notAccepted, nil, nil
+		return routeTranslationResult{notAccepted: &cond}
 	}
 
 	if len(droppedRuleMessages) > 0 {
 		msg := fmt.Sprintf("Dropped Rule(s): %s", strings.Join(droppedRuleMessages, "; "))
 		cond := createPartiallyInvalidCondition(msg, httpRoute.Generation)
-		partiallyInvalid = &cond
+		result.partiallyInvalid = &cond
 	}
-	return envoyRoutes, allValidBackendRefs, nil, resolvedRefsFailure, partiallyInvalid
+	return result
 }
 
 // findUnsupportedFilter returns the first filter type in the list that is not
@@ -199,7 +257,8 @@ func findUnsupportedFilter(filters []gatewayv1.HTTPRouteFilter) (gatewayv1.HTTPR
 	for _, filter := range filters {
 		switch filter.Type {
 		case gatewayv1.HTTPRouteFilterRequestRedirect,
-			gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+			gatewayv1.HTTPRouteFilterRequestHeaderModifier,
+			gatewayv1.HTTPRouteFilterExternalAuth:
 		default:
 			return filter.Type, true
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"slices"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -209,7 +210,26 @@ func (c *Controller) validateListeners(gateway *gatewayv1.Gateway) map[gatewayv1
 	return listenerConditions
 }
 
-func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHosts []*routev3.VirtualHost, routeName string) (*listener.FilterChain, error) {
+// sortedHTTPFilters flattens the HTTP filters collected for a port into the
+// order they run in. Names are opaque, so the order is arbitrary but stable;
+// any feature that needs a specific ordering has to impose it here.
+func sortedHTTPFilters(filters map[string]*hcm.HttpFilter) []*hcm.HttpFilter {
+	names := make([]string, 0, len(filters))
+	for name := range filters {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	ordered := make([]*hcm.HttpFilter, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, filters[name])
+	}
+	return ordered
+}
+
+// translateListenerToFilterChain builds the Envoy filter chain for a listener.
+// extraHTTPFilters are inserted, in the given order, before the router filter of
+// the HTTP connection manager.
+func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, lis gatewayv1.Listener, virtualHosts []*routev3.VirtualHost, routeName string, extraHTTPFilters []*hcm.HttpFilter) (*listener.FilterChain, error) {
 	var filterChain *listener.FilterChain
 
 	switch lis.Protocol {
@@ -220,6 +240,15 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 			klog.Errorf("Failed to marshal router config: %v", err)
 			return nil, err
 		}
+
+		httpFilters := make([]*hcm.HttpFilter, 0, len(extraHTTPFilters)+1)
+		httpFilters = append(httpFilters, extraHTTPFilters...)
+		httpFilters = append(httpFilters, &hcm.HttpFilter{
+			Name: wellknown.Router,
+			ConfigType: &hcm.HttpFilter_TypedConfig{
+				TypedConfig: routerAny,
+			},
+		})
 
 		hcmConfig := &hcm.HttpConnectionManager{
 			StatPrefix: string(lis.Name),
@@ -240,12 +269,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 					RouteConfigName: routeName,
 				},
 			},
-			HttpFilters: []*hcm.HttpFilter{{
-				Name: wellknown.Router,
-				ConfigType: &hcm.HttpFilter_TypedConfig{
-					TypedConfig: routerAny,
-				},
-			}},
+			HttpFilters: httpFilters,
 		}
 		hcmAny, err := anypb.New(hcmConfig)
 		if err != nil {

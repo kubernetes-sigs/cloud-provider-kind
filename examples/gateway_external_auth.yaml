@@ -1,0 +1,146 @@
+# GEP-1494: HTTP external authorization for an HTTPRoute rule.
+#
+# Requires the Gateway API experimental channel:
+#   cloud-provider-kind --gateway-channel experimental
+#
+# Every request matched by the rule is sent to the authz service first. The
+# service returns 200 when the request carries an Authorization header and 401
+# otherwise, so only authenticated requests reach myapp-svc.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: prod-web
+spec:
+  gatewayClassName: cloud-provider-kind
+  listeners:
+  - protocol: HTTP
+    port: 80
+    name: prod-web-gw
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: secure
+spec:
+  parentRefs:
+  - name: prod-web
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    filters:
+    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: authz-svc
+          port: 8080
+        http:
+          path: /auth
+          allowedHeaders:
+          - X-Request-Id
+          allowedResponseHeaders:
+          - X-Authenticated-User
+    backendRefs:
+    - name: myapp-svc
+      port: 8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authz-conf
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      location / {
+        if ($http_authorization = "") {
+          return 401;
+        }
+        add_header X-Authenticated-User "demo";
+        return 200;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz
+spec:
+  selector:
+    matchLabels:
+      app: Authz
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: Authz
+    spec:
+      containers:
+      - name: authz
+        image: nginx:1.29-alpine
+        ports:
+        - name: http
+          containerPort: 8080
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: conf
+        configMap:
+          name: authz-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authz-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: Authz
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  selector:
+    matchLabels:
+      app: MyApp
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: MyApp
+    spec:
+      containers:
+      - name: myapp
+        image: registry.k8s.io/e2e-test-images/agnhost:2.66.1
+        args:
+        - netexec
+        - --http-port=80
+        - --delay-shutdown=30
+        ports:
+        - name: httpd
+          containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: MyApp
+  ports:
+  - name: httpd
+    port: 8080
+    targetPort: 80
