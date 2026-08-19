@@ -91,8 +91,13 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	setAcceptedCondition(newGw)
 
 	var xdsErr error
+	var pendingACK bool
 	if meta.IsStatusConditionTrue(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)) {
 		containerName := gatewayName(c.clusterName, namespace, name)
+		// xdsNodeID is the xDS node ID Envoy reports in its bootstrap config.
+		// It encodes the queue key so the callback can re-queue without a
+		// separate lookup map.
+		xdsNodeID := gatewaySimpleName(c.clusterName, namespace, name)
 		klog.Infof("Syncing Gateway %s, container %s", key, containerName)
 
 		err = c.ensureGatewayContainer(ctx, gw)
@@ -124,8 +129,40 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 				})
 		}
 
-		// Apply the desired state to the data plane (Envoy).
-		xdsErr = c.UpdateXDSServer(ctx, containerName, envoyResources)
+		currentHash := computeResourcesHash(envoyResources)
+		snapHash := ""
+		if snap, err := c.xdscache.GetSnapshot(xdsNodeID); err == nil {
+			snapHash = snap.GetVersion(resourcev3.ListenerType)
+		}
+
+		v, _ := c.xdsGatewayState.Load(xdsNodeID)
+		var needsPush bool
+		switch state := v.(type) {
+		case error:
+			if snapHash == currentHash {
+				xdsErr = state // same config was NACKed — surface the error
+			} else {
+				c.xdsGatewayState.Delete(xdsNodeID) // config changed — clear stale NACK
+				needsPush = true
+			}
+		case string:
+			if state == currentHash {
+				pendingACK = true // same config, still awaiting Envoy's reply
+			} else {
+				needsPush = true // config changed while waiting — push the new version
+			}
+		default:
+			if snapHash != currentHash {
+				needsPush = true // new or changed config — push it
+			}
+			// else: same config, previously ACKed → Programmed=True (no action)
+		}
+		if needsPush {
+			if xdsErr = c.UpdateXDSServer(ctx, xdsNodeID, envoyResources); xdsErr == nil {
+				c.xdsGatewayState.Store(xdsNodeID, currentHash)
+				pendingACK = true
+			}
+		}
 
 		// forward traffic from the host on Mac and Windows
 		if c.tunnelManager != nil {
@@ -136,12 +173,27 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 		}
 	}
 
-	setProgrammedCondition(newGw, xdsErr)
+	setProgrammedCondition(newGw, xdsErr, pendingACK)
 
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
-		_, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
+		desiredStatus := newGw.Status
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latestGw, err := c.gatewayLister.Gateways(newGw.Namespace).Get(newGw.Name)
+			if apierrors.IsNotFound(err) {
+				return nil
+			} else if err != nil {
+				return err
+			}
+			gwToUpdate := latestGw.DeepCopy()
+			gwToUpdate.Status = desiredStatus
+			if semanticIgnoreLastTransitionTime.DeepEqual(latestGw.Status, gwToUpdate.Status) {
+				return nil
+			}
+			_, updateErr := c.gwClient.GatewayV1().Gateways(gwToUpdate.Namespace).UpdateStatus(ctx, gwToUpdate, metav1.UpdateOptions{})
+			return updateErr
+		})
 		if err != nil {
-			klog.Errorf("Failed to update gateway status: %v", err)
+			klog.Errorf("failed to update gateway status: %v", err)
 			return err
 		}
 	}
@@ -726,20 +778,22 @@ func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backe
 func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace string) error {
 	klog.Infof("Deleting resources for Gateway: %s/%s", namespace, name)
 	containerName := gatewayName(c.clusterName, namespace, name)
+	xdsNodeID := gatewaySimpleName(c.clusterName, namespace, name)
 
-	c.xdsVersion.Add(1)
-	version := fmt.Sprintf("%d", c.xdsVersion.Load())
+	// Clean up xDS sync state for this gateway.
+	c.xdsGatewayState.Delete(xdsNodeID)
 
-	snapshot, err := cachev3.NewSnapshot(version, map[resourcev3.Type][]envoyproxytypes.Resource{
+	emptyResources := map[resourcev3.Type][]envoyproxytypes.Resource{
 		resourcev3.ListenerType: {},
 		resourcev3.RouteType:    {},
 		resourcev3.ClusterType:  {},
 		resourcev3.EndpointType: {},
-	})
+	}
+	snapshot, err := cachev3.NewSnapshot(computeResourcesHash(emptyResources), emptyResources)
 	if err != nil {
 		return fmt.Errorf("failed to create empty snapshot for deleted gateway %s: %w", name, err)
 	}
-	if err := c.xdscache.SetSnapshot(ctx, containerName, snapshot); err != nil {
+	if err := c.xdscache.SetSnapshot(ctx, xdsNodeID, snapshot); err != nil {
 		return fmt.Errorf("failed to set empty snapshot for deleted gateway %s: %w", name, err)
 	}
 
@@ -846,9 +900,10 @@ func setAcceptedCondition(newGw *gatewayv1.Gateway) {
 	}
 }
 
-// setProgrammedCondition sets the Programmed condition for the Gateway.
+// pendingACK is true when a config push has been sent to Envoy but Envoy has
+// not yet replied with an ACK or NACK; in that case the condition is Unknown.
 // Accepted is expected to already be set on newGw by the time this is called.
-func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
+func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error, pendingACK bool) {
 	switch {
 	case meta.IsStatusConditionFalse(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)):
 		// A Gateway can never be Programmed=True if Accepted=False.
@@ -866,6 +921,14 @@ func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
 			Status:             metav1.ConditionFalse,
 			Reason:             "ReconciliationError",
 			Message:            fmt.Sprintf("Failed to program envoy config: %s", xdsErr.Error()),
+			ObservedGeneration: newGw.Generation,
+		})
+	case pendingACK:
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionUnknown,
+			Reason:             "Pending",
+			Message:            "Waiting for Envoy to confirm the configuration",
 			ObservedGeneration: newGw.Generation,
 		})
 	default:
