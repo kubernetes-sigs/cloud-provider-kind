@@ -21,11 +21,13 @@ import (
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/pkg/features"
+
+	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 )
 
-// supportedFeatures is the sorted list of Gateway API features that
-// cloud-provider-kind supports, as defined by GEP-2162.
-var supportedFeatures = buildSupportedFeatures(
+// standardFeatureNames are the Gateway API features supported by
+// cloud-provider-kind in every release channel.
+var standardFeatureNames = []features.FeatureName{
 	// Core
 	features.SupportGateway,
 	features.SupportHTTPRoute,
@@ -40,7 +42,34 @@ var supportedFeatures = buildSupportedFeatures(
 	features.SupportHTTPRouteBackendProtocolWebSocket,
 	features.SupportHTTPRouteParentRefPort,
 	features.SupportHTTPRouteQueryParamMatching,
-)
+}
+
+// experimentalFeatureNames are only advertised when the experimental CRDs are
+// installed, since the corresponding API fields do not exist otherwise.
+// GEP-1494 (HTTP Auth) is still experimental, so the feature names are not yet
+// published as constants by sigs.k8s.io/gateway-api/pkg/features.
+var experimentalFeatureNames = []features.FeatureName{
+	"HTTPRouteExternalAuth",
+	"HTTPRouteExternalAuthForwardBody",
+	"HTTPRouteExternalAuthGRPC",
+	"HTTPRouteExternalAuthHTTP",
+}
+
+// supportedFeatures is the sorted list of Gateway API features that
+// cloud-provider-kind supports, as defined by GEP-2162.
+var supportedFeatures = buildSupportedFeatures(standardFeatureNames...)
+
+// supportedFeaturesForChannel returns the features to advertise on the
+// GatewayClass status for the Gateway API release channel in use.
+func supportedFeaturesForChannel(channel config.GatewayReleaseChannel) []gatewayv1.SupportedFeature {
+	if channel != config.Experimental {
+		return supportedFeatures
+	}
+	names := make([]features.FeatureName, 0, len(standardFeatureNames)+len(experimentalFeatureNames))
+	names = append(names, standardFeatureNames...)
+	names = append(names, experimentalFeatureNames...)
+	return buildSupportedFeatures(names...)
+}
 
 // The spec requires features to be sorted in ascending alphabetical order.
 func buildSupportedFeatures(names ...features.FeatureName) []gatewayv1.SupportedFeature {

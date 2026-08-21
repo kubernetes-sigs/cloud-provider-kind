@@ -42,6 +42,14 @@ jobs:
         run: |
           bats -o _artifacts-custom-network tests/custom-network/
 
+      - name: Bats tests (gateway experimental channel)
+        shell: bash
+        env:
+          BATS_LIB_PATH: ${{ steps.setup-bats.outputs.lib-path }}
+          TERM: xterm
+        run: |
+          bats -o _artifacts-gateway-experimental tests/gateway-experimental/
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5
@@ -50,6 +58,7 @@ jobs:
           path: |
             ./_artifacts
             ./_artifacts-custom-network
+            ./_artifacts-gateway-experimental
  
   bats_mac_tests:
     runs-on: macos-15-intel

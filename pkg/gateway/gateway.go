@@ -15,6 +15,7 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	envoyproxytypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -200,11 +202,15 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 	finalEnvoyListeners := []envoyproxytypes.Resource{}
 	// Process Listeners by Port
 	for port, listeners := range listenersByPort {
-		// This slice will hold the filter chains.
-		var filterChains []*listenerv3.FilterChain
 		// Prepare to collect ALL virtual hosts for this port into a single list.
 		virtualHostsForPort := make(map[string]*routev3.VirtualHost)
 		routeName := fmt.Sprintf("route-%d", port)
+		// All listeners on a port share one route configuration, so an HTTP
+		// filter needed by any of their routes has to be installed on every
+		// filter chain of the port. Filter chains are therefore only built once
+		// every route on the port has been translated.
+		extraHTTPFilters := make(map[string]*hcm.HttpFilter)
+		var listenersToProgram []gatewayv1.Listener
 
 		// All these listeners have the same port
 		for _, listener := range listeners {
@@ -267,30 +273,30 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				// Process HTTPRoutes
 				// Get the routes that were pre-validated for this specific listener.
 				for _, httpRoute := range routesByListener[listener.Name] {
-					routes, validBackendRefs, notAccepted, resolvedRefsFailure, partiallyInvalidCond := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
+					translation := translateHTTPRouteToEnvoyRoutes(httpRoute, c.serviceLister, c.referenceGrantLister)
 
 					key := types.NamespacedName{Name: httpRoute.Name, Namespace: httpRoute.Namespace}
 					currentParentStatuses := httpRouteStatuses[key]
 					for i := range currentParentStatuses {
-						if notAccepted != nil {
-							meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *notAccepted)
+						if translation.notAccepted != nil {
+							meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *translation.notAccepted)
 						}
 						if meta.IsStatusConditionTrue(currentParentStatuses[i].Conditions, string(gatewayv1.RouteConditionAccepted)) {
-							if resolvedRefsFailure != nil {
-								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *resolvedRefsFailure)
+							if translation.resolvedRefsFailure != nil {
+								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *translation.resolvedRefsFailure)
 							} else {
 								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, createResolvedCondition(httpRoute.Generation))
 							}
-							if partiallyInvalidCond != nil {
-								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *partiallyInvalidCond)
+							if translation.partiallyInvalid != nil {
+								meta.SetStatusCondition(&currentParentStatuses[i].Conditions, *translation.partiallyInvalid)
 							}
 						}
 					}
 					httpRouteStatuses[key] = currentParentStatuses
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
-					for _, backendRef := range validBackendRefs {
-						cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef)
+					for _, backendRef := range translation.backendRefs {
+						cluster, err := translateBackendRefToCluster(c.serviceLister, httpRoute.Namespace, backendRef)
 						if err == nil && cluster != nil {
 							if _, exists := envoyClusters[cluster.Name]; !exists {
 								envoyClusters[cluster.Name] = cluster
@@ -298,8 +304,17 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 						}
 					}
 
+					// Resources the translated routes reference through their
+					// typed_per_filter_config, such as GEP-1494 authorization servers.
+					for name, resources := range translation.externalAuth {
+						extraHTTPFilters[name] = resources.httpFilter
+						if _, exists := envoyClusters[resources.cluster.Name]; !exists {
+							envoyClusters[resources.cluster.Name] = resources.cluster
+						}
+					}
+
 					// Aggregate Envoy routes into VirtualHosts.
-					if routes != nil {
+					if translation.routes != nil {
 						attachedRoutes++
 						// Get the domain for this listener's VirtualHost.
 						vhostDomains := getIntersectingHostnames(listener, httpRoute.Spec.Hostnames)
@@ -312,11 +327,11 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 								}
 								virtualHostsForPort[domain] = vh
 							}
-							vh.Routes = append(vh.Routes, routes...)
+							vh.Routes = append(vh.Routes, translation.routes...)
 							klog.V(4).Infof("created VirtualHost %s for listener %s with domain %s", vh.Name, listener.
 								Name, domain)
 							if klog.V(4).Enabled() {
-								for _, route := range routes {
+								for _, route := range translation.routes {
 									klog.Infof("adding route %s to VirtualHost %s", route.Name, vh.Name)
 								}
 							}
@@ -338,12 +353,37 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 				continue
 			}
 
-			vhSlice := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
-			for _, vh := range virtualHostsForPort {
-				vhSlice = append(vhSlice, vh)
-			}
+			listenerStatus.AttachedRoutes = attachedRoutes
+			meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonAccepted),
+				Message:            "Listener is valid",
+				ObservedGeneration: gateway.Generation,
+			})
+			allListenerStatuses[listener.Name] = listenerStatus
+			listenersToProgram = append(listenersToProgram, listener)
+		}
 
-			filterChain, err := c.translateListenerToFilterChain(gateway, listener, vhSlice, routeName)
+		allVirtualHosts := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
+		for _, vh := range virtualHostsForPort {
+			sortRoutes(vh.Routes)
+			allVirtualHosts = append(allVirtualHosts, vh)
+		}
+
+		// now aggregate all the listeners on the same port
+		routeConfig := &routev3.RouteConfiguration{
+			Name:                     routeName,
+			VirtualHosts:             allVirtualHosts,
+			IgnorePortInHostMatching: true, // tricky to figure out thanks to howardjohn
+		}
+		envoyRoutes = append(envoyRoutes, routeConfig)
+
+		httpFilters := sortedHTTPFilters(extraHTTPFilters)
+		var filterChains []*listenerv3.FilterChain
+		for _, listener := range listenersToProgram {
+			listenerStatus := allListenerStatuses[listener.Name]
+			filterChain, err := c.translateListenerToFilterChain(gateway, listener, allVirtualHosts, routeName, httpFilters)
 			if err != nil {
 				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
 					Type:               string(gatewayv1.ListenerConditionProgrammed),
@@ -363,31 +403,8 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 
 				filterChains = append(filterChains, filterChain)
 			}
-
-			listenerStatus.AttachedRoutes = attachedRoutes
-			meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(gatewayv1.ListenerReasonAccepted),
-				Message:            "Listener is valid",
-				ObservedGeneration: gateway.Generation,
-			})
 			allListenerStatuses[listener.Name] = listenerStatus
 		}
-
-		allVirtualHosts := make([]*routev3.VirtualHost, 0, len(virtualHostsForPort))
-		for _, vh := range virtualHostsForPort {
-			sortRoutes(vh.Routes)
-			allVirtualHosts = append(allVirtualHosts, vh)
-		}
-
-		// now aggregate all the listeners on the same port
-		routeConfig := &routev3.RouteConfiguration{
-			Name:                     routeName,
-			VirtualHosts:             allVirtualHosts,
-			IgnorePortInHostMatching: true, // tricky to figure out thanks to howardjohn
-		}
-		envoyRoutes = append(envoyRoutes, routeConfig)
 
 		if len(filterChains) > 0 {
 			envoyListener := &listenerv3.Listener{
@@ -401,7 +418,7 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 			// For HTTPS, we create one filter chain per listener because they have unique
 			// SNI matches and TLS settings.
 			if listeners[0].Protocol == gatewayv1.HTTPProtocolType {
-				filterChain, _ := c.translateListenerToFilterChain(gateway, listeners[0], allVirtualHosts, routeName)
+				filterChain, _ := c.translateListenerToFilterChain(gateway, listeners[0], allVirtualHosts, routeName, httpFilters)
 				envoyListener.FilterChains = []*listenerv3.FilterChain{filterChain}
 			}
 			finalEnvoyListeners = append(finalEnvoyListeners, envoyListener)
@@ -671,12 +688,12 @@ func ruleHasRedirectFilter(rule gatewayv1.HTTPRouteRule) bool {
 	return false
 }
 
-func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backendRef gatewayv1.BackendRef) (*clusterv3.Cluster, error) {
+func translateBackendRefToCluster(serviceLister corev1listers.ServiceLister, defaultNamespace string, backendRef gatewayv1.BackendRef) (*clusterv3.Cluster, error) {
 	ns := defaultNamespace
 	if backendRef.Namespace != nil {
 		ns = string(*backendRef.Namespace)
 	}
-	service, err := c.serviceLister.Services(ns).Get(string(backendRef.Name))
+	service, err := serviceLister.Services(ns).Get(string(backendRef.Name))
 	if err != nil {
 		return nil, fmt.Errorf("could not find service %s/%s: %w", ns, backendRef.Name, err)
 	}

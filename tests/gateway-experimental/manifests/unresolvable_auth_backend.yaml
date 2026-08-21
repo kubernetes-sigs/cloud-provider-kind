@@ -1,0 +1,33 @@
+# An ExternalAuth filter pointing at a Service that does not exist. The rule
+# must fail closed instead of forwarding unauthorized traffic.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: test-gw-extauth
+spec:
+  gatewayClassName: cloud-provider-kind
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: test-route-extauth
+spec:
+  parentRefs:
+  - name: test-gw-extauth
+  rules:
+  - filters:
+    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: does-not-exist
+          port: 8080
+        http:
+          path: /auth
+    backendRefs:
+    - name: does-not-exist
+      port: 8080
