@@ -90,3 +90,6 @@ and test that works:
 $ curl 192.168.8.5/hostname
 myapp-7dcffbf547-9kl2d
 ```
+
+To make the Gateway connect to the Service over TLS, see
+[Securing backend TLS with BackendTLSPolicy](creating_gateway_backendtlspolicy.md).

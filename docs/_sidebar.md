@@ -13,6 +13,7 @@
 - Usage Examples
   - [Creating service via a LoadBalancer](user/example/service_expose_via_loadbalancer.md)
   - [Creating a Gateway and a HTTPRoute](user/example/creating_gateway_http_route.md.md)
+  - [Securing backend TLS with BackendTLSPolicy](user/example/creating_gateway_backendtlspolicy.md)
   - [Enabling Load Balancer Port Mapping](user/example/enable_lb_port_mapping.md)
 
 - Support

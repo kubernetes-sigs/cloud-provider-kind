@@ -318,6 +318,7 @@ func New(
 	}
 
 	_, err = configMapInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.processConfigMapForTLSPolicy,
 		UpdateFunc: func(old, new interface{}) { c.processConfigMapForTLSPolicy(new) },
 		DeleteFunc: c.processConfigMapForTLSPolicy,
 	})

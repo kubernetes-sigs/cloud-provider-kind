@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -138,6 +140,13 @@ func makeBackendTLSPolicy(namespace, name, serviceName, hostname string, created
 	}
 }
 
+func makeBackendTLSPolicyWithSection(namespace, name, serviceName, sectionName, hostname string, createdAt time.Time) *gatewayv1.BackendTLSPolicy {
+	policy := makeBackendTLSPolicy(namespace, name, serviceName, hostname, createdAt)
+	section := gatewayv1.SectionName(sectionName)
+	policy.Spec.TargetRefs[0].SectionName = &section
+	return policy
+}
+
 func TestLookupBackendTLSPolicy(t *testing.T) {
 	now := time.Now()
 
@@ -146,6 +155,7 @@ func TestLookupBackendTLSPolicy(t *testing.T) {
 		policies         []*gatewayv1.BackendTLSPolicy
 		serviceNamespace string
 		serviceName      string
+		portName         string
 		wantPolicyName   string
 	}{
 		{
@@ -224,6 +234,38 @@ func TestLookupBackendTLSPolicy(t *testing.T) {
 			serviceName:      "my-svc",
 			wantPolicyName:   "",
 		},
+		{
+			name: "sectionName match takes precedence over whole-service policy",
+			policies: []*gatewayv1.BackendTLSPolicy{
+				makeBackendTLSPolicy("default", "policy-whole", "my-svc", "whole.example.com", now),
+				makeBackendTLSPolicyWithSection("default", "policy-https", "my-svc", "https", "https.example.com", now.Add(time.Minute)),
+			},
+			serviceNamespace: "default",
+			serviceName:      "my-svc",
+			portName:         "https",
+			wantPolicyName:   "policy-https",
+		},
+		{
+			name: "sectionName for a different port is ignored",
+			policies: []*gatewayv1.BackendTLSPolicy{
+				makeBackendTLSPolicyWithSection("default", "policy-https", "my-svc", "https", "https.example.com", now),
+			},
+			serviceNamespace: "default",
+			serviceName:      "my-svc",
+			portName:         "http",
+			wantPolicyName:   "",
+		},
+		{
+			name: "whole-service policy applies when sectionName does not match",
+			policies: []*gatewayv1.BackendTLSPolicy{
+				makeBackendTLSPolicy("default", "policy-whole", "my-svc", "whole.example.com", now),
+				makeBackendTLSPolicyWithSection("default", "policy-https", "my-svc", "https", "https.example.com", now),
+			},
+			serviceNamespace: "default",
+			serviceName:      "my-svc",
+			portName:         "http",
+			wantPolicyName:   "policy-whole",
+		},
 	}
 
 	for _, tt := range tests {
@@ -231,7 +273,7 @@ func TestLookupBackendTLSPolicy(t *testing.T) {
 			c := &Controller{
 				backendTLSPolicyLister: &fakeBackendTLSPolicyLister{policies: tt.policies},
 			}
-			got := c.lookupBackendTLSPolicy(tt.serviceNamespace, tt.serviceName)
+			got := c.lookupBackendTLSPolicy(tt.serviceNamespace, tt.serviceName, tt.portName)
 			if tt.wantPolicyName == "" {
 				if got != nil {
 					t.Errorf("expected nil, got %s/%s", got.Namespace, got.Name)
@@ -289,6 +331,39 @@ func TestBuildUpstreamTLSContext(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:   "ConfigMap with empty ca.crt in Data",
+			policy: makeBackendTLSPolicy("default", "policy-1", "my-svc", "my-svc.example.com", time.Now()),
+			configMaps: []*corev1.ConfigMap{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ca-bundle"},
+					Data:       map[string]string{"ca.crt": ""},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name:   "ConfigMap with whitespace-only ca.crt in Data",
+			policy: makeBackendTLSPolicy("default", "policy-1", "my-svc", "my-svc.example.com", time.Now()),
+			configMaps: []*corev1.ConfigMap{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ca-bundle"},
+					Data:       map[string]string{"ca.crt": "  \n"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name:   "ConfigMap with empty ca.crt in BinaryData",
+			policy: makeBackendTLSPolicy("default", "policy-1", "my-svc", "my-svc.example.com", time.Now()),
+			configMaps: []*corev1.ConfigMap{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ca-bundle"},
+					BinaryData: map[string][]byte{"ca.crt": {}},
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name:       "ConfigMap does not exist",
 			policy:     makeBackendTLSPolicy("default", "policy-1", "my-svc", "my-svc.example.com", time.Now()),
 			configMaps: nil,
@@ -337,7 +412,136 @@ func TestBuildUpstreamTLSContext(t *testing.T) {
 			if !tt.wantErr && got == nil {
 				t.Error("buildUpstreamTLSContext() returned nil without error")
 			}
+			if !tt.wantErr && got != nil {
+				upstreamTLS := &tlsv3.UpstreamTlsContext{}
+				if err := got.UnmarshalTo(upstreamTLS); err != nil {
+					t.Fatalf("UnmarshalTo: %v", err)
+				}
+				hostname := string(tt.policy.Spec.Validation.Hostname)
+				if upstreamTLS.Sni != hostname {
+					t.Errorf("SNI = %q, want %q", upstreamTLS.Sni, hostname)
+				}
+				sans := upstreamTLS.GetCommonTlsContext().GetValidationContext().GetMatchTypedSubjectAltNames()
+				if len(sans) != 1 {
+					t.Fatalf("MatchTypedSubjectAltNames len = %d, want 1", len(sans))
+				}
+				if sans[0].GetSanType() != tlsv3.SubjectAltNameMatcher_DNS {
+					t.Errorf("SAN type = %v, want DNS", sans[0].GetSanType())
+				}
+				if sans[0].GetMatcher().GetExact() != hostname {
+					t.Errorf("SAN exact = %q, want %q", sans[0].GetMatcher().GetExact(), hostname)
+				}
+			}
 		})
+	}
+}
+
+func TestLoadCACertificateRefEmpty(t *testing.T) {
+	c := &Controller{
+		configMapLister: &fakeConfigMapLister{
+			configMaps: []*corev1.ConfigMap{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ca-bundle"},
+					Data:       map[string]string{"ca.crt": ""},
+				},
+			},
+		},
+	}
+	policy := makeBackendTLSPolicy("default", "policy-1", "my-svc", "my-svc.example.com", time.Now())
+	_, err := c.loadCACertificateRef(policy, policy.Spec.Validation.CACertificateRefs[0])
+	if err == nil {
+		t.Fatal("expected error for empty ca.crt")
+	}
+	tlsErr, ok := err.(*backendTLSError)
+	if !ok {
+		t.Fatalf("error type = %T, want *backendTLSError", err)
+	}
+	if tlsErr.reason != gatewayv1.BackendTLSPolicyReasonInvalidCACertificateRef {
+		t.Errorf("reason = %q, want %q", tlsErr.reason, gatewayv1.BackendTLSPolicyReasonInvalidCACertificateRef)
+	}
+}
+
+func TestRewriteRoutesForInvalidBackendTLS(t *testing.T) {
+	routes := []*routev3.Route{
+		{
+			Name: "keep",
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "good-cluster"},
+				},
+			},
+		},
+		{
+			Name: "rewrite",
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "bad-cluster"},
+				},
+			},
+		},
+	}
+	rewriteRoutesForInvalidBackendTLS(routes, map[string]struct{}{"bad-cluster": {}})
+
+	if _, ok := routes[0].Action.(*routev3.Route_Route); !ok {
+		t.Errorf("route %q action was rewritten, want cluster route", routes[0].Name)
+	}
+	direct, ok := routes[1].Action.(*routev3.Route_DirectResponse)
+	if !ok {
+		t.Fatalf("route %q action type = %T, want DirectResponse", routes[1].Name, routes[1].Action)
+	}
+	if direct.DirectResponse.GetStatus() != 503 {
+		t.Errorf("DirectResponse status = %d, want 503", direct.DirectResponse.GetStatus())
+	}
+}
+
+func TestBackendTLSPolicyConditionsConflicted(t *testing.T) {
+	conds := backendTLSPolicyConditions(1, true, nil, nil)
+	var accepted *metav1.Condition
+	for i := range conds {
+		if conds[i].Type == string(gatewayv1.PolicyConditionAccepted) {
+			accepted = &conds[i]
+		}
+	}
+	if accepted == nil {
+		t.Fatal("Accepted condition is missing")
+	}
+	if accepted.Status != metav1.ConditionFalse {
+		t.Errorf("Accepted.Status = %s, want False", accepted.Status)
+	}
+	if accepted.Reason != string(gatewayv1.PolicyReasonConflicted) {
+		t.Errorf("Accepted.Reason = %q, want %q", accepted.Reason, gatewayv1.PolicyReasonConflicted)
+	}
+}
+
+func TestBackendTLSPolicyConditionsInvalidCA(t *testing.T) {
+	caErr := &backendTLSError{
+		reason:  gatewayv1.BackendTLSPolicyReasonInvalidCACertificateRef,
+		message: "ConfigMap default/ca-bundle does not contain key 'ca.crt'",
+	}
+	conds := backendTLSPolicyConditions(1, false, caErr, nil)
+	var accepted, resolved *metav1.Condition
+	for i := range conds {
+		switch conds[i].Type {
+		case string(gatewayv1.PolicyConditionAccepted):
+			accepted = &conds[i]
+		case string(gatewayv1.BackendTLSPolicyConditionResolvedRefs):
+			resolved = &conds[i]
+		}
+	}
+	if accepted == nil || resolved == nil {
+		t.Fatal("Accepted or ResolvedRefs condition is missing")
+	}
+	if accepted.Status != metav1.ConditionFalse {
+		t.Errorf("Accepted.Status = %s, want False", accepted.Status)
+	}
+	if accepted.Reason != string(gatewayv1.BackendTLSPolicyReasonNoValidCACertificate) {
+		t.Errorf("Accepted.Reason = %q, want %q", accepted.Reason, gatewayv1.BackendTLSPolicyReasonNoValidCACertificate)
+	}
+	if resolved.Status != metav1.ConditionFalse {
+		t.Errorf("ResolvedRefs.Status = %s, want False", resolved.Status)
+	}
+	if resolved.Reason != string(gatewayv1.BackendTLSPolicyReasonInvalidCACertificateRef) {
+		t.Errorf("ResolvedRefs.Reason = %q, want %q", resolved.Reason, gatewayv1.BackendTLSPolicyReasonInvalidCACertificateRef)
 	}
 }
 
