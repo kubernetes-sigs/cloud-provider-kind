@@ -745,6 +745,20 @@ func translateBackendRefToCluster(serviceLister corev1listers.ServiceLister, def
 		cluster.LoadAssignment = createClusterLoadAssignment(clusterName, service.Spec.ClusterIP, uint32(*backendRef.Port))
 	}
 
+	if policy := c.lookupBackendTLSPolicy(ns, string(backendRef.Name)); policy != nil {
+		tlsContextAny, err := c.buildUpstreamTLSContext(policy)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BackendTLSPolicy %s/%s for service %s/%s: %w",
+				policy.Namespace, policy.Name, ns, backendRef.Name, err)
+		}
+		cluster.TransportSocket = &corev3.TransportSocket{
+			Name: "envoy.transport_sockets.tls",
+			ConfigType: &corev3.TransportSocket_TypedConfig{
+				TypedConfig: tlsContextAny,
+			},
+		}
+	}
+
 	return cluster, nil
 }
 

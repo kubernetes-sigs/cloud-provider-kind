@@ -39,6 +39,7 @@ import (
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,6 +102,9 @@ type Controller struct {
 	secretLister       corev1listers.SecretLister
 	secretListerSynced cache.InformerSynced
 
+	configMapLister       corev1listers.ConfigMapLister
+	configMapListerSynced cache.InformerSynced
+
 	gatewayClassLister       gatewaylisters.GatewayClassLister
 	gatewayClassListerSynced cache.InformerSynced
 
@@ -116,6 +120,9 @@ type Controller struct {
 
 	referenceGrantLister       gatewaylisters.ReferenceGrantLister
 	referenceGrantListerSynced cache.InformerSynced
+
+	backendTLSPolicyLister       gatewaylisters.BackendTLSPolicyLister
+	backendTLSPolicyListerSynced cache.InformerSynced
 
 	xdscache        cachev3.SnapshotCache
 	xdsserver       serverv3.Server
@@ -133,11 +140,13 @@ func New(
 	namespaceInformer corev1informers.NamespaceInformer,
 	serviceInformer corev1informers.ServiceInformer,
 	secretInformer corev1informers.SecretInformer,
+	configMapInformer corev1informers.ConfigMapInformer,
 	gatewayClassInformer gatewayinformers.GatewayClassInformer,
 	gatewayInformer gatewayinformers.GatewayInformer,
 	httprouteInformer gatewayinformers.HTTPRouteInformer,
 	grpcrouteInformer gatewayinformers.GRPCRouteInformer,
 	referenceGrantInformer gatewayinformers.ReferenceGrantInformer,
+	backendTLSPolicyInformer gatewayinformers.BackendTLSPolicyInformer,
 ) (*Controller, error) {
 	c := &Controller{
 		clusterName:              clusterName,
@@ -148,6 +157,8 @@ func New(
 		serviceListerSynced:      serviceInformer.Informer().HasSynced,
 		secretLister:             secretInformer.Lister(),
 		secretListerSynced:       secretInformer.Informer().HasSynced,
+		configMapLister:          configMapInformer.Lister(),
+		configMapListerSynced:    configMapInformer.Informer().HasSynced,
 		gwClient:                 gwClient,
 		gatewayClassLister:       gatewayClassInformer.Lister(),
 		gatewayClassListerSynced: gatewayClassInformer.Informer().HasSynced,
@@ -157,12 +168,14 @@ func New(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "gateway"},
 		),
-		httprouteLister:            httprouteInformer.Lister(),
-		httprouteListerSynced:      httprouteInformer.Informer().HasSynced,
-		grpcrouteLister:            grpcrouteInformer.Lister(),
-		grpcrouteListerSynced:      grpcrouteInformer.Informer().HasSynced,
-		referenceGrantLister:       referenceGrantInformer.Lister(),
-		referenceGrantListerSynced: referenceGrantInformer.Informer().HasSynced,
+		httprouteLister:              httprouteInformer.Lister(),
+		httprouteListerSynced:        httprouteInformer.Informer().HasSynced,
+		grpcrouteLister:              grpcrouteInformer.Lister(),
+		grpcrouteListerSynced:        grpcrouteInformer.Informer().HasSynced,
+		referenceGrantLister:         referenceGrantInformer.Lister(),
+		referenceGrantListerSynced:   referenceGrantInformer.Informer().HasSynced,
+		backendTLSPolicyLister:       backendTLSPolicyInformer.Lister(),
+		backendTLSPolicyListerSynced: backendTLSPolicyInformer.Informer().HasSynced,
 	}
 	_, err := gatewayClassInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -295,6 +308,23 @@ func New(
 		return nil, err
 	}
 
+	_, err = backendTLSPolicyInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.processBackendTLSPolicy,
+		UpdateFunc: func(old, new interface{}) { c.processBackendTLSPolicy(new) },
+		DeleteFunc: c.processBackendTLSPolicy,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = configMapInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(old, new interface{}) { c.processConfigMapForTLSPolicy(new) },
+		DeleteFunc: c.processConfigMapForTLSPolicy,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel {
 		c.tunnelManager = tunnels.NewTunnelManager()
 	}
@@ -314,7 +344,9 @@ func (c *Controller) Init(ctx context.Context) error {
 		c.namespaceListerSynced,
 		c.serviceListerSynced,
 		c.secretListerSynced,
+		c.configMapListerSynced,
 		c.referenceGrantListerSynced,
+		c.backendTLSPolicyListerSynced,
 	) {
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
@@ -631,6 +663,152 @@ func gatewayReferencesSecretInNamespace(gateway *gatewayv1.Gateway, namespace st
 				secretNamespace = string(*certRef.Namespace)
 			}
 			if secretNamespace == namespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *Controller) processBackendTLSPolicy(obj interface{}) {
+	policy, ok := obj.(*gatewayv1.BackendTLSPolicy)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("error decoding BackendTLSPolicy, invalid type"))
+			return
+		}
+		policy, ok = tombstone.Obj.(*gatewayv1.BackendTLSPolicy)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("error decoding BackendTLSPolicy tombstone, invalid type"))
+			return
+		}
+	}
+
+	gatewaysToEnqueue := make(map[string]struct{})
+	for _, targetRef := range policy.Spec.TargetRefs {
+		if targetRef.Group != "" || targetRef.Kind != "Service" {
+			continue
+		}
+		serviceName := string(targetRef.Name)
+
+		httpRoutes, err := c.httprouteLister.List(labels.Everything())
+		if err != nil {
+			klog.Errorf("Failed to list HTTPRoutes: %v", err)
+			continue
+		}
+		for _, route := range httpRoutes {
+			if routeReferencesService(route, serviceName, policy.Namespace) {
+				for _, parentRef := range route.Spec.ParentRefs {
+					if (parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName) ||
+						(parentRef.Kind != nil && string(*parentRef.Kind) != "Gateway") {
+						continue
+					}
+					gwNamespace := route.Namespace
+					if parentRef.Namespace != nil {
+						gwNamespace = string(*parentRef.Namespace)
+					}
+					key := gwNamespace + "/" + string(parentRef.Name)
+					gatewaysToEnqueue[key] = struct{}{}
+				}
+			}
+		}
+
+		grpcRoutes, err := c.grpcrouteLister.List(labels.Everything())
+		if err != nil {
+			klog.Errorf("Failed to list GRPCRoutes: %v", err)
+			continue
+		}
+		for _, route := range grpcRoutes {
+			if grpcRouteReferencesService(route, serviceName, policy.Namespace) {
+				for _, parentRef := range route.Spec.ParentRefs {
+					if (parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName) ||
+						(parentRef.Kind != nil && string(*parentRef.Kind) != "Gateway") {
+						continue
+					}
+					gwNamespace := route.Namespace
+					if parentRef.Namespace != nil {
+						gwNamespace = string(*parentRef.Namespace)
+					}
+					key := gwNamespace + "/" + string(parentRef.Name)
+					gatewaysToEnqueue[key] = struct{}{}
+				}
+			}
+		}
+	}
+
+	for key := range gatewaysToEnqueue {
+		c.gatewayqueue.Add(key)
+	}
+}
+
+func (c *Controller) processConfigMapForTLSPolicy(obj interface{}) {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("error decoding ConfigMap, invalid type"))
+			return
+		}
+		cm, ok = tombstone.Obj.(*corev1.ConfigMap)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("error decoding ConfigMap tombstone, invalid type"))
+			return
+		}
+	}
+
+	policies, err := c.backendTLSPolicyLister.BackendTLSPolicies(cm.Namespace).List(labels.Everything())
+	if err != nil {
+		klog.Errorf("Failed to list BackendTLSPolicies in namespace %s: %v", cm.Namespace, err)
+		return
+	}
+	for _, policy := range policies {
+		for _, caRef := range policy.Spec.Validation.CACertificateRefs {
+			if (caRef.Group == "" || caRef.Group == "core") &&
+				caRef.Kind == "ConfigMap" &&
+				string(caRef.Name) == cm.Name {
+				c.processBackendTLSPolicy(policy)
+				break
+			}
+		}
+	}
+}
+
+func routeReferencesService(route *gatewayv1.HTTPRoute, serviceName, serviceNamespace string) bool {
+	for _, rule := range route.Spec.Rules {
+		for _, backendRef := range rule.BackendRefs {
+			if backendRef.Kind != nil && *backendRef.Kind != "Service" {
+				continue
+			}
+			if backendRef.Group != nil && *backendRef.Group != "" {
+				continue
+			}
+			refNamespace := route.Namespace
+			if backendRef.Namespace != nil {
+				refNamespace = string(*backendRef.Namespace)
+			}
+			if string(backendRef.Name) == serviceName && refNamespace == serviceNamespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func grpcRouteReferencesService(route *gatewayv1.GRPCRoute, serviceName, serviceNamespace string) bool {
+	for _, rule := range route.Spec.Rules {
+		for _, backendRef := range rule.BackendRefs {
+			if backendRef.Kind != nil && *backendRef.Kind != "Service" {
+				continue
+			}
+			if backendRef.Group != nil && *backendRef.Group != "" {
+				continue
+			}
+			refNamespace := route.Namespace
+			if backendRef.Namespace != nil {
+				refNamespace = string(*backendRef.Namespace)
+			}
+			if string(backendRef.Name) == serviceName && refNamespace == serviceNamespace {
 				return true
 			}
 		}

@@ -235,6 +235,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 	nodesInformer := sharedInformers.Core().V1().Nodes()
 	namespacesInformer := sharedInformers.Core().V1().Namespaces()
 	secretsInformer := sharedInformers.Core().V1().Secrets()
+	configMapsInformer := sharedInformers.Core().V1().ConfigMaps()
 	ingressInformer := sharedInformers.Networking().V1().Ingresses()
 	ingressClassInformer := sharedInformers.Networking().V1().IngressClasses()
 
@@ -323,6 +324,7 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 		httpRouteInformer := sharedGwInformers.Gateway().V1().HTTPRoutes()
 		grpcRouteInformer := sharedGwInformers.Gateway().V1().GRPCRoutes()
 		referenceGrantInformer := sharedGwInformers.Gateway().V1().ReferenceGrants()
+		backendTLSPolicyInformer := sharedGwInformers.Gateway().V1().BackendTLSPolicies()
 
 		gatewayController, err = gateway.New(
 			clusterName,
@@ -331,11 +333,13 @@ func startCloudControllerManager(ctx context.Context, clusterName string, config
 			namespacesInformer,
 			servicesInformer,
 			secretsInformer,
+			configMapsInformer,
 			gwClassInformer,
 			gwInformer,
 			httpRouteInformer,
 			grpcRouteInformer,
 			referenceGrantInformer,
+			backendTLSPolicyInformer,
 		)
 		if err != nil {
 			logger.Error(err, "Failed to start gateway controller")
