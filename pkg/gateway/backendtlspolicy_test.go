@@ -635,6 +635,28 @@ func TestRouteReferencesService(t *testing.T) {
 	}
 }
 
+func TestBackendTLSPolicySpecChanged(t *testing.T) {
+	base := makeBackendTLSPolicy("default", "policy-1", "my-svc", "my-svc.example.com", time.Now())
+	base.Generation = 1
+
+	statusOnly := base.DeepCopy()
+	statusOnly.Status.Ancestors = []gatewayv1.PolicyAncestorStatus{{}}
+
+	specChanged := base.DeepCopy()
+	specChanged.Generation = 2
+	specChanged.Spec.Validation.Hostname = "other.example.com"
+
+	if backendTLSPolicySpecChanged(base, statusOnly) {
+		t.Error("status-only update must not count as a spec change")
+	}
+	if !backendTLSPolicySpecChanged(base, specChanged) {
+		t.Error("generation change must count as a spec change")
+	}
+	if !backendTLSPolicySpecChanged(nil, base) {
+		t.Error("untyped or missing old object must count as a spec change")
+	}
+}
+
 func ptrTo[T any](v T) *T {
 	return &v
 }

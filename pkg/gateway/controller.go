@@ -309,8 +309,13 @@ func New(
 	}
 
 	_, err = backendTLSPolicyInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    c.processBackendTLSPolicy,
-		UpdateFunc: func(old, new interface{}) { c.processBackendTLSPolicy(new) },
+		AddFunc: c.processBackendTLSPolicy,
+		UpdateFunc: func(old, new interface{}) {
+			if !backendTLSPolicySpecChanged(old, new) {
+				return
+			}
+			c.processBackendTLSPolicy(new)
+		},
 		DeleteFunc: c.processBackendTLSPolicy,
 	})
 	if err != nil {
@@ -688,7 +693,7 @@ func (c *Controller) processBackendTLSPolicy(obj interface{}) {
 
 	gatewaysToEnqueue := make(map[string]struct{})
 	for _, targetRef := range policy.Spec.TargetRefs {
-		if targetRef.Group != "" || targetRef.Kind != "Service" {
+		if !isServiceTargetRef(targetRef) {
 			continue
 		}
 		serviceName := string(targetRef.Name)

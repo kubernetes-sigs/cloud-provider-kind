@@ -29,6 +29,7 @@ import (
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -54,6 +55,17 @@ func (e *backendTLSError) Error() string {
 func isBackendTLSError(err error) bool {
 	_, ok := err.(*backendTLSError)
 	return ok
+}
+
+// backendTLSPolicySpecChanged reports whether a policy update changed the spec.
+// Status-only updates must not enqueue Gateways or they starve listener programming.
+func backendTLSPolicySpecChanged(oldObj, newObj interface{}) bool {
+	oldPolicy, okOld := oldObj.(*gatewayv1.BackendTLSPolicy)
+	newPolicy, okNew := newObj.(*gatewayv1.BackendTLSPolicy)
+	if !okOld || !okNew {
+		return true
+	}
+	return oldPolicy.Generation != newPolicy.Generation
 }
 
 func sortBackendTLSPolicies(policies []*gatewayv1.BackendTLSPolicy) {
@@ -550,12 +562,15 @@ func (c *Controller) updateBackendTLSPolicyStatuses(ctx context.Context, gw *gat
 	used := c.servicesUsedByGateway(gw)
 	winners := c.conflictWinners()
 	ancestorRef := gatewayAncestorRef(gw)
-	var errs []error
 
 	for _, policy := range policies {
 		relevant := policyTargetsUsedService(policy, used)
 		updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current, err := c.backendTLSPolicyLister.BackendTLSPolicies(policy.Namespace).Get(policy.Name)
+			// Read from the API so a conflict retry uses a fresh resourceVersion.
+			current, err := c.gwClient.GatewayV1().BackendTLSPolicies(policy.Namespace).Get(ctx, policy.Name, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -596,12 +611,10 @@ func (c *Controller) updateBackendTLSPolicyStatuses(ctx context.Context, gw *gat
 			return err
 		})
 		if updateErr != nil {
-			errs = append(errs, fmt.Errorf("failed to update status for BackendTLSPolicy %s/%s: %w", policy.Namespace, policy.Name, updateErr))
+			// Do not fail Gateway sync. A status conflict must not block
+			// listener programming for other Gateways.
+			klog.Errorf("failed to update status for BackendTLSPolicy %s/%s: %v", policy.Namespace, policy.Name, updateErr)
 		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("backend TLS policy status updates: %v", errs)
 	}
 	return nil
 }
