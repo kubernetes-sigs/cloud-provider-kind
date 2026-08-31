@@ -31,6 +31,7 @@ var supportedFeatures = buildSupportedFeatures(
 	features.SupportHTTPRoute,
 	features.SupportReferenceGrant,
 	// Extended
+	features.SupportBackendTLSPolicy,
 	features.SupportGatewayAddressEmpty,
 	features.SupportGatewayPort8080,
 	features.SupportGatewayStaticAddresses,
