@@ -14,6 +14,7 @@
   - [Creating service via a LoadBalancer](user/example/service_expose_via_loadbalancer.md)
   - [Creating a Gateway and a HTTPRoute](user/example/creating_gateway_http_route.md.md)
   - [Enabling Load Balancer Port Mapping](user/example/enable_lb_port_mapping.md)
+  - [Customizing the LoadBalancer Envoy configuration](user/example/customize_loadbalancer_envoy.md)
 
 - Support
   - [Mac, Windows and WSL2 support](user/support/os_support.md)
