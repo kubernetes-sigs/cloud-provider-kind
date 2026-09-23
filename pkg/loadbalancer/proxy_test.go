@@ -303,10 +303,53 @@ func Test_generateConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "proxy protocol",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+					Annotations: map[string]string{
+						AnnotationProxyProtocol: "true",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:                  v1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: v1.ServiceExternalTrafficPolicyLocal,
+					IPFamilies:            []v1.IPFamily{v1.IPv4Protocol},
+					Ports: []v1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+							NodePort:   30000,
+							Protocol:   v1.ProtocolTCP,
+						},
+					},
+					HealthCheckNodePort: 32000,
+				},
+			},
+			nodes: []*v1.Node{
+				makeNode("a", "10.0.0.1"),
+				makeNode("b", "10.0.0.2"),
+			},
+			want: &proxyConfigData{
+				HealthCheckPort: 32000,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80_TCP": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"10.0.0.1", 30000, string(v1.ProtocolTCP)}, {"10.0.0.2", 30000, string(v1.ProtocolTCP)}},
+					},
+				},
+				ProxyProtocol: true,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := generateConfig(tt.service, tt.nodes); !reflect.DeepEqual(got, tt.want) {
+			got, err := generateConfig(tt.service, tt.nodes)
+			if err != nil {
+				t.Errorf("error generateConfig(): %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Logf("diff %+v", cmp.Diff(got, tt.want))
 				t.Errorf("generateConfig() = %+v,\n want %+v", got, tt.want)
 			}
@@ -616,6 +659,76 @@ func Test_proxyConfig(t *testing.T) {
 				        prefix_len: 8
 				      - address_prefix: "192.168.0.0"
 				        prefix_len: 16
+			`,
+		},
+		{
+			name:     "proxy protocol",
+			template: proxyCDSConfigTemplate,
+			data: &proxyConfigData{
+				HealthCheckPort: 32764,
+				ServicePorts: map[string]servicePort{
+					"IPv4_80": servicePort{
+						Listener: endpoint{Address: "0.0.0.0", Port: 80, Protocol: string(v1.ProtocolTCP)},
+						Cluster:  []endpoint{{"192.168.8.2", 30497, string(v1.ProtocolTCP)}},
+					},
+				},
+				ProxyProtocol: true,
+			},
+			wantConfig: `
+        resources:
+        - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+          name: cluster_IPv4_80
+          connect_timeout: 3s
+          type: STATIC
+          common_lb_config:
+            healthy_panic_threshold:
+              value: 0
+          lb_policy: RANDOM
+          health_checks:
+          - timeout: 3s
+            interval: 2s
+            unhealthy_threshold: 2
+            healthy_threshold: 1
+            initial_jitter: 0s
+            no_traffic_interval: 3s
+            always_log_health_check_failures: true
+            always_log_health_check_success: true
+            event_log_path: /dev/stdout
+            http_health_check:
+              path: /healthz
+            transport_socket_match_criteria:
+              health_check: "true"
+          load_assignment:
+            cluster_name: cluster_IPv4_80
+            endpoints:
+              - lb_endpoints:
+                - endpoint:
+                    health_check_config:
+                      port_value: 32764
+                    address:
+                      socket_address:
+                        address: 192.168.8.2
+                        port_value: 30497
+                        protocol: TCP
+          transport_socket:
+            name: envoy.transport_sockets.upstream_proxy_protocol
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
+              config:
+                version: V2
+              transport_socket:
+                name: envoy.transport_sockets.raw_buffer
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+        # socket definition that bypasses the PROXY protocol wrapper since kube-proxy /healthz does not understand PROXY protocol
+          transport_socket_matches:
+          - name: raw_health_check_socket
+            match:
+              health_check: "true"
+            transport_socket:
+              name: envoy.transport_sockets.raw_buffer
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
 			`,
 		},
 	}

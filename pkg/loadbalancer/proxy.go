@@ -58,6 +58,7 @@ type proxyConfigData struct {
 	HealthCheckPort int                    // is the same for all ServicePorts
 	ServicePorts    map[string]servicePort // key is the IP family and Port and Protocol to support MultiPort services
 	SessionAffinity string
+	ProxyProtocol   bool
 	SourceRanges    []sourceRange
 }
 
@@ -173,6 +174,10 @@ resources:
     event_log_path: /dev/stdout
     http_health_check:
       path: /healthz
+{{- if $.ProxyProtocol }}
+    transport_socket_match_criteria:
+      health_check: "true"
+{{- end }}
   load_assignment:
     cluster_name: cluster_{{$index}}
     endpoints:
@@ -187,6 +192,27 @@ resources:
                 port_value: {{ $address.Port }}
                 protocol: {{ $address.Protocol }}
     {{- end}}
+{{- if $.ProxyProtocol }}
+  transport_socket:
+    name: envoy.transport_sockets.upstream_proxy_protocol
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
+      config:
+        version: V2
+      transport_socket:
+        name: envoy.transport_sockets.raw_buffer
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+# socket definition that bypasses the PROXY protocol wrapper since kube-proxy /healthz does not understand PROXY protocol
+  transport_socket_matches:
+  - name: raw_health_check_socket
+    match:
+      health_check: "true"
+    transport_socket:
+      name: envoy.transport_sockets.raw_buffer
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+{{- end }}
 {{- end }}
 `
 
@@ -206,18 +232,32 @@ func proxyConfig(configTemplate string, data *proxyConfigData) (config string, e
 	return buff.String(), nil
 }
 
-func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
+func generateConfig(service *v1.Service, nodes []*v1.Node) (*proxyConfigData, error) {
 	if service == nil {
-		return nil
+		return nil, nil
 	}
 	hcPort := 10256 // kube-proxy default port
 	if service.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyTypeLocal {
 		hcPort = int(service.Spec.HealthCheckNodePort)
 	}
 
+	var proxyProtocol bool
+	annotations := service.GetAnnotations()
+	if annotations != nil {
+		proxyProtocolStr, ok := annotations[AnnotationProxyProtocol]
+		if ok {
+			var err error
+			proxyProtocol, err = strconv.ParseBool(proxyProtocolStr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse %s annotation %s: %w", AnnotationProxyProtocol, proxyProtocolStr, err)
+			}
+		}
+	}
+
 	lbConfig := &proxyConfigData{
 		HealthCheckPort: hcPort,
 		SessionAffinity: string(service.Spec.SessionAffinity),
+		ProxyProtocol:   proxyProtocol,
 	}
 
 	servicePortConfig := map[string]servicePort{}
@@ -274,7 +314,7 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	}
 
 	klog.V(2).Infof("envoy config info: %+v", lbConfig)
-	return lbConfig
+	return lbConfig, nil
 }
 
 // TODO: move to xDS via GRPC instead of having to deal with files
@@ -284,7 +324,10 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 	var stdout, stderr bytes.Buffer
 	name := loadBalancerName(clusterName, service)
-	config := generateConfig(service, nodes)
+	config, err := generateConfig(service, nodes)
+	if err != nil {
+		return fmt.Errorf("generating config: %w", err)
+	}
 	// create loadbalancer config data
 	ldsConfig, err := proxyConfig(proxyLDSConfigTemplate, config)
 	if err != nil {
