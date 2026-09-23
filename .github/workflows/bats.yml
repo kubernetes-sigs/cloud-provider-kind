@@ -50,6 +50,14 @@ jobs:
         run: |
           bats -o _artifacts-gateway-experimental tests/gateway-experimental/
 
+      - name: Bats tests (loadbalancer templates)
+        shell: bash
+        env:
+          BATS_LIB_PATH: ${{ steps.setup-bats.outputs.lib-path }}
+          TERM: xterm
+        run: |
+          bats -o _artifacts-loadbalancer-templates tests/loadbalancer-templates/
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5
@@ -59,6 +67,7 @@ jobs:
             ./_artifacts
             ./_artifacts-custom-network
             ./_artifacts-gateway-experimental
+            ./_artifacts-loadbalancer-templates
  
   bats_mac_tests:
     runs-on: macos-15-intel
