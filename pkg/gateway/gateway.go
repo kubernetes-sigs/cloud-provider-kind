@@ -503,7 +503,15 @@ func (c *Controller) updateRouteStatuses(
 
 			// Create a mutable copy to work with.
 			routeToUpdate := originalRoute.DeepCopy()
-			routeToUpdate.Status.Parents = desiredParentStatuses
+
+			var mergedParents []gatewayv1.RouteParentStatus
+			for _, existing := range routeToUpdate.Status.Parents {
+				if string(existing.ControllerName) != controllerName {
+					mergedParents = append(mergedParents, existing)
+				}
+			}
+			mergedParents = append(mergedParents, desiredParentStatuses...)
+			routeToUpdate.Status.Parents = mergedParents
 
 			// Only make an API call if the status has actually changed.
 			if !semanticIgnoreLastTransitionTime.DeepEqual(originalRoute.Status, routeToUpdate.Status) {
