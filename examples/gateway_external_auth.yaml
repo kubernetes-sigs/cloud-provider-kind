@@ -82,7 +82,7 @@ spec:
     spec:
       containers:
       - name: authz
-        image: nginx:1.29-alpine
+        image: nginx:1.31-alpine
         ports:
         - name: http
           containerPort: 8080
