@@ -12,6 +12,34 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
+// parentRefTargetsGateway reports whether a ParentRef points at gw. A nil
+// ParentRef namespace defaults to routeNamespace (the route's namespace).
+func parentRefTargetsGateway(parentRef gatewayv1.ParentReference, routeNamespace string, gw *gatewayv1.Gateway) bool {
+	refNamespace := routeNamespace
+	if parentRef.Namespace != nil {
+		refNamespace = string(*parentRef.Namespace)
+	}
+	return parentRef.Name == gatewayv1.ObjectName(gw.Name) && refNamespace == gw.Namespace
+}
+
+// routeHasParentOnGateway reports whether any ParentRef targets gw.
+func routeHasParentOnGateway(parentRefs []gatewayv1.ParentReference, routeNamespace string, gw *gatewayv1.Gateway) bool {
+	for _, parentRef := range parentRefs {
+		if parentRefTargetsGateway(parentRef, routeNamespace, gw) {
+			return true
+		}
+	}
+	return false
+}
+
+// parentRefMatchesListener reports whether the ParentRef's optional sectionName
+// and port select this listener.
+func parentRefMatchesListener(parentRef gatewayv1.ParentReference, listener gatewayv1.Listener) bool {
+	sectionNameMatches := parentRef.SectionName == nil || *parentRef.SectionName == listener.Name
+	portMatches := parentRef.Port == nil || *parentRef.Port == listener.Port
+	return sectionNameMatches && portMatches
+}
+
 // isAllowedByListener checks if a given route is allowed to attach to a listener
 // based on the listener's `allowedRoutes` specification for namespaces and kinds.
 func isAllowedByListener(gateway *gatewayv1.Gateway, listener gatewayv1.Listener, route metav1.Object, namespaceLister corev1listers.NamespaceLister) bool {
