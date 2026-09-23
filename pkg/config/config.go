@@ -41,6 +41,10 @@ type Config struct {
 	GatewayReleaseChannel GatewayReleaseChannel
 	IngressDefault        bool
 	ProxyImage            string
+	// Directory with user provided Envoy templates (lds.yaml.tmpl, cds.yaml.tmpl)
+	// that override the built-in ones used to configure the LoadBalancer proxies.
+	// Empty means use the built-in templates.
+	LoadBalancerConfigDir string
 }
 
 type Connectivity int

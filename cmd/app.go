@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/container"
 	"sigs.k8s.io/cloud-provider-kind/pkg/controller"
+	"sigs.k8s.io/cloud-provider-kind/pkg/loadbalancer"
 	"sigs.k8s.io/kind/pkg/cluster"
 	kindcmd "sigs.k8s.io/kind/pkg/cmd"
 )
@@ -29,6 +30,7 @@ var (
 	enableLBPortMapping  bool
 	gatewayChannel       string
 	enableDefaultIngress bool
+	lbConfigDir          string
 	version              string
 )
 
@@ -56,12 +58,24 @@ func NewCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
 	cmd.Flags().StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	cmd.Flags().BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
-
+	cmd.Flags().StringVar(&lbConfigDir, "loadbalancer-config-dir", "", "directory with Envoy templates (lds.yaml.tmpl, cds.yaml.tmpl) that override the built-in ones used to configure the LoadBalancer proxies, see 'dump-loadbalancer-templates'")
 
 	cmd.AddCommand(newListImagesCommand())
 	cmd.AddCommand(newVersionCommand())
+	cmd.AddCommand(newDumpLoadBalancerTemplatesCommand())
 
 	return cmd
+}
+
+func newDumpLoadBalancerTemplatesCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "dump-loadbalancer-templates DIR",
+		Short: "write the built-in Envoy templates used for LoadBalancer services to DIR, as a starting point for --loadbalancer-config-dir",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return loadbalancer.DumpDefaultTemplates(args[0])
+		},
+	}
 }
 
 func newListImagesCommand() *cobra.Command {
@@ -133,6 +147,17 @@ func runE(cmd *cobra.Command, args []string) error {
 	}
 
 	config.DefaultConfig.IngressDefault = enableDefaultIngress
+
+	if lbConfigDir != "" {
+		info, err := os.Stat(lbConfigDir)
+		if err != nil {
+			return fmt.Errorf("loadbalancer-config-dir %q: %w", lbConfigDir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("loadbalancer-config-dir %q is not a directory", lbConfigDir)
+		}
+		config.DefaultConfig.LoadBalancerConfigDir = lbConfigDir
+	}
 
 	// Validate gateway channel
 	channel := config.GatewayReleaseChannel(gatewayChannel)

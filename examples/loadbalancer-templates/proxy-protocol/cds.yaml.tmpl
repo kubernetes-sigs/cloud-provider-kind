@@ -1,0 +1,73 @@
+
+{{- /*
+Built-in CDS template plus upstream PROXY protocol v2, enabled per Service
+with the annotation example.com/proxy-protocol: "true".
+Health checks bypass PROXY protocol because kube-proxy /healthz does not
+understand it.
+*/ -}}
+{{- $proxyProtocol := eq (index .Service.Annotations "example.com/proxy-protocol") "true" }}
+resources:
+{{- range $index, $servicePort := .ServicePorts }}
+- "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+  name: cluster_{{$index}}
+  connect_timeout: 3s
+  type: STATIC
+  common_lb_config:
+    healthy_panic_threshold:
+      value: 0
+  {{- if eq $.SessionAffinity "ClientIP"}}
+  lb_policy: RING_HASH
+  {{- else}}
+  lb_policy: RANDOM
+  {{- end}}
+  health_checks:
+  - timeout: 3s
+    interval: 2s
+    unhealthy_threshold: 2
+    healthy_threshold: 1
+    initial_jitter: 0s
+    no_traffic_interval: 3s
+    always_log_health_check_failures: true
+    always_log_health_check_success: true
+    event_log_path: /dev/stdout
+    http_health_check:
+      path: /healthz
+{{- if $proxyProtocol }}
+    transport_socket_match_criteria:
+      health_check: "true"
+{{- end }}
+  load_assignment:
+    cluster_name: cluster_{{$index}}
+    endpoints:
+    {{- range $address := $servicePort.Cluster }}
+      - lb_endpoints:
+        - endpoint:
+            health_check_config:
+              port_value: {{ $.HealthCheckPort }}
+            address:
+              socket_address:
+                address: {{ $address.Address }}
+                port_value: {{ $address.Port }}
+                protocol: {{ $address.Protocol }}
+    {{- end}}
+{{- if $proxyProtocol }}
+  transport_socket:
+    name: envoy.transport_sockets.upstream_proxy_protocol
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
+      config:
+        version: V2
+      transport_socket:
+        name: envoy.transport_sockets.raw_buffer
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+  transport_socket_matches:
+  - name: raw_health_check_socket
+    match:
+      health_check: "true"
+    transport_socket:
+      name: envoy.transport_sockets.raw_buffer
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+{{- end }}
+{{- end }}

@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/template"
@@ -28,6 +30,13 @@ const (
 	proxyConfigPathCDS = "/home/envoy/cds.yaml"
 	proxyConfigPathLDS = "/home/envoy/lds.yaml"
 	envoyAdminPort     = 10000
+)
+
+// File names looked up in config.DefaultConfig.LoadBalancerConfigDir to
+// override the built-in templates.
+const (
+	LDSTemplateFile = "lds.yaml.tmpl"
+	CDSTemplateFile = "cds.yaml.tmpl"
 )
 
 // start Envoy with dynamic configuration by using files that implement the xDS protocol.
@@ -53,12 +62,18 @@ admin:
       ipv4_compat: true
 `
 
-// proxyConfigData is supplied to the loadbalancer config template
+// proxyConfigData is supplied to the loadbalancer config template.
+// User provided templates (see LoadBalancerConfigDir) receive the same data,
+// so changes to this struct are user visible.
 type proxyConfigData struct {
 	HealthCheckPort int                    // is the same for all ServicePorts
 	ServicePorts    map[string]servicePort // key is the IP family and Port and Protocol to support MultiPort services
 	SessionAffinity string
 	SourceRanges    []sourceRange
+	// Service and Nodes are the objects the configuration is generated from,
+	// so user templates can branch on their own labels or annotations.
+	Service *v1.Service
+	Nodes   []*v1.Node
 }
 
 type sourceRange struct {
@@ -190,8 +205,7 @@ resources:
 {{- end }}
 `
 
-// proxyConfig returns a kubeadm config generated from config data, in particular
-// the kubernetes version
+// proxyConfig returns the Envoy config generated from the template and the config data
 func proxyConfig(configTemplate string, data *proxyConfigData) (config string, err error) {
 	t, err := template.New("loadbalancer-config").Parse(configTemplate)
 	if err != nil {
@@ -206,6 +220,41 @@ func proxyConfig(configTemplate string, data *proxyConfigData) (config string, e
 	return buff.String(), nil
 }
 
+// loadTemplate returns the content of dir/name if it exists, otherwise the
+// built-in template. An empty dir disables the lookup.
+func loadTemplate(dir, name, builtin string) (string, error) {
+	if dir == "" {
+		return builtin, nil
+	}
+	path := filepath.Join(dir, name)
+	content, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return builtin, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to read template %s: %w", path, err)
+	}
+	klog.V(2).Infof("using template override %s", path)
+	return string(content), nil
+}
+
+// DumpDefaultTemplates writes the built-in LDS and CDS templates to dir so
+// users can edit them and pass the directory to LoadBalancerConfigDir.
+func DumpDefaultTemplates(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for name, content := range map[string]string{
+		LDSTemplateFile: proxyLDSConfigTemplate,
+		CDSTemplateFile: proxyCDSConfigTemplate,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	if service == nil {
 		return nil
@@ -218,6 +267,8 @@ func generateConfig(service *v1.Service, nodes []*v1.Node) *proxyConfigData {
 	lbConfig := &proxyConfigData{
 		HealthCheckPort: hcPort,
 		SessionAffinity: string(service.Spec.SessionAffinity),
+		Service:         service,
+		Nodes:           nodes,
 	}
 
 	servicePortConfig := map[string]servicePort{}
@@ -284,9 +335,14 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 	}
 	var stdout, stderr bytes.Buffer
 	name := loadBalancerName(clusterName, service)
+	templateDir := config.DefaultConfig.LoadBalancerConfigDir
 	config := generateConfig(service, nodes)
 	// create loadbalancer config data
-	ldsConfig, err := proxyConfig(proxyLDSConfigTemplate, config)
+	ldsTemplate, err := loadTemplate(templateDir, LDSTemplateFile, proxyLDSConfigTemplate)
+	if err != nil {
+		return err
+	}
+	ldsConfig, err := proxyConfig(ldsTemplate, config)
 	if err != nil {
 		return errors.Wrap(err, "failed to generate loadbalancer config data")
 	}
@@ -297,7 +353,11 @@ func proxyUpdateLoadBalancer(ctx context.Context, clusterName string, service *v
 		return err
 	}
 
-	cdsConfig, err := proxyConfig(proxyCDSConfigTemplate, config)
+	cdsTemplate, err := loadTemplate(templateDir, CDSTemplateFile, proxyCDSConfigTemplate)
+	if err != nil {
+		return err
+	}
+	cdsConfig, err := proxyConfig(cdsTemplate, config)
 	if err != nil {
 		return errors.Wrap(err, "failed to generate loadbalancer config data")
 	}

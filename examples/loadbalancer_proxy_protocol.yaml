@@ -1,0 +1,89 @@
+# nginx backend that reports the client address it sees.
+# Port 80 expects the PROXY protocol header and returns the address carried in it.
+# Port 8080 is plain HTTP and returns the address of the TCP peer.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-protocol-nginx
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 80 proxy_protocol;
+        location / {
+          default_type text/plain;
+          return 200 "$proxy_protocol_addr\n";
+        }
+      }
+      server {
+        listen 8080;
+        location / {
+          default_type text/plain;
+          return 200 "$remote_addr\n";
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy-protocol
+  labels:
+    app: proxy-protocol
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxy-protocol
+  template:
+    metadata:
+      labels:
+        app: proxy-protocol
+    spec:
+      containers:
+      - name: nginx
+        image: registry.k8s.io/e2e-test-images/nginx:1.15-4
+        ports:
+        - containerPort: 80
+        - containerPort: 8080
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      volumes:
+      - name: config
+        configMap:
+          name: proxy-protocol-nginx
+---
+# Requires cloud-provider-kind started with
+# --loadbalancer-config-dir examples/loadbalancer-templates/proxy-protocol
+# The annotation is interpreted by that template, not by cloud-provider-kind.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lb-proxy-protocol
+  annotations:
+    example.com/proxy-protocol: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: proxy-protocol
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+# Same backend without the annotation: the pod sees the load balancer or node address.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lb-no-proxy-protocol
+spec:
+  type: LoadBalancer
+  selector:
+    app: proxy-protocol
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
