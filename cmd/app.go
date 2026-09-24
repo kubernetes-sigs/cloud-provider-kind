@@ -27,6 +27,7 @@ var (
 	enableLogDump        bool
 	logDumpDir           string
 	enableLBPortMapping  bool
+	enableLBTunnel       bool
 	gatewayChannel       string
 	enableDefaultIngress bool
 	version              string
@@ -54,6 +55,9 @@ func NewCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	cmd.Flags().StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
 	cmd.Flags().BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
+	if (runtime.GOOS == "linux") {
+		cmd.Flags().BoolVar(&enableLBTunnel, "enable-lb-tunnel", false, "enable tunneling load balancer ips")
+	}
 	cmd.Flags().StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	cmd.Flags().BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
 
@@ -86,14 +90,16 @@ func newVersionCommand() *cobra.Command {
 
 func runE(cmd *cobra.Command, args []string) error {
 	// Log flags
+	var disableAutoDetect bool
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
 		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
+		// presence of these flags override auto-detection
+		if flag.Name == "enable-lb-port-mapping" || flag.Name == "enable-lb-tunnel" {
+			if flag.Changed {
+				disableAutoDetect = true
+			}
+		}
 	})
-
-	// Process on macOS must run using sudo
-	if runtime.GOOS == "darwin" && syscall.Geteuid() != 0 {
-		return fmt.Errorf("please run this again with `sudo`")
-	}
 
 	// trap Ctrl+C and call cancel on the context
 	ctx := context.Background()
@@ -161,16 +167,6 @@ func runE(cmd *cobra.Command, args []string) error {
 		klog.Infof("**** Dumping load balancers logs to: %s", logDumpDir)
 	}
 
-	// some platforms require to enable tunneling for the LoadBalancers
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
-		config.DefaultConfig.LoadBalancerConnectivity = config.Tunnel
-	}
-
-	// flag overrides autodetection
-	if enableLBPortMapping {
-		config.DefaultConfig.LoadBalancerConnectivity = config.Portmap
-	}
-
 	// default control plane connectivity to portmap, it will be
 	// overriden if the first cluster added detects direct
 	// connecitivity
@@ -204,6 +200,7 @@ func runE(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		klog.Infof("Detect runtime: %s", p)
 		container.SetRuntime(p)
 		switch p {
 		case "podman":
@@ -214,6 +211,43 @@ func runE(cmd *cobra.Command, args []string) error {
 			option = cluster.ProviderWithDocker()
 		}
 	}
+
+	// any --enable-lb-* flags (true or false) override lb-tunnel auto-detection.
+	//nolint:gocritic // if-else chain is more readable than switch
+	if enableLBTunnel {
+		config.DefaultConfig.LoadBalancerConnectivity = config.Tunnel
+	} else if enableLBPortMapping {
+		config.DefaultConfig.LoadBalancerConnectivity = config.Portmap
+	} else if ! disableAutoDetect {
+		// auto-detect lb-tunnel
+		if (runtime.GOOS == "linux" && syscall.Geteuid() == 0) {
+			// linux run as sudo
+			if isRootless, err := container.DetectRootless(); err != nil {
+				klog.Infof("Failed to auto-detect lb-tunnel mode: %s", err)
+			} else if isRootless {
+				// if containers are rootless, choose tunnel mode
+				klog.Infof("Containers are rootless; using lb-tunnel mode")
+				config.DefaultConfig.LoadBalancerConnectivity = config.Tunnel
+			}
+		}
+
+		// some platforms default to tunneling
+		if runtime.GOOS == "darwin" || runtime.GOOS == "windows" || isWSL2() {
+			klog.Infof("Containers are remote; using lb-tunnel mode")
+			config.DefaultConfig.LoadBalancerConnectivity = config.Tunnel
+		}
+	}
+
+	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel && syscall.Geteuid() != 0 {
+		// Tunneling on macOS/linux requires elevated privilege
+		switch runtime.GOOS {
+		case "darwin":
+			return fmt.Errorf("please run this again with `sudo` or --enable-lb-port-mapping=false")
+		case "linux":
+			return fmt.Errorf("please run this again with `sudo` or --enable-lb-tunnel=false")
+		}
+	}
+
 	kindProvider := cluster.NewProvider(
 		option,
 		cluster.ProviderWithLogger(logger),
