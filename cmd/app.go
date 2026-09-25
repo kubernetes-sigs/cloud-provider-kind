@@ -26,7 +26,7 @@ var (
 	flagV                int
 	enableLogDump        bool
 	logDumpDir           string
-	enableLBPortMapping  bool
+	enableLBPortMapping  string
 	gatewayChannel       string
 	enableDefaultIngress bool
 	version              string
@@ -53,10 +53,10 @@ func NewCommand() *cobra.Command {
 	cmd.Flags().IntVarP(&flagV, "verbosity", "v", 2, "Verbosity level")
 	cmd.Flags().BoolVar(&enableLogDump, "enable-log-dumping", false, "store logs to a temporal directory or to the directory specified using the logs-dir flag")
 	cmd.Flags().StringVar(&logDumpDir, "logs-dir", "", "store logs to the specified directory")
-	cmd.Flags().BoolVar(&enableLBPortMapping, "enable-lb-port-mapping", false, "enable port-mapping on the load balancer ports")
+	cmd.Flags().StringVar(&enableLBPortMapping, "enable-lb-port-mapping", "", "enable port-mapping on the load balancer ports; optionally specify a static host port after the equals sign (specifying 0 or omitting assigns an ephemeral port)")
+	cmd.Flags().Lookup("enable-lb-port-mapping").NoOptDefVal = "0" // ephemeral
 	cmd.Flags().StringVar(&gatewayChannel, "gateway-channel", "standard", "define the gateway API release channel to be used (standard, experimental, disabled), by default is standard")
 	cmd.Flags().BoolVar(&enableDefaultIngress, "enable-default-ingress", true, "enable default ingress for the cloud provider kind ingress")
-
 
 	cmd.AddCommand(newListImagesCommand())
 	cmd.AddCommand(newVersionCommand())
@@ -167,8 +167,13 @@ func runE(cmd *cobra.Command, args []string) error {
 	}
 
 	// flag overrides autodetection
-	if enableLBPortMapping {
+	if enableLBPortMapping != "" {
+		hostPort, err := strconv.ParseInt(enableLBPortMapping, 10, 32)
+		if err != nil || hostPort < 0 || hostPort > 65535 {
+			return fmt.Errorf("invalid --enable-lb-port-mapping value %q: must be a port number between 0 and 65535", enableLBPortMapping)
+		}
 		config.DefaultConfig.LoadBalancerConnectivity = config.Portmap
+		config.DefaultConfig.LoadBalancerPortMappingHostPort = int32(hostPort)
 	}
 
 	// default control plane connectivity to portmap, it will be

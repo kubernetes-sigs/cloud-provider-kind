@@ -34,6 +34,9 @@ type Config struct {
 	// and do userspace proxying from the original port to the portmaps.
 	// If the cloud-provider-kind runs in a container on these platforms only enables portmapping.
 	LoadBalancerConnectivity Connectivity
+	// Host port used when LoadBalancerConnectivity is Portmap.
+	// 0 means the OS assigns an ephemeral port; any other value is used as-is.
+	LoadBalancerPortMappingHostPort int32
 	// Type of connectivity between the cloud-provider-kind and the clusters
 	ControlPlaneConnectivity Connectivity
 	// Gateway API Release channel (default stable)
