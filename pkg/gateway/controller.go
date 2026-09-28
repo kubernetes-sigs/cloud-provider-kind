@@ -691,7 +691,6 @@ func (c *Controller) processBackendTLSPolicy(obj interface{}) {
 		}
 	}
 
-	gatewaysToEnqueue := make(map[string]struct{})
 	for _, targetRef := range policy.Spec.TargetRefs {
 		if !isServiceTargetRef(targetRef) {
 			continue
@@ -705,18 +704,7 @@ func (c *Controller) processBackendTLSPolicy(obj interface{}) {
 		}
 		for _, route := range httpRoutes {
 			if routeReferencesService(route, serviceName, policy.Namespace) {
-				for _, parentRef := range route.Spec.ParentRefs {
-					if (parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName) ||
-						(parentRef.Kind != nil && string(*parentRef.Kind) != "Gateway") {
-						continue
-					}
-					gwNamespace := route.Namespace
-					if parentRef.Namespace != nil {
-						gwNamespace = string(*parentRef.Namespace)
-					}
-					key := gwNamespace + "/" + string(parentRef.Name)
-					gatewaysToEnqueue[key] = struct{}{}
-				}
+				c.processGateways(route.Spec.ParentRefs, route.Namespace)
 			}
 		}
 
@@ -727,24 +715,9 @@ func (c *Controller) processBackendTLSPolicy(obj interface{}) {
 		}
 		for _, route := range grpcRoutes {
 			if grpcRouteReferencesService(route, serviceName, policy.Namespace) {
-				for _, parentRef := range route.Spec.ParentRefs {
-					if (parentRef.Group != nil && string(*parentRef.Group) != gatewayv1.GroupName) ||
-						(parentRef.Kind != nil && string(*parentRef.Kind) != "Gateway") {
-						continue
-					}
-					gwNamespace := route.Namespace
-					if parentRef.Namespace != nil {
-						gwNamespace = string(*parentRef.Namespace)
-					}
-					key := gwNamespace + "/" + string(parentRef.Name)
-					gatewaysToEnqueue[key] = struct{}{}
-				}
+				c.processGateways(route.Spec.ParentRefs, route.Namespace)
 			}
 		}
-	}
-
-	for key := range gatewaysToEnqueue {
-		c.gatewayqueue.Add(key)
 	}
 }
 
@@ -783,17 +756,7 @@ func (c *Controller) processConfigMapForTLSPolicy(obj interface{}) {
 func routeReferencesService(route *gatewayv1.HTTPRoute, serviceName, serviceNamespace string) bool {
 	for _, rule := range route.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			if backendRef.Kind != nil && *backendRef.Kind != "Service" {
-				continue
-			}
-			if backendRef.Group != nil && *backendRef.Group != "" {
-				continue
-			}
-			refNamespace := route.Namespace
-			if backendRef.Namespace != nil {
-				refNamespace = string(*backendRef.Namespace)
-			}
-			if string(backendRef.Name) == serviceName && refNamespace == serviceNamespace {
+			if backendRefTargetsService(backendRef.BackendObjectReference, route.Namespace, serviceName, serviceNamespace) {
 				return true
 			}
 		}
@@ -804,17 +767,7 @@ func routeReferencesService(route *gatewayv1.HTTPRoute, serviceName, serviceName
 func grpcRouteReferencesService(route *gatewayv1.GRPCRoute, serviceName, serviceNamespace string) bool {
 	for _, rule := range route.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			if backendRef.Kind != nil && *backendRef.Kind != "Service" {
-				continue
-			}
-			if backendRef.Group != nil && *backendRef.Group != "" {
-				continue
-			}
-			refNamespace := route.Namespace
-			if backendRef.Namespace != nil {
-				refNamespace = string(*backendRef.Namespace)
-			}
-			if string(backendRef.Name) == serviceName && refNamespace == serviceNamespace {
+			if backendRefTargetsService(backendRef.BackendObjectReference, route.Namespace, serviceName, serviceNamespace) {
 				return true
 			}
 		}

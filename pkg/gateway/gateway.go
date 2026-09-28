@@ -774,10 +774,7 @@ func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backe
 		return nil, err
 	}
 
-	ns := defaultNamespace
-	if backendRef.Namespace != nil {
-		ns = string(*backendRef.Namespace)
-	}
+	ns := backendRefNamespace(defaultNamespace, backendRef.BackendObjectReference)
 	service, err := c.serviceLister.Services(ns).Get(string(backendRef.Name))
 	if err != nil {
 		return cluster, nil

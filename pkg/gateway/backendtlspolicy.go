@@ -306,9 +306,7 @@ func rewriteRoutesForInvalidBackendTLS(routes []*routev3.Route, invalidClusters 
 	}
 	for _, route := range routes {
 		if routeUsesAnyCluster(route, invalidClusters) {
-			route.Action = &routev3.Route_DirectResponse{
-				DirectResponse: &routev3.DirectResponseAction{Status: 503},
-			}
+			route.Action = directResponse(503)
 		}
 	}
 }
@@ -377,16 +375,10 @@ func (c *Controller) servicesUsedByGateway(gw *gatewayv1.Gateway) map[string]str
 	for _, route := range c.getHTTPRoutesForGateway(gw) {
 		for _, rule := range route.Spec.Rules {
 			for _, backendRef := range rule.BackendRefs {
-				if backendRef.Kind != nil && *backendRef.Kind != "Service" {
+				if !isServiceBackendRef(backendRef.BackendObjectReference) {
 					continue
 				}
-				if backendRef.Group != nil && *backendRef.Group != "" {
-					continue
-				}
-				ns := route.Namespace
-				if backendRef.Namespace != nil {
-					ns = string(*backendRef.Namespace)
-				}
+				ns := backendRefNamespace(route.Namespace, backendRef.BackendObjectReference)
 				used[ns+"/"+string(backendRef.Name)] = struct{}{}
 			}
 		}
