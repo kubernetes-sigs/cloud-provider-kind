@@ -18,14 +18,17 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sort"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/protobuf/proto"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	clusterv3service "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
@@ -44,6 +47,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1informers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -121,7 +125,8 @@ type Controller struct {
 	xdsserver       serverv3.Server
 	xdsLocalAddress string
 	xdsLocalPort    int
-	xdsVersion      atomic.Uint64
+	xdsStateMu      sync.Mutex
+	xdsState        map[string]*xdsNodeState
 
 	tunnelManager *tunnels.TunnelManager
 }
@@ -163,6 +168,7 @@ func New(
 		grpcrouteListerSynced:      grpcrouteInformer.Informer().HasSynced,
 		referenceGrantLister:       referenceGrantInformer.Lister(),
 		referenceGrantListerSynced: referenceGrantInformer.Informer().HasSynced,
+		xdsState:                   make(map[string]*xdsNodeState),
 	}
 	_, err := gatewayClassInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -403,7 +409,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	logger.Info("Starting Envoy proxy controller")
 	c.xdscache = cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil)
-	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{})
+	c.xdsserver = serverv3.NewServer(ctx, c.xdscache, &xdsCallbacks{ctrl: c})
 
 	var grpcOptions []grpc.ServerOption
 	grpcOptions = append(grpcOptions,
@@ -720,10 +726,8 @@ func GetControlPlaneAddress() (string, error) {
 	return "", fmt.Errorf("no suitable global unicast IPv4 address found on any active non-loopback interface")
 }
 
-func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resources map[resourcev3.Type][]envoyproxytypes.Resource) error {
-	c.xdsVersion.Add(1)
-
-	snapshot, err := cachev3.NewSnapshot(fmt.Sprintf("%d", c.xdsVersion.Load()), resources)
+func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid, version string, resources map[resourcev3.Type][]envoyproxytypes.Resource) error {
+	snapshot, err := cachev3.NewSnapshot(version, resources)
 	if err != nil {
 		return fmt.Errorf("failed to create new snapshot cache: %v", err)
 
@@ -737,9 +741,157 @@ func (c *Controller) UpdateXDSServer(ctx context.Context, nodeid string, resourc
 	return nil
 }
 
+// xdsNodeState tracks the xDS conversation with a single Envoy instance (one
+// per Gateway). Guarded by Controller.xdsStateMu.
+type xdsNodeState struct {
+	gatewayKey string
+	version    string
+	required   sets.Set[string]
+	acked      map[string]string
+	nackErr    error
+}
+
+func newXDSNodeState() *xdsNodeState {
+	return &xdsNodeState{acked: make(map[string]string)}
+}
+
+// fullyAcked reports whether Envoy has acknowledged the pushed version for
+// every required type URL.
+func (s *xdsNodeState) fullyAcked() bool {
+	if s.version == "" {
+		return false
+	}
+	for t := range s.required {
+		if s.acked[t] != s.version {
+			return false
+		}
+	}
+	return true
+}
+
+// requiredACKTypes returns the type URLs whose ACK is required before the
+// given snapshot counts as accepted by Envoy.
+func requiredACKTypes(resources map[resourcev3.Type][]envoyproxytypes.Resource) sets.Set[string] {
+	required := sets.New(resourcev3.ClusterType, resourcev3.ListenerType)
+	if len(resources[resourcev3.ListenerType]) > 0 && len(resources[resourcev3.RouteType]) > 0 {
+		required.Insert(resourcev3.RouteType)
+	}
+	return required
+}
+
+// computeResourcesHash returns a SHA-256 content hash of the given xDS
+// resources, used as the snapshot version string.
+func computeResourcesHash(resources map[resourcev3.Type][]envoyproxytypes.Resource) string {
+	h := sha256.New()
+	typeKeys := make([]string, 0, len(resources))
+	for t := range resources {
+		typeKeys = append(typeKeys, t)
+	}
+	sort.Strings(typeKeys)
+	for _, t := range typeKeys {
+		rs := resources[t]
+		serialised := make([][]byte, len(rs))
+		for i, r := range rs {
+			serialised[i], _ = proto.MarshalOptions{Deterministic: true}.Marshal(r)
+		}
+		sort.Slice(serialised, func(i, j int) bool {
+			return string(serialised[i]) < string(serialised[j])
+		})
+		h.Write([]byte(t))
+		for _, b := range serialised {
+			h.Write(b)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (c *Controller) applyXDSConfig(ctx context.Context, nodeID, gatewayKey string, resources map[resourcev3.Type][]envoyproxytypes.Resource) (xdsErr error, pending bool) {
+	version := computeResourcesHash(resources)
+
+	c.xdsStateMu.Lock()
+	state, ok := c.xdsState[nodeID]
+	if !ok {
+		state = newXDSNodeState()
+		c.xdsState[nodeID] = state
+	}
+	state.gatewayKey = gatewayKey
+	push := state.version != version
+	if push {
+		state.version = version
+		state.required = requiredACKTypes(resources)
+		state.nackErr = nil
+	}
+	c.xdsStateMu.Unlock()
+
+	if push {
+		if err := c.UpdateXDSServer(ctx, nodeID, version, resources); err != nil {
+			c.xdsStateMu.Lock()
+			state.version = "" // force a re-push on the next sync
+			c.xdsStateMu.Unlock()
+			return err, false
+		}
+	}
+
+	c.xdsStateMu.Lock()
+	defer c.xdsStateMu.Unlock()
+	if state.nackErr != nil {
+		return state.nackErr, false
+	}
+	return nil, !state.fullyAcked()
+}
+
+func (c *Controller) handleXDSRequest(nodeID, typeURL, versionInfo, nackMessage string) {
+	if nodeID == "" {
+		return
+	}
+
+	c.xdsStateMu.Lock()
+	state, ok := c.xdsState[nodeID]
+	if !ok {
+		// Envoy connected before this gateway was synced. Record what Envoy reports
+		// so the first sync can tell whether its config is already acknowledged.
+		state = newXDSNodeState()
+		c.xdsState[nodeID] = state
+	}
+	gatewayKey := state.gatewayKey
+	changed := false
+	if nackMessage != "" {
+		nackErr := fmt.Errorf("Envoy rejected the configuration (type %s): %s", typeURL, nackMessage) // nolint:staticcheck
+		if state.nackErr == nil || state.nackErr.Error() != nackErr.Error() {
+			state.nackErr = nackErr
+			changed = true
+			klog.Warningf("xDS NACK from node %s: %v", nodeID, nackErr)
+		}
+	} else {
+		wasAcked := state.fullyAcked()
+		state.acked[typeURL] = versionInfo
+		if state.fullyAcked() {
+			state.nackErr = nil
+			if !wasAcked {
+				changed = true
+				klog.V(2).Infof("xDS node %s acknowledged configuration version %s", nodeID, versionInfo)
+			}
+		}
+	}
+	c.xdsStateMu.Unlock()
+
+	if changed && gatewayKey != "" {
+		c.gatewayqueue.Add(gatewayKey)
+	}
+}
+
+// forgetXDSState drops the ACK/NACK tracking state for a deleted gateway.
+func (c *Controller) forgetXDSState(nodeID string) {
+	c.xdsStateMu.Lock()
+	defer c.xdsStateMu.Unlock()
+	delete(c.xdsState, nodeID)
+}
+
 var _ serverv3.Callbacks = &xdsCallbacks{}
 
-type xdsCallbacks struct{}
+type xdsCallbacks struct {
+	ctrl *Controller
+}
 
 func (cb *xdsCallbacks) OnStreamOpen(ctx context.Context, id int64, typ string) error {
 	klog.V(2).Infof("xDS stream %d opened for type %s", id, typ)
@@ -754,6 +906,14 @@ func (cb *xdsCallbacks) OnStreamClosed(id int64, node *corev3.Node) {
 }
 func (cb *xdsCallbacks) OnStreamRequest(id int64, req *discoveryv3.DiscoveryRequest) error {
 	klog.V(5).Infof("xDS stream %d received request for type %s from node %s", id, req.TypeUrl, req.Node.GetId())
+	nackMessage := ""
+	if req.ErrorDetail != nil {
+		nackMessage = req.ErrorDetail.GetMessage()
+		if nackMessage == "" {
+			nackMessage = "unknown error"
+		}
+	}
+	cb.ctrl.handleXDSRequest(req.Node.GetId(), req.TypeUrl, req.VersionInfo, nackMessage)
 	return nil
 }
 func (cb *xdsCallbacks) OnStreamResponse(ctx context.Context, id int64, req *discoveryv3.DiscoveryRequest, resp *discoveryv3.DiscoveryResponse) {
