@@ -1,6 +1,7 @@
 package loadbalancer
 
 import (
+	"reflect"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -138,6 +139,53 @@ func TestLoadBalancerName(t *testing.T) {
 			}
 			if len(actual) != test.expectedLen {
 				t.Errorf("expected length %d, got %d", test.expectedLen, len(actual))
+			}
+		})
+	}
+}
+
+func TestMissingPublishedPorts(t *testing.T) {
+	service := &v1.Service{
+		Spec: v1.ServiceSpec{
+			Ports: []v1.ServicePort{
+				{Port: 443, Protocol: v1.ProtocolTCP},
+				{Port: 8443, Protocol: v1.ProtocolTCP},
+				{Port: 53, Protocol: v1.ProtocolUDP},
+				{Port: 9999, Protocol: v1.ProtocolSCTP},
+			},
+		},
+	}
+	tests := []struct {
+		name     string
+		portmaps map[string]string
+		expected []string
+	}{
+		{
+			name:     "all ports published",
+			portmaps: map[string]string{"443/tcp": "40001", "8443/tcp": "40002", "53/udp": "40003", "10000/tcp": "40004"},
+			expected: nil,
+		},
+		{
+			name:     "port added after creation",
+			portmaps: map[string]string{"443/tcp": "40001", "53/udp": "40003", "10000/tcp": "40004"},
+			expected: []string{"8443/tcp"},
+		},
+		{
+			name:     "same port number with a different protocol",
+			portmaps: map[string]string{"443/tcp": "40001", "8443/tcp": "40002", "53/tcp": "40003"},
+			expected: []string{"53/udp"},
+		},
+		{
+			name:     "nothing published",
+			portmaps: map[string]string{},
+			expected: []string{"443/tcp", "8443/tcp", "53/udp"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actual := missingPublishedPorts(service, test.portmaps)
+			if !reflect.DeepEqual(actual, test.expected) {
+				t.Errorf("expected %v, got %v", test.expected, actual)
 			}
 		})
 	}
