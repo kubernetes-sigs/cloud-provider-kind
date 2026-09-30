@@ -210,3 +210,92 @@ EOF
     kubectl delete service ws-service
     kubectl delete ingress ws-ingress
 }
+
+# https://github.com/kubernetes-sigs/cloud-provider-kind/issues/458
+@test "Multiple single-stack LoadBalancers on the same port with enable-lb-port-mapping" {
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: same-port
+  labels:
+    app: same-port
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: same-port
+  template:
+    metadata:
+      labels:
+        app: same-port
+    spec:
+      containers:
+      - name: agnhost
+        image: registry.k8s.io/e2e-test-images/agnhost:2.66.1
+        args:
+          - netexec
+          - --http-port=8080
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: same-port-1
+spec:
+  type: LoadBalancer
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+  selector:
+    app: same-port
+  ports:
+  - protocol: TCP
+    port: 9090
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: same-port-2
+spec:
+  type: LoadBalancer
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+  selector:
+    app: same-port
+  ports:
+  - protocol: TCP
+    port: 9090
+    targetPort: 8080
+EOF
+    kubectl wait --for=condition=ready pods -l app=same-port --timeout=60s
+    POD=$(kubectl get pod -l app=same-port -o jsonpath='{.items[0].metadata.name}')
+    echo "Pod $POD"
+
+    for svc in same-port-1 same-port-2
+    do
+        IP=""
+        for i in {1..30}
+        do
+            IP=$(kubectl get services $svc --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            [[ ! -z "$IP" ]] && break || sleep 1
+        done
+        echo "$svc IP: $IP"
+        [[ ! -z "$IP" ]]
+
+        HOSTNAME=""
+        for i in {1..10}
+        do
+            HOSTNAME=$(curl -s --max-time 3 http://${IP}:9090/hostname || true)
+            [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+        done
+        echo "$svc hostname via TCP: $HOSTNAME"
+        [ "$HOSTNAME" = "$POD" ]
+    done
+
+    kubectl delete service same-port-1 same-port-2
+    kubectl delete deployment same-port
+}

@@ -233,14 +233,16 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		// advertised but not functional end-to-end (e.g. some GitHub Actions runners).
 		// For dual-stack or unspecified services, publish without an explicit address.
 		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/387
+		// The host port is left empty so it is ephemeral; pinning it to the Service port
+		// makes two LoadBalancers with the same Service port collide on the host.
+		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/458
 		listenAddress := listenAddressForService(service)
 		for _, port := range service.Spec.Ports {
 			if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
 				continue
 			}
 			if listenAddress != "" {
-				hostPortBinding := net.JoinHostPort(listenAddress, fmt.Sprintf("%d", port.Port))
-				args = append(args, fmt.Sprintf("--publish=%s:%d/%s", hostPortBinding, port.Port, port.Protocol))
+				args = append(args, fmt.Sprintf("--publish=%s:%d/%s", net.JoinHostPort(listenAddress, ""), port.Port, port.Protocol))
 			} else {
 				args = append(args, fmt.Sprintf("--publish=%d/%s", port.Port, port.Protocol))
 			}
