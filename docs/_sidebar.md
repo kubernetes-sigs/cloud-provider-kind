@@ -18,6 +18,7 @@
 
 - Support
   - [Mac, Windows and WSL2 support](user/support/os_support.md)
+  - [Linux rootless support](user/support/rootless_support.md)
 
 - Contributing
   - [Contribution Guide Lines](contributing/CONTRIBUTING.md)

@@ -48,6 +48,26 @@ func SetRuntime(name string) {
 	containerRuntime = name
 }
 
+// DetectRootless returns true if rootless mode is detected, false otherwise
+func DetectRootless() (bool, error) {
+	var fstr = ""
+	switch containerRuntime {
+	case "docker":
+		fstr = "{{range $opt := .SecurityOptions}}{{ if eq $opt \"name=rootless\" }}{{\"true\"}}{{end}}{{end}}"
+	case "podman":
+		fstr = "{{.Host.Security.Rootless}}"
+	}
+	if fstr == "" {
+		return false, fmt.Errorf("unable to determine rootless for provider %s, assuming false", containerRuntime)
+	}
+	cmd := kindexec.Command(containerRuntime, "info", "-f", fstr)
+	result, err := kindexec.OutputLines(cmd)
+	if err != nil || len(result) == 0 {
+		return false, err
+	}
+	return result[0] == "true", nil
+}
+
 // DetectRuntime probes the system for an available container runtime.
 // It returns an error if no supported runtime is installed and running.
 func DetectRuntime() (string, error) {

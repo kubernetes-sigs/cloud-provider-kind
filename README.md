@@ -390,6 +390,14 @@ Mainly tested with `docker` and `Linux`, though `Windows`, `Mac` and `WSL2` are 
 - On Windows you must run cloud-provider-kind from a shell that uses `Run as administrator`
 - Further feedback from users will be helpful to support other related platforms.
 
+### Linux rootless support
+
+On Linux rootless containers, similar to Mac, Windows and WSL2 containers, the KIND nodes are not reachable from the host.
+
+If run with sudo, cloud-provider-kind will assign the LoadBalancer IPs to the host's loopback interface, listen for connections on the service ports on those IPs and forward connections to the envoy containers for their respective services, making the LoadBalancer IP/ports directly addressable from the host.
+
+If cloud-provider-kind fails to auto-detect that the containers are rootless, the forwarding behavior can be requested with the `--enable-lb-tunnel` option.
+
 **Note**
 
 The project is still in very alpha state, bugs are expected, please report them back opening a Github issue.
