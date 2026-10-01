@@ -204,6 +204,7 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		// user a user defined docker network so we get embedded DNS
 		"--net", networkName,
 		"--init=false",
+		"--stop-signal=SIGKILL",
 		"--hostname", name, // make hostname match container name
 		// label the node with the role ID
 		// running containers in a container requires privileged
