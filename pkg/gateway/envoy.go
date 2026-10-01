@@ -220,6 +220,9 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		// advertised but not functional end-to-end (e.g. some GitHub Actions runners).
 		// For dual-stack or unspecified gateways, publish without an explicit address.
 		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/387
+		// The host port is left empty so it is ephemeral; pinning it to the listener port
+		// makes two Gateways with the same listener port collide on the host.
+		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/458
 		seen := make(map[string]struct{})
 		for _, listener := range gateway.Spec.Listeners {
 			proto := "tcp"
@@ -229,8 +232,7 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 
 			var publishArg string
 			if listenAddress != "" {
-				hostPortBinding := net.JoinHostPort(listenAddress, fmt.Sprintf("%d", listener.Port))
-				publishArg = fmt.Sprintf("--publish=%s:%d/%s", hostPortBinding, listener.Port, proto)
+				publishArg = fmt.Sprintf("--publish=%s:%d/%s", net.JoinHostPort(listenAddress, ""), listener.Port, proto)
 			} else {
 				publishArg = fmt.Sprintf("--publish=%d/%s", listener.Port, proto)
 			}
