@@ -157,6 +157,7 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		"--net", networkName,
 		"--dns", nameserver,
 		"--init=false",
+		"--stop-signal=SIGKILL",
 		"--hostname", name,
 		"--privileged",
 		"--restart=on-failure",
