@@ -660,3 +660,92 @@ func equalUnordered(a, b []string) bool {
 	}
 	return true
 }
+
+func TestParentRefTargetsGateway(t *testing.T) {
+	gw := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "gateway-ns"}}
+	tests := []struct {
+		name           string
+		parentRef      gatewayv1.ParentReference
+		routeNamespace string
+		want           bool
+	}{
+		{
+			name:           "name match, nil namespace defaults to route namespace",
+			parentRef:      gatewayv1.ParentReference{Name: "gw"},
+			routeNamespace: "gateway-ns",
+			want:           true,
+		},
+		{
+			name:           "name match but route in another namespace",
+			parentRef:      gatewayv1.ParentReference{Name: "gw"},
+			routeNamespace: "other-ns",
+			want:           false,
+		},
+		{
+			name: "explicit namespace match",
+			parentRef: gatewayv1.ParentReference{
+				Name:      "gw",
+				Namespace: ptr.To(gatewayv1.Namespace("gateway-ns")),
+			},
+			routeNamespace: "other-ns",
+			want:           true,
+		},
+		{
+			name:           "wrong gateway name",
+			parentRef:      gatewayv1.ParentReference{Name: "other"},
+			routeNamespace: "gateway-ns",
+			want:           false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parentRefTargetsGateway(tt.parentRef, tt.routeNamespace, gw)
+			if got != tt.want {
+				t.Errorf("parentRefTargetsGateway() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParentRefMatchesListener(t *testing.T) {
+	listener := gatewayv1.Listener{Name: "http", Port: 80}
+	tests := []struct {
+		name      string
+		parentRef gatewayv1.ParentReference
+		want      bool
+	}{
+		{
+			name:      "no section or port matches any listener",
+			parentRef: gatewayv1.ParentReference{Name: "gw"},
+			want:      true,
+		},
+		{
+			name:      "matching section name",
+			parentRef: gatewayv1.ParentReference{Name: "gw", SectionName: ptr.To(gatewayv1.SectionName("http"))},
+			want:      true,
+		},
+		{
+			name:      "non-matching section name",
+			parentRef: gatewayv1.ParentReference{Name: "gw", SectionName: ptr.To(gatewayv1.SectionName("https"))},
+			want:      false,
+		},
+		{
+			name:      "matching port",
+			parentRef: gatewayv1.ParentReference{Name: "gw", Port: ptr.To(gatewayv1.PortNumber(80))},
+			want:      true,
+		},
+		{
+			name:      "non-matching port",
+			parentRef: gatewayv1.ParentReference{Name: "gw", Port: ptr.To(gatewayv1.PortNumber(443))},
+			want:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parentRefMatchesListener(tt.parentRef, listener)
+			if got != tt.want {
+				t.Errorf("parentRefMatchesListener() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

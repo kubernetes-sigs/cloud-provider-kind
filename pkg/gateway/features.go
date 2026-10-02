@@ -30,6 +30,7 @@ import (
 var standardFeatureNames = []features.FeatureName{
 	// Core
 	features.SupportGateway,
+	features.SupportGRPCRoute,
 	features.SupportHTTPRoute,
 	features.SupportReferenceGrant,
 	// Extended
