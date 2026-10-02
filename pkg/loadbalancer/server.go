@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/keymutex"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
@@ -24,12 +25,17 @@ import (
 
 type Server struct {
 	tunnelManager *tunnels.TunnelManager
+	// the service controller syncs Services and Nodes from different workers,
+	// so the methods below can be called concurrently for the same load balancer
+	locks keymutex.KeyMutex
 }
 
 var _ cloudprovider.LoadBalancer = &Server{}
 
 func NewServer() cloudprovider.LoadBalancer {
-	s := &Server{}
+	s := &Server{
+		locks: keymutex.NewHashed(0),
+	}
 
 	if config.DefaultConfig.LoadBalancerConnectivity == config.Tunnel {
 		s.tunnelManager = tunnels.NewTunnelManager()
@@ -40,13 +46,14 @@ func NewServer() cloudprovider.LoadBalancer {
 func (s *Server) GetLoadBalancer(ctx context.Context, clusterName string, service *v1.Service) (*v1.LoadBalancerStatus, bool, error) {
 	// report status
 	name := loadBalancerName(clusterName, service)
-	ipv4, ipv6, err := container.IPs(name)
+	info, err := container.Inspect(name)
 	if err != nil {
-		if strings.Contains(err.Error(), "failed to get container details") {
+		if errors.Is(err, container.ErrNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
+	ipv4, ipv6 := info.IPv4, info.IPv6
 	status := &v1.LoadBalancerStatus{}
 
 	// process Ports
@@ -93,41 +100,44 @@ func (s *Server) GetLoadBalancerName(ctx context.Context, clusterName string, se
 
 func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
 	name := loadBalancerName(clusterName, service)
-	if !container.IsRunning(name) {
-		klog.Infof("container %s for loadbalancer is not running", name)
-		if container.Exist(name) {
-			err := container.Delete(name)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	// The published ports of a container can not be changed once it is created, so if
-	// the Service gained ports the container has to be recreated to forward them.
-	// Keep the current IPs so the LoadBalancer address does not change.
+	s.locks.LockKey(name)
+	defer s.locks.UnlockKey(name) // nolint: errcheck
+
+	// Decide from one snapshot of the container: the runtime restart policy changes
+	// the state concurrently, and piecewise reads can mix two states and delete a
+	// container that is about to come back.
 	var ipv4, ipv6 string
-	if container.Exist(name) && s.forwardsPortsToHost() {
-		portmaps, err := container.PortMaps(name)
-		if err != nil {
+	create := false
+	info, err := container.Inspect(name)
+	switch {
+	case errors.Is(err, container.ErrNotFound):
+		create = true
+	case err != nil:
+		return nil, err
+	case info.Status == "restarting":
+		// the runtime reports no addresses or ports until it is back, retry later
+		return nil, fmt.Errorf("container %s for loadbalancer is restarting", name)
+	case !info.Running():
+		klog.Infof("container %s for loadbalancer is %s", name, info.Status)
+		if err := s.deleteLoadBalancer(name); err != nil {
 			return nil, err
 		}
-		if missing := missingPublishedPorts(service, portmaps); len(missing) > 0 {
+		create = true
+	case s.forwardsPortsToHost():
+		// The published ports of a container can not be changed once it is created, so if
+		// the Service gained ports the container has to be recreated to forward them.
+		// Keep the current IPs so the LoadBalancer address does not change.
+		if missing := missingPublishedPorts(service, info.Ports); len(missing) > 0 {
 			klog.Infof("recreating container %s for loadbalancer, ports %v are not published", name, missing)
-			ipv4, ipv6, err = container.IPs(name)
-			if err != nil {
+			ipv4, ipv6 = info.IPv4, info.IPv6
+			if err := s.deleteLoadBalancer(name); err != nil {
 				return nil, err
 			}
-			if s.tunnelManager != nil {
-				if err := s.tunnelManager.RemoveTunnels(name); err != nil {
-					klog.ErrorS(err, "error removing tunnels", "container", name)
-				}
-			}
-			if err := container.Delete(name); err != nil {
-				return nil, err
-			}
+			create = true
 		}
 	}
-	if !container.Exist(name) {
+
+	if create {
 		klog.V(2).Infof("creating container for loadbalancer")
 		err := s.createLoadBalancer(clusterName, service, config.DefaultConfig.ProxyImage, ipv4, ipv6)
 		if err != nil && (ipv4 != "" || ipv6 != "") {
@@ -147,7 +157,7 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 
 	// update loadbalancer
 	klog.V(2).Infof("updating loadbalancer")
-	err := s.UpdateLoadBalancer(ctx, clusterName, service, nodes)
+	err = proxyUpdateLoadBalancer(ctx, clusterName, service, nodes)
 	if err != nil {
 		return nil, err
 	}
@@ -174,11 +184,16 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 }
 
 func (s *Server) UpdateLoadBalancer(ctx context.Context, clusterName string, service *v1.Service, nodes []*v1.Node) error {
+	name := loadBalancerName(clusterName, service)
+	s.locks.LockKey(name)
+	defer s.locks.UnlockKey(name) // nolint: errcheck
 	return proxyUpdateLoadBalancer(ctx, clusterName, service, nodes)
 }
 
 func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName string, service *v1.Service) error {
 	containerName := loadBalancerName(clusterName, service)
+	s.locks.LockKey(containerName)
+	defer s.locks.UnlockKey(containerName) // nolint: errcheck
 	var err1, err2 error
 	if s.tunnelManager != nil {
 		err1 = s.tunnelManager.RemoveTunnels(containerName)
@@ -193,6 +208,17 @@ func (s *Server) EnsureLoadBalancerDeleted(ctx context.Context, clusterName stri
 	}
 	err2 = container.Delete(containerName)
 	return errors.Join(err1, err2)
+}
+
+// deleteLoadBalancer removes the container before recreating it. The tunnels are
+// removed too, the new container publishes different host ports.
+func (s *Server) deleteLoadBalancer(containerName string) error {
+	if s.tunnelManager != nil {
+		if err := s.tunnelManager.RemoveTunnels(containerName); err != nil {
+			klog.ErrorS(err, "error removing tunnels", "container", containerName)
+		}
+	}
+	return container.Delete(containerName)
 }
 
 // loadbalancer name is a unique name for the loadbalancer container
