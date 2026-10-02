@@ -7,7 +7,6 @@ import (
 	"net"
 	"reflect"
 	"slices"
-	"strings"
 	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -102,13 +101,11 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			return fmt.Errorf("failed to ensure gateway container %s: %w", containerName, err)
 		}
 
-		ipv4, ipv6, err := container.IPs(containerName)
+		info, err := container.Inspect(containerName)
 		if err != nil {
-			if strings.Contains(err.Error(), "failed to get container details") {
-				return err
-			}
 			return err
 		}
+		ipv4, ipv6 := info.IPv4, info.IPv6
 
 		newGw.Status.Addresses = []gatewayv1.GatewayStatusAddress{}
 		if net.ParseIP(ipv4) != nil {
@@ -768,14 +765,7 @@ func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace
 		return fmt.Errorf("failed to set empty snapshot for deleted gateway %s: %w", name, err)
 	}
 
-	if c.tunnelManager != nil {
-		err := c.tunnelManager.RemoveTunnels(containerName)
-		if err != nil {
-			klog.Errorf("failed to remove tunnels for deleted gateway %s: %v", name, err)
-		}
-	}
-
-	if err := container.Delete(containerName); err != nil {
+	if err := c.deleteGatewayContainer(containerName); err != nil {
 		return fmt.Errorf("failed to delete container for gateway %s: %v", name, err)
 	}
 

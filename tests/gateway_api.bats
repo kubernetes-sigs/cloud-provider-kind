@@ -273,3 +273,67 @@ EOF
     # Cleanup
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_http_multi_listener.yaml
 }
+
+@test "Gateway serves a Listener added after creation with enable-lb-port-mapping" {
+    kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+    kubectl wait --for=condition=ready pods -l app=MyApp --timeout=60s
+    POD=$(kubectl get pod -l app=MyApp -o jsonpath='{.items[0].metadata.name}')
+
+    IP=""
+    for i in {1..30}
+    do
+        IP=$(kubectl get gateway prod-web --output jsonpath='{.status.addresses[0].value}' 2>/dev/null)
+        [[ ! -z "$IP" ]] && break || sleep 1
+    done
+    echo "Gateway IP: $IP"
+    [[ ! -z "$IP" ]]
+
+    HOSTNAME=""
+    for i in {1..30}
+    do
+        HOSTNAME=$(curl -s --max-time 3 http://${IP}/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via port 80: $HOSTNAME"
+    [ "$HOSTNAME" = "$POD" ]
+
+    # Add a Listener to the existing Gateway, the running container has to forward it too
+    kubectl patch gateway prod-web --type=json \
+        -p='[{"op": "add", "path": "/spec/listeners/-", "value": {"name": "prod-web-gw-8080", "protocol": "HTTP", "port": 8080, "allowedRoutes": {"namespaces": {"from": "Same"}}}}]'
+
+    # The Gateway IP is reachable directly on Linux, so also check the port published
+    # on the host, which is what the tunnels and port mapping depend on.
+    HOST_PORT=""
+    for i in {1..30}
+    do
+        CONTAINER=$(docker ps -q --filter "label=io.x-k8s.cloud-provider-kind.gateway.name=${CLUSTER_NAME}/default/prod-web")
+        HOST_PORT=$(docker port "$CONTAINER" 8080/tcp 2>/dev/null | head -n 1 | sed 's/.*://' || true)
+        [[ ! -z "$HOST_PORT" ]] && break || sleep 1
+    done
+    echo "Host port for 8080: $HOST_PORT"
+    [[ ! -z "$HOST_PORT" ]]
+
+    HOSTNAME=""
+    for i in {1..30}
+    do
+        HOSTNAME=$(curl -s --max-time 3 http://127.0.0.1:${HOST_PORT}/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via host port $HOST_PORT: $HOSTNAME"
+    [ "$HOSTNAME" = "$POD" ]
+
+    HOSTNAME=""
+    for i in {1..30}
+    do
+        HOSTNAME=$(curl -s --max-time 3 http://${IP}:8080/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via port 8080: $HOSTNAME"
+    [ "$HOSTNAME" = "$POD" ]
+
+    NEW_IP=$(kubectl get gateway prod-web --output jsonpath='{.status.addresses[0].value}')
+    echo "Gateway IP after adding a Listener: $NEW_IP"
+    [ "$NEW_IP" = "$IP" ]
+
+    kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+}

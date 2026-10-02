@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"net/netip"
 	"runtime"
@@ -180,36 +181,88 @@ func (c *Controller) configureContainerNetworking(ctx context.Context, container
 	return nil
 }
 
+// forwardsPortsToHost returns true if the Listener ports are published on the host.
+func (c *Controller) forwardsPortsToHost() bool {
+	return c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
+}
+
 func (c *Controller) ensureGatewayContainer(ctx context.Context, gw *gatewayv1.Gateway) error {
 	namespace := gw.Namespace
 	name := gw.Name
 	containerName := gatewayName(c.clusterName, namespace, name)
 
-	if !container.IsRunning(containerName) {
-		klog.Infof("container %s for gateway %s/%s is not running", containerName, namespace, name)
-		if container.Exist(containerName) {
-			if err := container.Delete(containerName); err != nil {
-				return err
-			}
-		}
-	}
-	if !container.Exist(containerName) {
-		klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
-		enableTunnels := c.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
-		err := createGateway(c.clusterName, c.clusterNameserver, c.xdsLocalAddress, c.xdsLocalPort, gw, enableTunnels)
-		if err != nil {
+	// Decide from one snapshot of the container: the runtime restart policy changes
+	// the state concurrently, and piecewise reads can mix two states and delete a
+	// container that is about to come back.
+	var ipv4, ipv6 string
+	create := false
+	info, err := container.Inspect(containerName)
+	switch {
+	case errors.Is(err, container.ErrNotFound):
+		create = true
+	case err != nil:
+		return err
+	case info.Status == "restarting":
+		// the runtime reports no addresses or ports until it is back, retry later
+		return fmt.Errorf("container %s for gateway %s/%s is restarting", containerName, namespace, name)
+	case !info.Running():
+		klog.Infof("container %s for gateway %s/%s is %s", containerName, namespace, name, info.Status)
+		if err := c.deleteGatewayContainer(containerName); err != nil {
 			return err
 		}
-
-		// TODO fix this hack
-		time.Sleep(250 * time.Millisecond)
-
-		if err := c.configureContainerNetworking(ctx, containerName); err != nil {
-			if delErr := container.Delete(containerName); delErr != nil {
-				klog.Errorf("failed to delete container %s after networking setup failed: %v", containerName, delErr)
+		create = true
+	case c.forwardsPortsToHost():
+		// The published ports of a container can not be changed once it is created, so if
+		// the Gateway gained Listener ports the container has to be recreated to forward them.
+		// Keep the current IPs so the Gateway addresses do not change.
+		if missing := missingPublishedPorts(gw, info.Ports); len(missing) > 0 {
+			klog.Infof("recreating container %s for gateway %s/%s, ports %v are not published", containerName, namespace, name, missing)
+			ipv4, ipv6 = info.IPv4, info.IPv6
+			if err := c.deleteGatewayContainer(containerName); err != nil {
+				return err
 			}
-			return fmt.Errorf("failed to configure networking for new gateway container %s: %w", containerName, err)
+			create = true
 		}
 	}
+	if !create {
+		return nil
+	}
+
+	klog.V(2).Infof("creating container %s for gateway  %s/%s on cluster %s", containerName, namespace, name, c.clusterName)
+	err = createGateway(c.clusterName, c.clusterNameserver, c.xdsLocalAddress, c.xdsLocalPort, gw, c.forwardsPortsToHost(), ipv4, ipv6)
+	if err != nil && (ipv4 != "" || ipv6 != "") {
+		klog.Infof("failed to recreate container %s with addresses %q %q, retrying without them: %v", containerName, ipv4, ipv6, err)
+		// The runtime may leave the container created but not started when the address is in use.
+		if container.Exist(containerName) {
+			if delErr := container.Delete(containerName); delErr != nil {
+				return errors.Join(err, delErr)
+			}
+		}
+		err = createGateway(c.clusterName, c.clusterNameserver, c.xdsLocalAddress, c.xdsLocalPort, gw, c.forwardsPortsToHost(), "", "")
+	}
+	if err != nil {
+		return err
+	}
+
+	// TODO fix this hack
+	time.Sleep(250 * time.Millisecond)
+
+	if err := c.configureContainerNetworking(ctx, containerName); err != nil {
+		if delErr := container.Delete(containerName); delErr != nil {
+			klog.Errorf("failed to delete container %s after networking setup failed: %v", containerName, delErr)
+		}
+		return fmt.Errorf("failed to configure networking for new gateway container %s: %w", containerName, err)
+	}
 	return nil
+}
+
+// deleteGatewayContainer removes the container and the tunnels to it, a new
+// container publishes different host ports.
+func (c *Controller) deleteGatewayContainer(containerName string) error {
+	if c.tunnelManager != nil {
+		if err := c.tunnelManager.RemoveTunnels(containerName); err != nil {
+			klog.Errorf("failed to remove tunnels for gateway container %s: %v", containerName, err)
+		}
+	}
+	return container.Delete(containerName)
 }
