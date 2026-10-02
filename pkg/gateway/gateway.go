@@ -93,6 +93,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 	setAcceptedCondition(newGw)
 
 	var xdsErr error
+	var xdsPending bool
 	if meta.IsStatusConditionTrue(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)) {
 		containerName := gatewayName(c.clusterName, namespace, name)
 		klog.Infof("Syncing Gateway %s, container %s", key, containerName)
@@ -126,8 +127,12 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 				})
 		}
 
-		// Apply the desired state to the data plane (Envoy).
-		xdsErr = c.UpdateXDSServer(ctx, containerName, envoyResources)
+		// Apply the desired state to the data plane (Envoy) and check whether
+		// Envoy has confirmed it: the xDS push is asynchronous, so the config
+		// is only programmed once Envoy ACKs it, and a NACK (e.g. for an
+		// invalid regex Envoy rejects at load time) surfaces as an error here
+		// on the resync triggered by the NACK callback.
+		xdsErr, xdsPending = c.applyXDSConfig(ctx, containerName, key, envoyResources)
 
 		// forward traffic from the host on Mac and Windows
 		if c.tunnelManager != nil {
@@ -138,7 +143,7 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 		}
 	}
 
-	setProgrammedCondition(newGw, xdsErr)
+	setProgrammedCondition(newGw, xdsErr, xdsPending)
 
 	if !reflect.DeepEqual(gw.Status, newGw.Status) {
 		_, err := c.gwClient.GatewayV1().Gateways(newGw.Namespace).UpdateStatus(ctx, newGw, metav1.UpdateOptions{})
@@ -752,15 +757,16 @@ func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace
 	klog.Infof("Deleting resources for Gateway: %s/%s", namespace, name)
 	containerName := gatewayName(c.clusterName, namespace, name)
 
-	c.xdsVersion.Add(1)
-	version := fmt.Sprintf("%d", c.xdsVersion.Load())
+	// Stop tracking Envoy's responses for this gateway.
+	c.forgetXDSState(containerName)
 
-	snapshot, err := cachev3.NewSnapshot(version, map[resourcev3.Type][]envoyproxytypes.Resource{
+	emptyResources := map[resourcev3.Type][]envoyproxytypes.Resource{
 		resourcev3.ListenerType: {},
 		resourcev3.RouteType:    {},
 		resourcev3.ClusterType:  {},
 		resourcev3.EndpointType: {},
-	})
+	}
+	snapshot, err := cachev3.NewSnapshot(computeResourcesHash(emptyResources), emptyResources)
 	if err != nil {
 		return fmt.Errorf("failed to create empty snapshot for deleted gateway %s: %w", name, err)
 	}
@@ -873,7 +879,7 @@ func setAcceptedCondition(newGw *gatewayv1.Gateway) {
 
 // setProgrammedCondition sets the Programmed condition for the Gateway.
 // Accepted is expected to already be set on newGw by the time this is called.
-func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
+func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error, xdsPending bool) {
 	switch {
 	case meta.IsStatusConditionFalse(newGw.Status.Conditions, string(gatewayv1.GatewayConditionAccepted)):
 		// A Gateway can never be Programmed=True if Accepted=False.
@@ -885,7 +891,7 @@ func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
 			ObservedGeneration: newGw.Generation,
 		})
 	case xdsErr != nil:
-		// If the Envoy update fails, the Gateway is not programmed.
+		// The Envoy update failed or Envoy rejected (NACKed) the config.
 		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
 			Type:               string(gatewayv1.GatewayConditionProgrammed),
 			Status:             metav1.ConditionFalse,
@@ -893,9 +899,16 @@ func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
 			Message:            fmt.Sprintf("Failed to program envoy config: %s", xdsErr.Error()),
 			ObservedGeneration: newGw.Generation,
 		})
-	default:
-		// If the Envoy update succeeds:
-
+	case xdsPending:
+		// The config was pushed but Envoy has not yet ACKed or NACKed it.
+		meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionUnknown,
+			Reason:             string(gatewayv1.GatewayReasonPending),
+			Message:            "Waiting for Envoy to acknowledge the configuration",
+			ObservedGeneration: newGw.Generation,
+		})
+	default: // Envoy acknowledged the configuration:
 		// Check if all addresses were assigned.
 		totalAddresses := len(newGw.Spec.Addresses)
 		addressAssigned := 0
