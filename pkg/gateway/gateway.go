@@ -147,7 +147,10 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 			return err
 		}
 	}
-	return c.updateRouteStatuses(ctx, httpRouteStatuses, grpcRouteStatuses)
+	if err := c.updateRouteStatuses(ctx, httpRouteStatuses, grpcRouteStatuses); err != nil {
+		return err
+	}
+	return c.updateBackendTLSPolicyStatuses(ctx, newGw)
 }
 
 // Main State Calculation Function
@@ -295,14 +298,23 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					httpRouteStatuses[key] = currentParentStatuses
 
 					// Create the necessary Envoy Cluster resources from the valid backends.
+					invalidTLSClusters := map[string]struct{}{}
 					for _, backendRef := range translation.backendRefs {
-						cluster, err := translateBackendRefToCluster(c.serviceLister, httpRoute.Namespace, backendRef)
+						cluster, err := c.translateBackendRefToCluster(httpRoute.Namespace, backendRef)
+						if isBackendTLSError(err) {
+							name, nameErr := backendRefToClusterName(httpRoute.Namespace, backendRef)
+							if nameErr == nil {
+								invalidTLSClusters[name] = struct{}{}
+							}
+							continue
+						}
 						if err == nil && cluster != nil {
 							if _, exists := envoyClusters[cluster.Name]; !exists {
 								envoyClusters[cluster.Name] = cluster
 							}
 						}
 					}
+					rewriteRoutesForInvalidBackendTLS(translation.routes, invalidTLSClusters)
 
 					// Resources the translated routes reference through their
 					// typed_per_filter_config, such as GEP-1494 authorization servers.
@@ -347,6 +359,13 @@ func (c *Controller) buildEnvoyResourcesForGateway(gateway *gatewayv1.Gateway) (
 					Status:             metav1.ConditionFalse,
 					Reason:             string(gatewayv1.ListenerReasonUnsupportedProtocol),
 					Message:            fmt.Sprintf("Protocol %q is not supported; supported protocols are HTTP and HTTPS.", listener.Protocol),
+					ObservedGeneration: gateway.Generation,
+				})
+				meta.SetStatusCondition(&listenerStatus.Conditions, metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionProgrammed),
+					Status:             metav1.ConditionFalse,
+					Reason:             string(gatewayv1.ListenerReasonInvalid),
+					Message:            fmt.Sprintf("Protocol %q is not supported", listener.Protocol),
 					ObservedGeneration: gateway.Generation,
 				})
 				allListenerStatuses[listener.Name] = listenerStatus
@@ -748,6 +767,36 @@ func translateBackendRefToCluster(serviceLister corev1listers.ServiceLister, def
 	return cluster, nil
 }
 
+// translateBackendRefToCluster builds the Envoy cluster and applies BackendTLSPolicy.
+func (c *Controller) translateBackendRefToCluster(defaultNamespace string, backendRef gatewayv1.BackendRef) (*clusterv3.Cluster, error) {
+	cluster, err := translateBackendRefToCluster(c.serviceLister, defaultNamespace, backendRef)
+	if err != nil {
+		return nil, err
+	}
+
+	ns := backendRefNamespace(defaultNamespace, backendRef.BackendObjectReference)
+	service, err := c.serviceLister.Services(ns).Get(string(backendRef.Name))
+	if err != nil {
+		return cluster, nil
+	}
+
+	portName := servicePortName(service, backendRef)
+	if policy := c.lookupBackendTLSPolicy(ns, string(backendRef.Name), portName); policy != nil {
+		tlsContextAny, err := c.buildUpstreamTLSContext(policy)
+		if err != nil {
+			return nil, err
+		}
+		cluster.TransportSocket = &corev3.TransportSocket{
+			Name: "envoy.transport_sockets.tls",
+			ConfigType: &corev3.TransportSocket_TypedConfig{
+				TypedConfig: tlsContextAny,
+			},
+		}
+	}
+
+	return cluster, nil
+}
+
 func (c *Controller) deleteGatewayResources(ctx context.Context, name, namespace string) error {
 	klog.Infof("Deleting resources for Gateway: %s/%s", namespace, name)
 	containerName := gatewayName(c.clusterName, namespace, name)
@@ -923,16 +972,20 @@ func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
 			return
 		}
 
-		// Check if all individual listeners were programmed.
-		totalListeners := len(newGw.Status.Listeners)
-		listenersProgrammed := 0
+		// Only accepted listeners must be programmed. A mixed Gateway with
+		// unsupported listeners is still Programmed if the valid ones are.
+		acceptedListeners := 0
+		acceptedProgrammed := 0
 		for _, ls := range newGw.Status.Listeners {
+			if meta.IsStatusConditionFalse(ls.Conditions, string(gatewayv1.ListenerConditionAccepted)) {
+				continue
+			}
+			acceptedListeners++
 			if meta.IsStatusConditionTrue(ls.Conditions, string(gatewayv1.ListenerConditionProgrammed)) {
-				listenersProgrammed++
+				acceptedProgrammed++
 			}
 		}
-		if listenersProgrammed == totalListeners {
-			// The Gateway is only fully programmed if all listeners are programmed.
+		if acceptedListeners > 0 && acceptedProgrammed == acceptedListeners {
 			meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
 				Type:               string(gatewayv1.GatewayConditionProgrammed),
 				Status:             metav1.ConditionTrue,
@@ -941,12 +994,11 @@ func setProgrammedCondition(newGw *gatewayv1.Gateway, xdsErr error) {
 				ObservedGeneration: newGw.Generation,
 			})
 		} else {
-			// If any listener failed, the Gateway as a whole is not fully programmed.
 			meta.SetStatusCondition(&newGw.Status.Conditions, metav1.Condition{
 				Type:               string(gatewayv1.GatewayConditionProgrammed),
 				Status:             metav1.ConditionFalse,
 				Reason:             "ListenersNotProgrammed",
-				Message:            fmt.Sprintf("%d out of %d listeners failed to be programmed", totalListeners-listenersProgrammed, totalListeners),
+				Message:            fmt.Sprintf("%d out of %d listeners failed to be programmed", acceptedListeners-acceptedProgrammed, len(newGw.Status.Listeners)),
 				ObservedGeneration: newGw.Generation,
 			})
 		}
