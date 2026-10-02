@@ -1,6 +1,58 @@
 package gateway
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+func TestMissingPublishedPorts(t *testing.T) {
+	gateway := &gatewayv1.Gateway{
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "http-other-host", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+				{Name: "dns", Port: 53, Protocol: gatewayv1.UDPProtocolType},
+			},
+		},
+	}
+	tests := []struct {
+		name     string
+		portmaps map[string]string
+		expected []string
+	}{
+		{
+			name:     "all ports published",
+			portmaps: map[string]string{"80/tcp": "40001", "443/tcp": "40002", "53/udp": "40003", "10000/tcp": "40004"},
+			expected: nil,
+		},
+		{
+			name:     "listener added after creation",
+			portmaps: map[string]string{"80/tcp": "40001", "53/udp": "40003", "10000/tcp": "40004"},
+			expected: []string{"443/tcp"},
+		},
+		{
+			name:     "same port number with a different protocol",
+			portmaps: map[string]string{"80/tcp": "40001", "443/tcp": "40002", "53/tcp": "40003"},
+			expected: []string{"53/udp"},
+		},
+		{
+			name:     "nothing published, listeners on the same port reported once",
+			portmaps: map[string]string{},
+			expected: []string{"443/tcp", "53/udp", "80/tcp"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actual := missingPublishedPorts(gateway, test.portmaps)
+			if !reflect.DeepEqual(actual, test.expected) {
+				t.Errorf("expected %v, got %v", test.expected, actual)
+			}
+		})
+	}
+}
 
 func TestGenerateEnvoyConfigTable(t *testing.T) {
 	tests := []struct {

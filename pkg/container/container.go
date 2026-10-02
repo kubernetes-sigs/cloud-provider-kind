@@ -2,6 +2,7 @@ package container
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,72 @@ import (
 
 // TODO we can do it as in KIND
 var containerRuntime = "docker"
+
+// ErrNotFound is returned by Inspect when the container does not exist.
+var ErrNotFound = errors.New("container not found")
+
+// Info is the subset of the container state used to reconcile it, read in one inspect call.
+type Info struct {
+	// Status is the runtime state: running, restarting, exited, created, paused, ...
+	Status string
+	IPv4   string
+	IPv6   string
+	// Ports maps the published container ports, in port/protocol format, to the host port.
+	Ports map[string]string
+}
+
+// Running reports if the container is up. A restarting container is not running:
+// the runtime is in control and reports no addresses or ports for it.
+func (i *Info) Running() bool {
+	return i.Status == "running"
+}
+
+// Inspect returns a consistent snapshot of the container state.
+// It returns ErrNotFound if the container can not be inspected, the
+// error message differs between runtimes.
+func Inspect(name string) (*Info, error) {
+	cmd := kindexec.Command(containerRuntime, "inspect", name)
+	output, err := kindexec.Output(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrNotFound, name, err)
+	}
+	return parseInspect(output)
+}
+
+func parseInspect(data []byte) (*Info, error) {
+	var containers []struct {
+		State struct {
+			Status string `json:"Status"`
+		} `json:"State"`
+		NetworkSettings struct {
+			Ports    map[string][]portMapping `json:"Ports"`
+			Networks map[string]struct {
+				IPAddress         string `json:"IPAddress"`
+				GlobalIPv6Address string `json:"GlobalIPv6Address"`
+			} `json:"Networks"`
+		} `json:"NetworkSettings"`
+	}
+	if err := json.Unmarshal(data, &containers); err != nil {
+		return nil, fmt.Errorf("failed to parse container details: %w", err)
+	}
+	if len(containers) != 1 {
+		return nil, fmt.Errorf("expected 1 container, got %d", len(containers))
+	}
+	c := containers[0]
+	info := &Info{
+		Status: c.State.Status,
+		Ports:  parsePortMappings(c.NetworkSettings.Ports),
+	}
+	for _, network := range c.NetworkSettings.Networks {
+		if info.IPv4 == "" {
+			info.IPv4 = network.IPAddress
+		}
+		if info.IPv6 == "" {
+			info.IPv6 = network.GlobalIPv6Address
+		}
+	}
+	return info, nil
+}
 
 // dockerIsAvailable checks if docker is available and the daemon is running
 func dockerIsAvailable() bool {
@@ -209,17 +276,22 @@ func PortMaps(name string) (map[string]string, error) {
 		return nil, fmt.Errorf("file should only be one line, got %d lines: %w", len(lines), err)
 	}
 
-	type portMapping struct {
-		HostPort string `json:"HostPort"`
-		HostIP   string `json:"HostIp"`
-	}
-
 	portMappings := make(map[string][]portMapping)
 	err = json.Unmarshal([]byte(lines[0]), &portMappings)
 	if err != nil {
 		return nil, err
 	}
+	return parsePortMappings(portMappings), nil
+}
 
+type portMapping struct {
+	HostPort string `json:"HostPort"`
+	HostIP   string `json:"HostIp"`
+}
+
+// parsePortMappings returns the map of the published TCP and UDP container ports,
+// in port/protocol format, to the host port.
+func parsePortMappings(portMappings map[string][]portMapping) map[string]string {
 	result := map[string]string{}
 	for k, v := range portMappings {
 		protocol := "tcp"
@@ -240,7 +312,7 @@ func PortMaps(name string) (map[string]string, error) {
 			}
 		}
 	}
-	return result, nil
+	return result
 }
 
 func ListByLabel(label string) ([]string, error) {

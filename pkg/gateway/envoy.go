@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/cloud-provider-kind/pkg/config"
 	"sigs.k8s.io/cloud-provider-kind/pkg/constants"
@@ -128,8 +129,34 @@ func gatewaySimpleName(clusterName, namespace, name string) string {
 	return clusterName + "/" + namespace + "/" + name
 }
 
-// createGateway create a docker container with a gateway
-func createGateway(clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool) error {
+// missingPublishedPorts returns the Listener ports, in port/protocol format, that
+// are not published by the container according to its portmaps.
+func missingPublishedPorts(gateway *gatewayv1.Gateway, portmaps map[string]string) []string {
+	missing := sets.New[string]()
+	for _, listener := range gateway.Spec.Listeners {
+		key := fmt.Sprintf("%d/%s", listener.Port, listenerProtocol(listener))
+		if _, ok := portmaps[key]; !ok {
+			missing.Insert(key)
+		}
+	}
+	if missing.Len() == 0 {
+		return nil
+	}
+	return sets.List(missing)
+}
+
+// listenerProtocol returns the transport protocol of the Listener as published by the container.
+func listenerProtocol(listener gatewayv1.Listener) string {
+	if listener.Protocol == gatewayv1.UDPProtocolType {
+		return "udp"
+	}
+	return "tcp"
+}
+
+// createGateway create a docker container with a gateway.
+// keepIPv4 and keepIPv6, if not empty, are assigned to the container for the IP
+// families the Gateway does not request an address for.
+func createGateway(clusterName string, nameserver string, localAddress string, localPort int, gateway *gatewayv1.Gateway, enableTunnel bool, keepIPv4, keepIPv6 string) error {
 	name := gatewayName(clusterName, gateway.Namespace, gateway.Name)
 	simpleName := gatewaySimpleName(clusterName, gateway.Namespace, gateway.Name)
 	envoyConfigData := &configData{
@@ -211,6 +238,12 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 			"--sysctl=net.ipv6.conf.all.disable_ipv6=0",
 			"--sysctl=net.ipv6.conf.all.forwarding=1",
 		}...)
+		if ipv6 == "" && keepIPv6 != "" {
+			args = append(args, "--ip6", keepIPv6)
+		}
+	}
+	if ipv4 == "" && keepIPv4 != "" {
+		args = append(args, "--ip", keepIPv4)
 	}
 
 	if enableTunnel ||
@@ -226,10 +259,7 @@ func createGateway(clusterName string, nameserver string, localAddress string, l
 		// See https://github.com/kubernetes-sigs/cloud-provider-kind/issues/458
 		seen := make(map[string]struct{})
 		for _, listener := range gateway.Spec.Listeners {
-			proto := "tcp"
-			if listener.Protocol == gatewayv1.UDPProtocolType {
-				proto = "udp"
-			}
+			proto := listenerProtocol(listener)
 
 			var publishArg string
 			if listenAddress != "" {
