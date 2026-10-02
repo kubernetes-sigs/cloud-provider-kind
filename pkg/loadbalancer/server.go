@@ -102,9 +102,44 @@ func (s *Server) EnsureLoadBalancer(ctx context.Context, clusterName string, ser
 			}
 		}
 	}
+	// The published ports of a container can not be changed once it is created, so if
+	// the Service gained ports the container has to be recreated to forward them.
+	// Keep the current IPs so the LoadBalancer address does not change.
+	var ipv4, ipv6 string
+	if container.Exist(name) && s.forwardsPortsToHost() {
+		portmaps, err := container.PortMaps(name)
+		if err != nil {
+			return nil, err
+		}
+		if missing := missingPublishedPorts(service, portmaps); len(missing) > 0 {
+			klog.Infof("recreating container %s for loadbalancer, ports %v are not published", name, missing)
+			ipv4, ipv6, err = container.IPs(name)
+			if err != nil {
+				return nil, err
+			}
+			if s.tunnelManager != nil {
+				if err := s.tunnelManager.RemoveTunnels(name); err != nil {
+					klog.ErrorS(err, "error removing tunnels", "container", name)
+				}
+			}
+			if err := container.Delete(name); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if !container.Exist(name) {
 		klog.V(2).Infof("creating container for loadbalancer")
-		err := s.createLoadBalancer(clusterName, service, config.DefaultConfig.ProxyImage)
+		err := s.createLoadBalancer(clusterName, service, config.DefaultConfig.ProxyImage, ipv4, ipv6)
+		if err != nil && (ipv4 != "" || ipv6 != "") {
+			klog.Infof("failed to recreate container %s with addresses %q %q, retrying without them: %v", name, ipv4, ipv6, err)
+			// The runtime may leave the container created but not started when the address is in use.
+			if container.Exist(name) {
+				if delErr := container.Delete(name); delErr != nil {
+					return nil, errors.Join(err, delErr)
+				}
+			}
+			err = s.createLoadBalancer(clusterName, service, config.DefaultConfig.ProxyImage, "", "")
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -185,8 +220,31 @@ func ServiceFromLoadBalancerSimpleName(s string) (clusterName string, service *v
 	return
 }
 
-// createLoadBalancer create a docker container with a loadbalancer
-func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, image string) error {
+// forwardsPortsToHost returns true if the Service ports are published on the host.
+func (s *Server) forwardsPortsToHost() bool {
+	return s.tunnelManager != nil || config.DefaultConfig.LoadBalancerConnectivity == config.Portmap
+}
+
+// missingPublishedPorts returns the TCP and UDP Service ports, in port/protocol
+// format, that are not published by the container according to its portmaps.
+func missingPublishedPorts(service *v1.Service, portmaps map[string]string) []string {
+	var missing []string
+	for _, port := range service.Spec.Ports {
+		if port.Protocol != v1.ProtocolTCP && port.Protocol != v1.ProtocolUDP {
+			continue
+		}
+		key := fmt.Sprintf("%d/%s", port.Port, strings.ToLower(string(port.Protocol)))
+		if _, ok := portmaps[key]; !ok {
+			missing = append(missing, key)
+		}
+	}
+	return missing
+}
+
+// createLoadBalancer create a docker container with a loadbalancer.
+// ipv4 and ipv6, if not empty, are the addresses to assign to the container
+// when the Service does not specify a LoadBalancerIP.
+func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, image string, ipv4, ipv6 string) error {
 	name := loadBalancerName(clusterName, service)
 
 	networkName := constants.FixedNetworkName
@@ -226,8 +284,7 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 		}...)
 	}
 
-	if s.tunnelManager != nil ||
-		config.DefaultConfig.LoadBalancerConnectivity == config.Portmap {
+	if s.forwardsPortsToHost() {
 		// Forward the Service Ports to the host so they are accessible on Mac and Windows.
 		// For single IP-family services, explicitly bind on the matching listen address to avoid
 		// dual-stack host bindings that cause connection resets in environments where IPv6 is
@@ -256,6 +313,13 @@ func (s *Server) createLoadBalancer(clusterName string, service *v1.Service, ima
 
 	if service.Spec.LoadBalancerIP != "" {
 		args = append(args, "--ip", service.Spec.LoadBalancerIP)
+	} else {
+		if ipv4 != "" {
+			args = append(args, "--ip", ipv4)
+		}
+		if ipv6 != "" {
+			args = append(args, "--ip6", ipv6)
+		}
 	}
 
 	args = append(args, image)

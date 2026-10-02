@@ -299,3 +299,108 @@ EOF
     kubectl delete service same-port-1 same-port-2
     kubectl delete deployment same-port
 }
+
+@test "LoadBalancer serves a port added after creation with enable-lb-port-mapping" {
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: port-added
+  labels:
+    app: port-added
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: port-added
+  template:
+    metadata:
+      labels:
+        app: port-added
+    spec:
+      containers:
+      - name: agnhost
+        image: registry.k8s.io/e2e-test-images/agnhost:2.66.1
+        args:
+          - netexec
+          - --http-port=8080
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: port-added
+spec:
+  type: LoadBalancer
+  selector:
+    app: port-added
+  ports:
+  - name: first
+    protocol: TCP
+    port: 7070
+    targetPort: 8080
+EOF
+    kubectl wait --for=condition=ready pods -l app=port-added --timeout=60s
+    POD=$(kubectl get pod -l app=port-added -o jsonpath='{.items[0].metadata.name}')
+    echo "Pod $POD"
+
+    IP=""
+    for i in {1..30}
+    do
+        IP=$(kubectl get services port-added --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        [[ ! -z "$IP" ]] && break || sleep 1
+    done
+    echo "IP: $IP"
+    [[ ! -z "$IP" ]]
+
+    HOSTNAME=""
+    for i in {1..10}
+    do
+        HOSTNAME=$(curl -s --max-time 3 http://${IP}:7070/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via port 7070: $HOSTNAME"
+    [ "$HOSTNAME" = "$POD" ]
+
+    # Add a port to the existing Service, the running LoadBalancer has to forward it too
+    kubectl patch service port-added --type=json \
+        -p='[{"op": "add", "path": "/spec/ports/-", "value": {"name": "second", "protocol": "TCP", "port": 7071, "targetPort": 8080}}]'
+
+    # The LoadBalancer IP is reachable directly on Linux, so also check the port published
+    # on the host, which is what the tunnels and port mapping depend on.
+    HOST_PORT=""
+    for i in {1..30}
+    do
+        CONTAINER=$(docker ps -q --filter "label=io.x-k8s.cloud-provider-kind.loadbalancer.name=${CLUSTER_NAME}/default/port-added")
+        HOST_PORT=$(docker port "$CONTAINER" 7071/tcp 2>/dev/null | head -n 1 | sed 's/.*://' || true)
+        [[ ! -z "$HOST_PORT" ]] && break || sleep 1
+    done
+    echo "Host port for 7071: $HOST_PORT"
+    [[ ! -z "$HOST_PORT" ]]
+
+    HOSTNAME=""
+    for i in {1..30}
+    do
+        HOSTNAME=$(curl -s --max-time 3 http://127.0.0.1:${HOST_PORT}/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via host port $HOST_PORT: $HOSTNAME"
+    [ "$HOSTNAME" = "$POD" ]
+
+    HOSTNAME=""
+    for i in {1..30}
+    do
+        HOSTNAME=$(curl -s --max-time 3 http://${IP}:7071/hostname || true)
+        [[ ! -z "$HOSTNAME" ]] && break || sleep 1
+    done
+    echo "Hostname via port 7071: $HOSTNAME"
+    [ "$HOSTNAME" = "$POD" ]
+
+    NEW_IP=$(kubectl get services port-added --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    echo "IP after adding a port: $NEW_IP"
+    [ "$NEW_IP" = "$IP" ]
+
+    kubectl delete service port-added
+    kubectl delete deployment port-added
+}
