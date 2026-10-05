@@ -191,6 +191,137 @@ EOF
     kubectl delete gateway test-gw-accepted --ignore-not-found
 }
 
+
+@test "Gateway is set to Programmed=False when an HTTPRoute uses an invalid regex (Envoy NACK observed)" {
+    kubectl delete gateway test-gw-bad-regex --ignore-not-found
+    kubectl delete httproute test-route-bad-regex --ignore-not-found
+
+    kubectl apply -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: test-gw-bad-regex
+spec:
+  gatewayClassName: cloud-provider-kind
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: test-route-bad-regex
+spec:
+  parentRefs:
+  - name: test-gw-bad-regex
+  rules:
+  - matches:
+    - path:
+        type: RegularExpression
+        value: "[invalid"
+    backendRefs:
+    - name: some-svc
+      port: 80
+EOF
+
+    wait_for_gateway_condition test-gw-bad-regex Programmed False 60
+
+    run kubectl get gateway test-gw-bad-regex \
+        -o 'jsonpath={.status.conditions[?(@.type=="Accepted")].status}'
+    [ "$output" = "True" ]
+
+    run kubectl get gateway test-gw-bad-regex \
+        -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}'
+    echo "$output"
+    [ "$output" = "False" ]
+
+    kubectl delete httproute test-route-bad-regex --ignore-not-found
+    kubectl delete gateway test-gw-bad-regex --ignore-not-found
+}
+
+apply_rapid_route() {
+    local match_type="$1" match_value="$2"
+    kubectl apply -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: test-route-rapid
+spec:
+  parentRefs:
+  - name: test-gw-rapid
+  rules:
+  - matches:
+    - path:
+        type: $match_type
+        value: "$match_value"
+    backendRefs:
+    - name: some-svc
+      port: 80
+EOF
+}
+
+@test "Gateway Programmed condition converges on the last of rapid successive updates" {
+    kubectl delete gateway test-gw-rapid --ignore-not-found
+    kubectl delete httproute test-route-rapid --ignore-not-found
+
+    kubectl apply -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: test-gw-rapid
+spec:
+  gatewayClassName: cloud-provider-kind
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: Same
+EOF
+
+    for i in 1 2 3; do
+        apply_rapid_route RegularExpression "[invalid-$i"
+        apply_rapid_route PathPrefix "/valid-$i"
+    done
+    apply_rapid_route PathPrefix "/final-valid"
+
+    wait_for_gateway_condition test-gw-rapid Programmed True 120
+
+    sleep 3
+    run kubectl get gateway test-gw-rapid \
+        -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}'
+    [ "$output" = "True" ]
+
+    for i in 1 2 3; do
+        apply_rapid_route PathPrefix "/valid-again-$i"
+        apply_rapid_route RegularExpression "[invalid-again-$i"
+    done
+    apply_rapid_route RegularExpression "[final-invalid"
+
+    wait_for_gateway_condition test-gw-rapid Programmed False 60
+
+    sleep 3
+    run kubectl get gateway test-gw-rapid \
+        -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].status}'
+    [ "$output" = "False" ]
+
+    run kubectl get gateway test-gw-rapid \
+        -o 'jsonpath={.status.conditions[?(@.type=="Programmed")].message}'
+    echo "$output"
+    [[ "$output" == *"Envoy rejected the configuration"* ]]
+
+    apply_rapid_route PathPrefix "/recovered"
+    wait_for_gateway_condition test-gw-rapid Programmed True 60
+
+    kubectl delete httproute test-route-rapid --ignore-not-found
+    kubectl delete gateway test-gw-rapid --ignore-not-found
+}
+
 @test "Gateway routes HTTP traffic to pod" {
     # Apply the Gateway and HTTPRoute manifests
     kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
