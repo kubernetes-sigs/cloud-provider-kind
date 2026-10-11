@@ -43,7 +43,7 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: registry.k8s.io/e2e-test-images/nginx:1.15-4
+        image: registry.k8s.io/e2e-test-images/nginx:1.28.0-2
         ports:
         - containerPort: 80
         - containerPort: 8080
