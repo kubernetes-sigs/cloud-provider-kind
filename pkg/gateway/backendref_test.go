@@ -115,3 +115,29 @@ func TestBackendRefToClusterName(t *testing.T) {
 		})
 	}
 }
+
+func TestBackendRefTargetsService(t *testing.T) {
+	explicitNS := gatewayv1.BackendObjectReference{
+		Name:      "my-svc",
+		Namespace: ptr.To(gatewayv1.Namespace("svc-ns")),
+	}
+	if !backendRefTargetsService(explicitNS, "route-ns", "my-svc", "svc-ns") {
+		t.Error("explicit namespace should match the referenced Service")
+	}
+	if backendRefTargetsService(explicitNS, "route-ns", "my-svc", "route-ns") {
+		t.Error("explicit namespace must not fall back to the route namespace")
+	}
+
+	sameNS := gatewayv1.BackendObjectReference{Name: "my-svc"}
+	if !backendRefTargetsService(sameNS, "default", "my-svc", "default") {
+		t.Error("missing namespace should use the route namespace")
+	}
+
+	wrongKind := gatewayv1.BackendObjectReference{
+		Name: "my-svc",
+		Kind: ptr.To(gatewayv1.Kind("ServiceImport")),
+	}
+	if backendRefTargetsService(wrongKind, "default", "my-svc", "default") {
+		t.Error("non-Service kind should not match")
+	}
+}

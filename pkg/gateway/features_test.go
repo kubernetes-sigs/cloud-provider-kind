@@ -19,6 +19,7 @@ package gateway
 import (
 	"testing"
 
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/pkg/features"
 )
 
@@ -46,6 +47,15 @@ func TestSupportedFeaturesContainsCore(t *testing.T) {
 			t.Errorf("core feature %q is missing from supportedFeatures", name)
 		}
 	}
+}
+
+func TestSupportedFeaturesContainsBackendTLSPolicy(t *testing.T) {
+	for _, f := range supportedFeatures {
+		if f.Name == gatewayv1.FeatureName(features.SupportBackendTLSPolicy) {
+			return
+		}
+	}
+	t.Error("BackendTLSPolicy is missing from supportedFeatures")
 }
 
 func TestBuildSupportedFeaturesSort(t *testing.T) {
