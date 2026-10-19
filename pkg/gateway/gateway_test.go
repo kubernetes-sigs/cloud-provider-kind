@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -114,5 +116,63 @@ func Test_getSupportedKinds(t *testing.T) {
 				t.Errorf("getSupportedKinds() got1 = %v, want %v", got1, tt.want1)
 			}
 		})
+	}
+}
+
+func TestSetProgrammedConditionMixedListeners(t *testing.T) {
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Generation: 1},
+		Status: gatewayv1.GatewayStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(gatewayv1.GatewayConditionAccepted),
+				Status: metav1.ConditionTrue,
+				Reason: string(gatewayv1.GatewayReasonListenersNotValid),
+			}},
+			Listeners: []gatewayv1.ListenerStatus{
+				{
+					Name: "http",
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(gatewayv1.ListenerConditionAccepted),
+							Status: metav1.ConditionTrue,
+							Reason: string(gatewayv1.ListenerReasonAccepted),
+						},
+						{
+							Type:   string(gatewayv1.ListenerConditionProgrammed),
+							Status: metav1.ConditionTrue,
+							Reason: string(gatewayv1.ListenerReasonProgrammed),
+						},
+					},
+				},
+				{
+					Name: "invalid",
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(gatewayv1.ListenerConditionAccepted),
+							Status: metav1.ConditionFalse,
+							Reason: string(gatewayv1.ListenerReasonUnsupportedProtocol),
+						},
+						{
+							Type:   string(gatewayv1.ListenerConditionProgrammed),
+							Status: metav1.ConditionFalse,
+							Reason: string(gatewayv1.ListenerReasonInvalid),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	setProgrammedCondition(gw, nil)
+
+	cond := meta.FindStatusCondition(gw.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
+	if cond == nil {
+		t.Fatal("Programmed condition is missing")
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Fatalf("Programmed status = %s, want True", cond.Status)
+	}
+	if cond.Reason != string(gatewayv1.GatewayReasonProgrammed) {
+		t.Fatalf("Programmed reason = %s, want %s", cond.Reason, gatewayv1.GatewayReasonProgrammed)
 	}
 }
