@@ -13,6 +13,20 @@ wait_for_gateway_condition() {
     return 1
 }
 
+# wait_no_pods returns once no pods match the selector. kubectl delete of a
+# Deployment is background-cascaded, so leftover pods from a previous test can
+# still be terminating when the next test waits on the same labels.
+wait_no_pods() {
+    local selector="$1" i
+    for ((i = 0; i < 60; i++)); do
+        [[ -z $(kubectl get pods -l "$selector" -o name --no-headers 2>/dev/null) ]] && return 0
+        sleep 1
+    done
+    echo "Timeout waiting for pods with $selector to be gone" >&2
+    kubectl get pods -l "$selector" >&2 || true
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 
 @test "Gateway with infrastructure is neither Accepted nor Programmed" {
@@ -192,6 +206,7 @@ EOF
 }
 
 @test "Gateway routes HTTP traffic to pod" {
+    wait_no_pods app=MyApp
     # Apply the Gateway and HTTPRoute manifests
     kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
 
@@ -237,9 +252,11 @@ EOF
 
     # Cleanup: Delete the applied manifests
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+    wait_no_pods app=MyApp
 }
 
 @test "Gateway with multiple HTTP Listeners on Same Port with enable-lb-port-mapping" {
+    wait_no_pods app=MultiListenerApp
     # Reproduces duplicate --publish=80/tcp causing Docker exit status 125.
     kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_http_multi_listener.yaml
 
@@ -272,9 +289,11 @@ EOF
 
     # Cleanup
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_http_multi_listener.yaml
+    wait_no_pods app=MultiListenerApp
 }
 
 @test "Gateway serves a Listener added after creation with enable-lb-port-mapping" {
+    wait_no_pods app=MyApp
     kubectl apply -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
     kubectl wait --for=condition=ready pods -l app=MyApp --timeout=60s
     POD=$(kubectl get pod -l app=MyApp -o jsonpath='{.items[0].metadata.name}')
@@ -336,4 +355,5 @@ EOF
     [ "$NEW_IP" = "$IP" ]
 
     kubectl delete --ignore-not-found -f "$BATS_TEST_DIRNAME"/../examples/gateway_httproute_simple.yaml
+    wait_no_pods app=MyApp
 }
