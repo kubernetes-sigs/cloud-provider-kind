@@ -311,7 +311,7 @@ func (c *Controller) translateListenerToFilterChain(gateway *gatewayv1.Gateway, 
 		udpProxy := &udpproxy.UdpProxyConfig{
 			StatPrefix: string(lis.Name),
 			RouteSpecifier: &udpproxy.UdpProxyConfig_Cluster{
-				Cluster: "some_udp_cluster", // This needs to be determined from a UDPRoute
+				Cluster: "some_udp_cluster", //nolint:staticcheck // UDPRoute-specific routing is not implemented yet.
 			},
 		}
 		udpProxyAny, err := anypb.New(udpProxy)

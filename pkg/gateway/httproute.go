@@ -380,8 +380,7 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 		case gatewayv1.PathMatchRegularExpression:
 			routeMatch.PathSpecifier = &routev3.RouteMatch_SafeRegex{
 				SafeRegex: &matcherv3.RegexMatcher{
-					EngineType: &matcherv3.RegexMatcher_GoogleRe2{GoogleRe2: &matcherv3.RegexMatcher_GoogleRE2{}},
-					Regex:      pathValue,
+					Regex: pathValue,
 				},
 			}
 		default:
@@ -411,10 +410,13 @@ func translateHTTPRouteMatch(match gatewayv1.HTTPRouteMatch, generation int64) (
 				},
 			}
 		case gatewayv1.HeaderMatchRegularExpression:
-			headerMatcher.HeaderMatchSpecifier = &routev3.HeaderMatcher_SafeRegexMatch{
-				SafeRegexMatch: &matcherv3.RegexMatcher{
-					EngineType: &matcherv3.RegexMatcher_GoogleRe2{GoogleRe2: &matcherv3.RegexMatcher_GoogleRE2{}},
-					Regex:      headerMatch.Value,
+			headerMatcher.HeaderMatchSpecifier = &routev3.HeaderMatcher_StringMatch{
+				StringMatch: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_SafeRegex{
+						SafeRegex: &matcherv3.RegexMatcher{
+							Regex: headerMatch.Value,
+						},
+					},
 				},
 			}
 		default:
