@@ -179,7 +179,7 @@ func TestBuildExtAuthzConfigHTTP(t *testing.T) {
 	if httpService.GetPathPrefix() != "/auth" {
 		t.Errorf("got path prefix %q, want %q", httpService.GetPathPrefix(), "/auth")
 	}
-	reqHeaders := httpService.GetAuthorizationRequest().GetAllowedHeaders().GetPatterns()
+	reqHeaders := got.GetAllowedHeaders().GetPatterns()
 	if len(reqHeaders) != 1 || reqHeaders[0].GetExact() != "X-Request-Id" {
 		t.Errorf("unexpected allowed request headers: %v", reqHeaders)
 	}

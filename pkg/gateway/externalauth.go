@@ -207,9 +207,7 @@ func buildExtAuthzConfig(extAuth *gatewayv1.HTTPExternalAuthFilter, clusterName,
 		if extAuth.HTTPAuthConfig != nil {
 			httpService.PathPrefix = extAuth.HTTPAuthConfig.Path
 			if len(extAuth.HTTPAuthConfig.AllowedRequestHeaders) > 0 {
-				httpService.AuthorizationRequest = &extauthzv3.AuthorizationRequest{
-					AllowedHeaders: exactStringMatchers(extAuth.HTTPAuthConfig.AllowedRequestHeaders),
-				}
+				extAuthz.AllowedHeaders = exactStringMatchers(extAuth.HTTPAuthConfig.AllowedRequestHeaders)
 			}
 			httpService.AuthorizationResponse = &extauthzv3.AuthorizationResponse{
 				AllowedUpstreamHeaders: responseHeaderMatchers(extAuth.HTTPAuthConfig.AllowedResponseHeaders),
@@ -261,8 +259,7 @@ func responseHeaderMatchers(names []string) *matcherv3.ListStringMatcher {
 			Patterns: []*matcherv3.StringMatcher{{
 				MatchPattern: &matcherv3.StringMatcher_SafeRegex{
 					SafeRegex: &matcherv3.RegexMatcher{
-						EngineType: &matcherv3.RegexMatcher_GoogleRe2{GoogleRe2: &matcherv3.RegexMatcher_GoogleRE2{}},
-						Regex:      ".*",
+						Regex: ".*",
 					},
 				},
 			}},
