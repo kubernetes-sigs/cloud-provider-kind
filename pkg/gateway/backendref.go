@@ -47,3 +47,27 @@ func backendRefToClusterName(defaultNamespace string, backendRef gatewayv1.Backe
 
 	return clusterName, nil
 }
+
+func backendRefNamespace(defaultNamespace string, ref gatewayv1.BackendObjectReference) string {
+	if ref.Namespace != nil {
+		return string(*ref.Namespace)
+	}
+	return defaultNamespace
+}
+
+func isServiceBackendRef(ref gatewayv1.BackendObjectReference) bool {
+	if ref.Kind != nil && *ref.Kind != "Service" {
+		return false
+	}
+	if ref.Group != nil && *ref.Group != "" {
+		return false
+	}
+	return true
+}
+
+func backendRefTargetsService(ref gatewayv1.BackendObjectReference, routeNamespace, serviceName, serviceNamespace string) bool {
+	if !isServiceBackendRef(ref) {
+		return false
+	}
+	return string(ref.Name) == serviceName && backendRefNamespace(routeNamespace, ref) == serviceNamespace
+}
