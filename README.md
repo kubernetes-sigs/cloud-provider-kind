@@ -85,7 +85,7 @@ NET_MODE=kind docker compose up -d
 ## Gateway API support
 
 This provider has support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
-It implements the `Gateway` and `HTTPRoute` functionalities and passes the community conformance tests.
+It implements the `Gateway`, `HTTPRoute`, and `GRPCRoute` functionalities and passes the community conformance tests.
 
 The Gateway API controller is enabled by default using the standard channel,
 but you can select the Gateway API release channel (standard/experimental) or just disable the feature completely
@@ -324,6 +324,19 @@ and test that works:
 ```sh
 $ curl 192.168.8.5/hostname
 myapp-7dcffbf547-9kl2d
+```
+
+### Creating a Gateway and a GRPCRoute
+
+GRPCRoute attaches to the same HTTP or HTTPS listeners as HTTPRoute. The backend Service must speak gRPC over HTTP/2.
+
+See [Creating a Gateway and a GRPCRoute](docs/user/example/creating_gateway_grpc_route.md) and `examples/gateway_grpcroute_simple.yaml`.
+
+```sh
+$ grpcurl -plaintext 192.168.8.5:80 grpc.health.v1.Health/Check
+{
+  "status": "SERVING"
+}
 ```
 
 ### Enabling Load Balancer Port Mapping

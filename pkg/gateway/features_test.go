@@ -34,6 +34,7 @@ func TestSupportedFeaturesAreSorted(t *testing.T) {
 func TestSupportedFeaturesContainsCore(t *testing.T) {
 	required := []features.FeatureName{
 		features.SupportGateway,
+		features.SupportGRPCRoute,
 		features.SupportHTTPRoute,
 		features.SupportReferenceGrant,
 	}
