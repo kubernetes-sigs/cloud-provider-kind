@@ -85,7 +85,11 @@ NET_MODE=kind docker compose up -d
 ## Gateway API support
 
 This provider has support for the [Gateway API](https://gateway-api.sigs.k8s.io/).
-It implements the `Gateway` and `HTTPRoute` functionalities and passes the community conformance tests.
+It implements the `Gateway` and `HTTPRoute` functionalities and advertises those
+features on `GatewayClass`. The Gateway HTTP conformance suite runs against this class.
+
+`BackendTLSPolicy` is an Extended feature. See
+[Gateway API support](docs/user/gateway/gatewayapi.md).
 
 The Gateway API controller is enabled by default using the standard channel,
 but you can select the Gateway API release channel (standard/experimental) or just disable the feature completely
@@ -325,6 +329,11 @@ and test that works:
 $ curl 192.168.8.5/hostname
 myapp-7dcffbf547-9kl2d
 ```
+
+To make the Gateway connect to the Service over TLS, apply a `BackendTLSPolicy`
+and a ConfigMap with the CA in `ca.crt`. See
+[`examples/gateway_backendtlspolicy.yaml`](examples/gateway_backendtlspolicy.yaml)
+and [Securing backend TLS with BackendTLSPolicy](docs/user/example/creating_gateway_backendtlspolicy.md).
 
 ### Enabling Load Balancer Port Mapping
 
