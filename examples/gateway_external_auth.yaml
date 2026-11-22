@@ -123,7 +123,7 @@ spec:
     spec:
       containers:
       - name: myapp
-        image: registry.k8s.io/e2e-test-images/agnhost:2.66.1
+        image: registry.k8s.io/e2e-test-images/agnhost:2.67.0
         args:
         - netexec
         - --http-port=80
